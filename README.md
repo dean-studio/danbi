@@ -271,7 +271,7 @@ LLM 자동화는 모두 사용자 명시 트리거만 — 백그라운드 자동
 
 ## 첫 5분
 
-상세 가이드는 [notes/getting-started.md](https://github.com/dean-studio/danbi/blob/main/docs/getting-started.md) 에. 요약:
+상세 가이드는 [docs/MCP_GUIDE.md](docs/MCP_GUIDE.md) 에. 요약:
 
 1. 첫 프로젝트 만들기 (사이드바 +)
 2. 사이드바에서 프로젝트 우클릭 → "Claude Code 설치 명령 복사"
@@ -301,10 +301,10 @@ LLM 자동화는 모두 사용자 명시 트리거만 — 백그라운드 자동
 
 ## 문서
 
-- [getting-started](docs/getting-started.md) — 5분 입문
-- [ai-integration](docs/ai-integration.md) — Gemini / Bedrock 설정
-- [troubleshooting](docs/troubleshooting.md) — 자주 보는 에러
-- [comparison](docs/comparison-obsidian-raycast.md) — 옵시디언 / Raycast 와 어떻게 다른가
+- [INTRO.md](docs/INTRO.md) — 단비란 무엇인가, 왜 만들었나
+- [MCP_GUIDE.md](docs/MCP_GUIDE.md) — Claude Code · Cursor 연결, 도구 목록, 실전 워크플로
+- [REST_API.md](docs/REST_API.md) — vault 에 직접 쓰는 HTTP API (옵시디언 Local REST API 호환 패턴)
+- [CHANGELOG.md](CHANGELOG.md) — 버전별 변경 이력
 
 ## 빌드 (개발자)
 
@@ -316,8 +316,6 @@ pnpm tauri dev
 # DMG 빌드 (Apple Developer 인증서 필요)
 pnpm bundle
 ```
-
-자세한 출시 절차는 [release-checklist](docs/release-checklist.md) 참조.
 
 ## 라이선스
 
