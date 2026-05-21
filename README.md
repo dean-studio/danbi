@@ -3,10 +3,8 @@
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="src/assets/danbi-wordmark-dark.png">
-    <img src="src/assets/danbi-wordmark-light.png" alt="Danbi" width="220">
-  </picture>
+  <img src="src/assets/danbi-wordmark-dark.png#gh-dark-mode-only" alt="Danbi" width="220">
+  <img src="src/assets/danbi-wordmark-light.png#gh-light-mode-only" alt="Danbi" width="220">
 </p>
 
 <p align="center">
@@ -23,8 +21,9 @@
 
 ---
 
-## 한 마디로
+![01.png](readme_imgs/01.png)
 
+## 한 마디로
 세 가지 도구가 표면상 비슷해 보이지만 정체성이 다릅니다:
 
 - **옵시디언** — 사용자가 vault 의 주인. 직접 채우고 직접 연결.
