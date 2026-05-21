@@ -67,4 +67,4 @@
   community · Graph Insights · 멀티 provider 6종 · Review 시스템 ·
   벡터 검색 · 크래시 복구 큐
 
-[0.2.0]: https://github.com/<TBD>/danbi/releases/tag/v0.2.0
+[0.2.0]: https://github.com/dean-studio/danbi/releases/tag/v0.2.0

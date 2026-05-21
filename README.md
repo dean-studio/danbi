@@ -15,8 +15,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/deankr/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
-  <a href="https://github.com/deankr/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
+  <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
+  <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
   <img src="https://img.shields.io/badge/version-0.2.0-success" alt="version 0.2.0" />
 </p>
@@ -67,7 +67,7 @@ LLM 자동화는 모두 사용자 명시 트리거만 — 백그라운드 자동
 
 ## 설치
 
-1. [Releases](https://github.com/<TBD>/danbi/releases) 에서 최신 `Danbi_*.dmg` 다운로드 (Apple Silicon)
+1. [Releases](https://github.com/dean-studio/danbi/releases) 에서 최신 `Danbi_*.dmg` 다운로드 (Apple Silicon)
 2. DMG 더블클릭 → `단비.app` 을 Applications 폴더로 드래그
 3. Launchpad 에서 단비 실행 → 4단계 마법사 (Welcome → AI 연동 → Vault → Template)
 
@@ -75,7 +75,7 @@ LLM 자동화는 모두 사용자 명시 트리거만 — 백그라운드 자동
 
 ## 첫 5분
 
-상세 가이드는 [notes/getting-started.md](https://github.com/<TBD>/danbi/blob/main/docs/getting-started.md) 에. 요약:
+상세 가이드는 [notes/getting-started.md](https://github.com/dean-studio/danbi/blob/main/docs/getting-started.md) 에. 요약:
 
 1. 첫 프로젝트 만들기 (사이드바 +)
 2. 사이드바에서 프로젝트 우클릭 → "Claude Code 설치 명령 복사"
