@@ -362,20 +362,6 @@ export function Sidebar({
     persistGroups(next);
   }
 
-  /** 프로젝트가 자기 그룹 안에서 위/아래로 갈 수 있는지. UI 가
-   *  hover 화살표 버튼을 disable 처리할 때 사용. ungrouped 프로젝트는
-   *  순서 저장 모델이 없어 양쪽 false — 화살표 자체를 안 보여준다. */
-  function projectMoveBounds(project: string): { canUp: boolean; canDown: boolean } {
-    const gid = groupOf(project);
-    if (gid === null) return { canUp: false, canDown: false };
-    const g = groups.find((x) => x.id === gid)!;
-    const idx = g.projects.indexOf(project);
-    return {
-      canUp: idx > 0,
-      canDown: idx < g.projects.length - 1,
-    };
-  }
-
   /** Lookup helper: does this project sit inside a group, and if so,
    *  what's its index + the group size? Used by the context menu to
    *  decide whether ↑/↓ items are enabled. */
@@ -863,9 +849,6 @@ export function Sidebar({
                       onDropDomainOnRoot={(payload) =>
                         dispatchDomainDrop(p.name, null, payload)
                       }
-                      moveBounds={projectMoveBounds(p.name)}
-                      onMoveUp={() => moveProjectWithinGroup(p.name, -1)}
-                      onMoveDown={() => moveProjectWithinGroup(p.name, 1)}
                     />
                   );
                 })}
@@ -886,8 +869,6 @@ export function Sidebar({
                 setDragProject={setDragProject}
                 setDropHint={setDropHint}
                 moveProject={moveProject}
-                moveProjectWithinGroup={moveProjectWithinGroup}
-                projectMoveBounds={projectMoveBounds}
                 groupOf={groupOf}
                 renaming={renamingGroupId === g.id}
                 renameDraft={renameDraft}
@@ -1095,9 +1076,6 @@ function ProjectNode({
   onFolderContext,
   onDropDomainOnFolder,
   onDropDomainOnRoot,
-  moveBounds,
-  onMoveUp,
-  onMoveDown,
 }: {
   project: {
     name: string;
@@ -1120,11 +1098,6 @@ function ProjectNode({
   onDomainContext: (e: React.MouseEvent, domain: string) => void;
   onAddDomain: () => void;
   onFolderContext: (e: React.MouseEvent, folder: string) => void;
-  /** Same-group reorder bounds + handlers. When both bounds are false
-   *  the chevrons hide entirely (e.g. ungrouped projects). */
-  moveBounds: { canUp: boolean; canDown: boolean };
-  onMoveUp: () => void;
-  onMoveDown: () => void;
   /** Drop handler for a `.md` file dragged onto a sub-folder row inside
    *  this project. The payload is the verbatim "<project>::<domain>"
    *  string from the dataTransfer. */
@@ -1187,34 +1160,6 @@ function ProjectNode({
         >
           <GripVertical size={10} />
         </span>
-        {(moveBounds.canUp || moveBounds.canDown) && (
-          <div className="flex items-center opacity-0 transition-opacity group-hover:opacity-100">
-            <button
-              type="button"
-              disabled={!moveBounds.canUp}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (moveBounds.canUp) onMoveUp();
-              }}
-              aria-label="위로 이동"
-              className="grid h-5 w-5 place-items-center rounded-sm text-stone transition-colors hover:bg-surface-elevated hover:text-on-dark disabled:opacity-30"
-            >
-              <ArrowUp size={11} />
-            </button>
-            <button
-              type="button"
-              disabled={!moveBounds.canDown}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (moveBounds.canDown) onMoveDown();
-              }}
-              aria-label="아래로 이동"
-              className="grid h-5 w-5 place-items-center rounded-sm text-stone transition-colors hover:bg-surface-elevated hover:text-on-dark disabled:opacity-30"
-            >
-              <ArrowDown size={11} />
-            </button>
-          </div>
-        )}
         <button
           onClick={() => {
             onSelect();
@@ -1339,8 +1284,6 @@ function GroupSection({
   setDragProject,
   setDropHint,
   moveProject,
-  moveProjectWithinGroup,
-  projectMoveBounds,
   groupOf,
   renaming,
   renameDraft,
@@ -1390,10 +1333,6 @@ function GroupSection({
     destGroupId: string | null,
     beforeProject: string | null,
   ) => void;
-  /** Reorder a project up/down within its own group. */
-  moveProjectWithinGroup: (project: string, dir: -1 | 1) => void;
-  /** Bounds for the hover ↑/↓ chevrons inside this group. */
-  projectMoveBounds: (project: string) => { canUp: boolean; canDown: boolean };
   groupOf: (project: string) => string | null;
   renaming: boolean;
   renameDraft: string;
@@ -1605,9 +1544,6 @@ function GroupSection({
                 onDropDomainOnRoot={(payload) =>
                   onDropDomainOnFolder(p.name, null, payload)
                 }
-                moveBounds={projectMoveBounds(p.name)}
-                onMoveUp={() => moveProjectWithinGroup(p.name, -1)}
-                onMoveDown={() => moveProjectWithinGroup(p.name, 1)}
               />
             );
           })}

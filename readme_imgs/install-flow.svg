@@ -1,0 +1,261 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 1310" width="880" height="1310" role="img" aria-label="단비 설치 6단계 — 앱 설치, 프로젝트 생성, Claude 실행, Claude Code 연결 (복사·붙여넣기), Skill 설치 (자동), Claude 재시작 + 동작 확인">
+  <defs>
+    <style>
+      .bg { fill: #0a0b0d; stroke: #1f2024; stroke-width: 1; }
+      .card { fill: #14161a; stroke: #242728; stroke-width: 1; }
+      .card-cta { fill: #181a1f; stroke: #3a3d42; stroke-width: 1.2; }
+      .badge { fill: #ffffff; }
+      .badge-num { fill: #0a0b0d; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 800; font-size: 16px; }
+      .label { fill: #e8eaed; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 700; font-size: 22px; letter-spacing: -0.3px; }
+      .sub { fill: #9aa1ab; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 400; font-size: 14px; letter-spacing: -0.1px; }
+      .sub-cta { fill: #fbbf24; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 600; font-size: 13px; letter-spacing: -0.1px; }
+      .desc { fill: #9aa1ab; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 400; font-size: 14px; letter-spacing: -0.1px; }
+      .desc-em { fill: #e8eaed; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 600; font-size: 14px; }
+      .icon { fill: none; stroke: #d1d5db; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .icon-cta { fill: none; stroke: #fbbf24; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .arrow { fill: none; stroke: #2c2f33; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .title { fill: #e8eaed; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.2px; }
+      .title-mute { fill: #6b7280; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 400; font-size: 14px; }
+      .mock-card { fill: #0f1115; stroke: #1f2024; stroke-width: 1; }
+      .mock-btn { fill: #14161a; stroke: #242728; stroke-width: 1; }
+      .mock-btn-text { fill: #e8eaed; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 500; font-size: 13px; letter-spacing: -0.1px; }
+      .mock-proj { fill: #e8eaed; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 700; font-size: 18px; letter-spacing: -0.3px; }
+      .mock-mute { fill: #6b7280; font-family: -apple-system, BlinkMacSystemFont, 'Inter', system-ui, sans-serif; font-weight: 400; font-size: 11px; }
+      .footer-card { fill: #0f1115; stroke: #242728; stroke-width: 1; }
+      .term { fill: #06070a; stroke: #1f2024; stroke-width: 1; }
+      .term-prompt { fill: #6b7280; font-family: ui-monospace, 'SF Mono', Menlo, Monaco, monospace; font-size: 12px; }
+      .term-cmd { fill: #d1d5db; font-family: ui-monospace, 'SF Mono', Menlo, Monaco, monospace; font-size: 12px; }
+      .term-arg { fill: #fbbf24; font-family: ui-monospace, 'SF Mono', Menlo, Monaco, monospace; font-size: 12px; }
+      .term-str { fill: #a3e635; font-family: ui-monospace, 'SF Mono', Menlo, Monaco, monospace; font-size: 12px; }
+      text { dominant-baseline: middle; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0.5" y="0.5" width="879" height="1309" rx="14"/>
+
+  <text class="title" x="36" y="40">설치 — 6단계, 1분이면 끝</text>
+  <text class="title-mute" x="844" y="40" text-anchor="end">macOS 11+ · Apple Silicon</text>
+
+  <!-- Step 1: 앱 설치 -->
+  <g transform="translate(36, 70)">
+    <rect class="card" width="808" height="100" rx="12"/>
+    <circle class="badge" cx="46" cy="50" r="18"/>
+    <text class="badge-num" x="46" y="51" text-anchor="middle">1</text>
+    <g class="icon" transform="translate(110, 50) scale(1.3)">
+      <path d="M-13 -8 L0 -14 L13 -8 L13 8 L0 14 L-13 8 Z"/>
+      <path d="M-13 -8 L0 -2 L13 -8"/>
+      <line x1="0" y1="-2" x2="0" y2="14"/>
+    </g>
+    <text class="label" x="170" y="42">앱 설치</text>
+    <text class="sub" x="170" y="68">DMG 다운로드 → 단비.app 을 Applications 폴더로 드래그</text>
+  </g>
+
+  <path class="arrow" d="M440 178 L440 196 M434 190 L440 196 L446 190"/>
+
+  <!-- Step 2: 프로젝트 생성 -->
+  <g transform="translate(36, 204)">
+    <rect class="card" width="808" height="100" rx="12"/>
+    <circle class="badge" cx="46" cy="50" r="18"/>
+    <text class="badge-num" x="46" y="51" text-anchor="middle">2</text>
+    <g class="icon" transform="translate(110, 50) scale(1.3)">
+      <path d="M-14 -8 L-14 11 L14 11 L14 -3 L-3 -3 L-7 -8 Z"/>
+      <line x1="0" y1="0" x2="0" y2="8"/>
+      <line x1="-4" y1="4" x2="4" y2="4"/>
+    </g>
+    <text class="label" x="170" y="42">프로젝트 생성</text>
+    <text class="sub" x="170" y="68">단비 사이드바의 + 버튼 → 새 프로젝트 이름 입력</text>
+  </g>
+
+  <path class="arrow" d="M440 312 L440 330 M434 324 L440 330 L446 324"/>
+
+  <!-- Step 3: Claude 실행 -->
+  <g transform="translate(36, 338)">
+    <rect class="card" width="808" height="100" rx="12"/>
+    <circle class="badge" cx="46" cy="50" r="18"/>
+    <text class="badge-num" x="46" y="51" text-anchor="middle">3</text>
+    <g class="icon" transform="translate(110, 50) scale(1.3)">
+      <rect x="-16" y="-12" width="32" height="24" rx="3"/>
+      <line x1="-16" y1="-5" x2="16" y2="-5"/>
+      <circle cx="-12" cy="-8.5" r="1" fill="#d1d5db" stroke="none"/>
+      <circle cx="-9" cy="-8.5" r="1" fill="#d1d5db" stroke="none"/>
+      <circle cx="-6" cy="-8.5" r="1" fill="#d1d5db" stroke="none"/>
+      <polyline points="-9,1 -5,5 -9,9"/>
+      <line x1="-1" y1="9" x2="9" y2="9"/>
+    </g>
+    <text class="label" x="170" y="42">Claude Code 실행</text>
+    <text class="sub" x="170" y="68">로컬 터미널에서 작업 폴더 들어가 Claude Code 켜기</text>
+  </g>
+
+  <path class="arrow" d="M440 446 L440 464 M434 458 L440 464 L446 458"/>
+
+  <!-- Step 4: Claude Code 연결 — 버튼 클릭 → 명령어 클립보드 복사 → Claude Code 에 붙여넣기 -->
+  <g transform="translate(36, 472)">
+    <rect class="card-cta" width="808" height="280" rx="12"/>
+    <circle class="badge" cx="46" cy="50" r="18"/>
+    <text class="badge-num" x="46" y="51" text-anchor="middle">4</text>
+    <text class="label" x="86" y="42">Claude Code 연결</text>
+    <text class="sub-cta" x="86" y="68">[Claude Code 연결] 버튼 클릭 → 명령어 자동 복사 → Claude Code 에 붙여넣기</text>
+
+    <!-- (a) 단비 앱 프로젝트 헤더 mockup -->
+    <g transform="translate(40, 96)">
+      <rect class="mock-card" width="356" height="80" rx="8"/>
+      <text class="mock-mute" x="16" y="20">단비 앱</text>
+      <rect x="16" y="34" width="32" height="32" rx="6" fill="#1a1d22" stroke="#242728"/>
+      <g class="icon" transform="translate(32, 50) scale(0.6)">
+        <path d="M-7 6 L-7 9 L-4 9 L7 -2 L4 -5 L-7 6 Z"/>
+      </g>
+      <text class="mock-proj" x="58" y="52">상식이</text>
+
+      <!-- Claude Code 연결 (highlighted) -->
+      <rect x="180" y="40" width="158" height="32" rx="8" fill="#1f2329" stroke="#fbbf24" stroke-width="1.4"/>
+      <g class="icon-cta" transform="translate(198, 56) scale(0.55)">
+        <rect x="-10" y="-7" width="20" height="14" rx="2"/>
+        <line x1="-10" y1="-2" x2="10" y2="-2"/>
+        <line x1="-6" y1="3" x2="6" y2="3"/>
+      </g>
+      <text class="mock-btn-text" x="216" y="57" fill="#fbbf24" font-weight="600">Claude Code 연결</text>
+    </g>
+
+    <!-- 화살표 → -->
+    <g class="arrow" transform="translate(420, 136)">
+      <line x1="-12" y1="0" x2="12" y2="0"/>
+      <line x1="6" y1="-6" x2="12" y2="0"/>
+      <line x1="6" y1="6" x2="12" y2="0"/>
+    </g>
+
+    <!-- (b) 클립보드 카피 -->
+    <g transform="translate(444, 96)">
+      <rect class="mock-card" width="324" height="80" rx="8"/>
+      <text class="mock-mute" x="16" y="20">클립보드에 자동 복사됨</text>
+      <g class="icon-cta" transform="translate(32, 52) scale(0.7)">
+        <rect x="-10" y="-12" width="20" height="22" rx="2"/>
+        <rect x="-6" y="-15" width="12" height="6" rx="1"/>
+      </g>
+      <text class="mock-btn-text" x="56" y="48" fill="#fbbf24">claude mcp add --transport http danbi …</text>
+      <text class="mock-mute" x="56" y="68">한 줄짜리 명령어. 토큰 포함.</text>
+    </g>
+
+    <!-- (c) Claude Code 터미널 붙여넣기 -->
+    <g transform="translate(40, 192)">
+      <rect class="term" width="728" height="74" rx="8"/>
+      <circle cx="14" cy="14" r="4" fill="#27282a"/>
+      <circle cx="28" cy="14" r="4" fill="#27282a"/>
+      <circle cx="42" cy="14" r="4" fill="#27282a"/>
+      <text class="mock-mute" x="58" y="14">Claude Code — paste here</text>
+
+      <text class="term-prompt" x="14" y="42">❯</text>
+      <text x="30" y="42">
+        <tspan class="term-cmd">claude mcp add</tspan>
+        <tspan class="term-arg"> --transport http</tspan>
+        <tspan class="term-cmd"> danbi</tspan>
+        <tspan class="term-str"> "http://127.0.0.1:47921/mcp/…"</tspan>
+        <tspan class="term-arg"> --header</tspan>
+      </text>
+      <text x="30" y="60">
+        <tspan class="term-str">"Authorization: Bearer iNHNy7t0Ku2…"</tspan>
+        <tspan class="term-cmd"> ▌</tspan>
+      </text>
+    </g>
+  </g>
+
+  <path class="arrow" d="M440 760 L440 778 M434 772 L440 778 L446 772"/>
+
+  <!-- Step 5: Skill 설치 — 버튼 클릭 한 번이면 자동 등록 -->
+  <g transform="translate(36, 786)">
+    <rect class="card-cta" width="808" height="170" rx="12"/>
+    <circle class="badge" cx="46" cy="50" r="18"/>
+    <text class="badge-num" x="46" y="51" text-anchor="middle">5</text>
+    <text class="label" x="86" y="42">Skill 설치</text>
+    <text class="sub-cta" x="86" y="68">[Skill 설치] 버튼 클릭 한 번 — SKILL.md 가 ~/.claude/skills/ 에 자동 등록</text>
+
+    <!-- (a) 단비 앱 헤더 mockup -->
+    <g transform="translate(40, 96)">
+      <rect class="mock-card" width="356" height="60" rx="8"/>
+      <text class="mock-mute" x="16" y="14">단비 앱</text>
+      <rect x="16" y="22" width="28" height="28" rx="6" fill="#1a1d22" stroke="#242728"/>
+      <g class="icon" transform="translate(30, 36) scale(0.55)">
+        <path d="M-7 6 L-7 9 L-4 9 L7 -2 L4 -5 L-7 6 Z"/>
+      </g>
+      <text class="mock-proj" x="54" y="38">상식이</text>
+
+      <!-- Claude Code 연결 (dim) -->
+      <rect class="mock-btn" x="180" y="28" width="92" height="28" rx="8"/>
+      <g class="icon" transform="translate(196, 42) scale(0.45)">
+        <rect x="-10" y="-7" width="20" height="14" rx="2"/>
+      </g>
+      <text class="mock-btn-text" x="212" y="43">연결됨</text>
+
+      <!-- Skill 설치 (highlighted) -->
+      <rect x="282" y="28" width="60" height="28" rx="8" fill="#1f2329" stroke="#fbbf24" stroke-width="1.4"/>
+      <g class="icon-cta" transform="translate(298, 42) scale(0.45)">
+        <path d="M0 -8 L2 -2 L8 -2 L3 2 L5 8 L0 4 L-5 8 L-3 2 L-8 -2 L-2 -2 Z"/>
+      </g>
+      <text class="mock-btn-text" x="312" y="43" fill="#fbbf24" font-weight="600">설치</text>
+    </g>
+
+    <!-- 화살표 → -->
+    <g class="arrow" transform="translate(420, 126)">
+      <line x1="-12" y1="0" x2="12" y2="0"/>
+      <line x1="6" y1="-6" x2="12" y2="0"/>
+      <line x1="6" y1="6" x2="12" y2="0"/>
+    </g>
+
+    <!-- (b) 자동 등록 — 터미널/붙여넣기 없음 -->
+    <g transform="translate(444, 96)">
+      <rect class="mock-card" width="324" height="60" rx="8"/>
+      <g class="icon-cta" transform="translate(28, 30) scale(0.7)">
+        <polyline points="-7,0 -2,5 7,-5"/>
+      </g>
+      <text class="mock-btn-text" x="50" y="22" fill="#fbbf24">자동 등록 완료</text>
+      <text class="mock-mute" x="50" y="42">~/.claude/skills/danbi-sangshiki/ 에 SKILL.md</text>
+    </g>
+  </g>
+
+  <path class="arrow" d="M440 964 L440 982 M434 976 L440 982 L446 976"/>
+
+  <!-- Step 6: Claude 재시작 + 동작 확인 -->
+  <g transform="translate(36, 990)">
+    <rect class="card" width="808" height="180" rx="12"/>
+    <circle class="badge" cx="46" cy="50" r="18"/>
+    <text class="badge-num" x="46" y="51" text-anchor="middle">6</text>
+    <g class="icon" transform="translate(110, 50) scale(1.3)">
+      <line x1="0" y1="-13" x2="0" y2="-2"/>
+      <path d="M-7 -7 A10 10 0 1 0 7 -7"/>
+    </g>
+    <text class="label" x="170" y="42">Claude Code 재시작 — 완료</text>
+    <text class="sub" x="170" y="68">재시작 후 Claude Code 에 "단비야 안녕?" 이라고 말해 연결 확인.</text>
+
+    <!-- 동작 확인 mockup -->
+    <g transform="translate(86, 92)">
+      <rect class="term" width="688" height="74" rx="8"/>
+      <circle cx="14" cy="14" r="4" fill="#27282a"/>
+      <circle cx="28" cy="14" r="4" fill="#27282a"/>
+      <circle cx="42" cy="14" r="4" fill="#27282a"/>
+      <text class="mock-mute" x="58" y="14">Claude Code</text>
+
+      <text class="term-prompt" x="14" y="42">›</text>
+      <text x="30" y="42">
+        <tspan class="term-cmd">단비야 안녕?</tspan>
+      </text>
+      <text x="14" y="60">
+        <tspan class="term-prompt">✓</tspan>
+        <tspan class="term-str"> 안녕하세요! 단비 vault 에 연결됐어요. 무엇을 찾아드릴까요?</tspan>
+      </text>
+    </g>
+  </g>
+
+  <!-- Footer 설명글 -->
+  <g transform="translate(36, 1186)">
+    <rect class="footer-card" width="808" height="108" rx="12"/>
+    <text class="desc-em" x="24" y="30">4번과 5번은 어떻게 다른가요?</text>
+    <text class="desc" x="24" y="58">
+      <tspan class="desc-em">4번 — MCP 연결</tspan> : 단비 앱이 만든 한 줄짜리 명령어(MCP 주소 + 인증 토큰)를 Claude Code 에 한 번만 붙여넣으면 됨.
+    </text>
+    <text class="desc" x="24" y="80">
+      <tspan class="desc-em">5번 — Skill 설치</tspan> : 버튼 한 번 누르면 SKILL.md 가 ~/.claude/skills/ 에 자동 등록 — Claude Code 가 자동으로 인식.
+    </text>
+    <text class="desc" x="24" y="100">
+      MCP 주소는 프로젝트마다 다르므로 4번은 프로젝트당 한 번. SKILL 도 프로젝트별 자동 격리됨.
+    </text>
+  </g>
+</svg>
