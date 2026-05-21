@@ -1,0 +1,288 @@
+@import "tailwindcss";
+
+/*
+  Danbi design tokens
+  Source of truth: /DESIGN.md (Raycast-inspired)
+  Do not paraphrase tokens — reference them by name.
+*/
+
+@theme {
+  /* ---------- Colors ---------- */
+  /* Brand / primary */
+  --color-primary: #ffffff;
+  --color-primary-pressed: #e8e8e8;
+  --color-on-primary: #000000;
+
+  /* Text ramp — readable on surface (#0d0d0d). Each step keeps WCAG AA
+   * (≥4.5:1) for body sizes; `stone` sits right at the AA boundary for
+   * 11-12px metadata (e.g. timestamps, "X 시간 전"). The old ramp had
+   * `ash` at #6a6b6c and `stone` at #434345, both of which fell below
+   * AA and disappeared in light mode — users couldn't read the tiny
+   * uppercase labels. */
+  --color-ink: #f4f4f6;
+  --color-body: #cdcdcd;
+  --color-charcoal: #d3d3d4;
+  --color-mute: #a1a1aa;
+  --color-ash: #8b8b90;
+  --color-stone: #7a7a7f;
+  --color-on-dark: #ffffff;
+  --color-on-dark-mute: rgba(255, 255, 255, 0.72);
+
+  /* Surface ladder */
+  --color-canvas: #07080a;
+  --color-surface: #0d0d0d;
+  --color-surface-elevated: #101111;
+  --color-surface-card: #121212;
+  --color-button-fg: #18191a;
+
+  /* Hairline borders */
+  --color-hairline: #242728;
+  --color-hairline-soft: rgba(255, 255, 255, 0.08);
+  --color-hairline-strong: rgba(255, 255, 255, 0.16);
+
+  /* Accent (reserved — illustrations only) */
+  --color-accent-blue: #57c1ff;
+  --color-accent-blue-soft: rgba(87, 193, 255, 0.15);
+  --color-accent-red: #ff6161;
+  --color-accent-red-soft: rgba(255, 97, 97, 0.15);
+  --color-accent-green: #59d499;
+  --color-accent-green-soft: rgba(89, 212, 153, 0.15);
+  --color-accent-yellow: #ffc533;
+  --color-accent-yellow-soft: rgba(255, 197, 51, 0.15);
+
+  /* Hero & keycap gradients */
+  --color-hero-stripe-start: #ff5757;
+  --color-hero-stripe-end: #a1131a;
+  --color-key-bg-start: #121212;
+  --color-key-bg-end: #0d0d0d;
+
+  /* ---------- Radius ---------- */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 16px;
+
+  /* ---------- Spacing (extends default scale) ---------- */
+  --spacing-section: 96px;
+
+  /* ---------- Fonts ---------- */
+  --font-sans:
+    "Inter", "Inter Fallback", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, sans-serif;
+  --font-mono:
+    "JetBrains Mono", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/*
+  Light-mode palette override.
+  Mirrors the dark surface ladder structure — only the palette values swap.
+  Activated by setting `data-theme="light"` on <html>.
+  Source of truth: /DESIGN.md (colors-light block).
+*/
+html[data-theme="light"] {
+  --color-primary: #0a0a0a;
+  --color-primary-pressed: #18181b;
+  --color-on-primary: #ffffff;
+
+  --color-ink: #0a0a0a;
+  --color-body: #27272a;
+  --color-charcoal: #18181b;
+  /* Mute / ash / stone darkened for WCAG AA on white. The old palette
+   * was a lazy invert of the dark ramp, which made 10-12px labels
+   * disappear against bg-surface (#fafafa). */
+  --color-mute: #52525b;
+  --color-ash: #71717a;
+  --color-stone: #52525b;
+  --color-on-dark: #0a0a0a;
+  --color-on-dark-mute: rgba(10, 10, 11, 0.72);
+
+  --color-canvas: #ffffff;
+  --color-surface: #fafafa;
+  --color-surface-elevated: #f4f4f5;
+  --color-surface-card: #eeeeef;
+  --color-button-fg: #e4e4e7;
+
+  --color-hairline: #e4e4e7;
+  --color-hairline-soft: rgba(10, 10, 11, 0.08);
+  --color-hairline-strong: rgba(10, 10, 11, 0.16);
+
+  --color-accent-blue: #0284c7;
+  --color-accent-blue-soft: rgba(2, 132, 199, 0.12);
+  --color-accent-red: #dc2626;
+  --color-accent-red-soft: rgba(220, 38, 38, 0.12);
+  --color-accent-green: #16a34a;
+  --color-accent-green-soft: rgba(22, 163, 74, 0.12);
+  --color-accent-yellow: #d97706;
+  --color-accent-yellow-soft: rgba(217, 119, 6, 0.12);
+
+  --color-key-bg-start: #fafafa;
+  --color-key-bg-end: #eeeeef;
+}
+
+/* Enable Raycast's signature Inter rendering site-wide */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "calt", "kern", "liga", "ss03";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* DESIGN.md typography tokens — referenced from 129+ components but
+ * were never actually defined as utilities. Caused Tailwind to fall
+ * back to the parent font-size (usually 14px), which is why some areas
+ * looked inconsistent. Definitions follow DESIGN.md exactly. */
+.text-caption-sm {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: 0.4px;
+}
+.text-caption-md {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: 0.2px;
+}
+.text-body-md {
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.55;
+  letter-spacing: 0.1px;
+}
+
+/* Quick Capture runs in its own transparent window — let the OS show through. */
+html[data-window="capture"],
+html[data-window="capture"] body,
+html[data-window="capture"] #root {
+  background: transparent;
+  overflow: hidden;
+}
+
+
+/* BlockNote — Raycast-tinted dark theme overrides */
+.danbi-editor {
+  height: 100%;
+}
+.danbi-editor .bn-container {
+  background: transparent;
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-feature-settings: "calt", "kern", "liga", "ss03";
+}
+.danbi-editor .bn-editor {
+  /* Left padding is generous (72px) so the BlockNote side menu — the
+   * floating "+ ⋮⋮" handle that sits to the LEFT of each block —
+   * lives inside the editor surface instead of bleeding into the
+   * sidebar's resize handle. Right pad stays roomy for legibility. */
+  padding: 20px 32px 120px 72px;
+  background: transparent;
+  font-size: 14px;
+  line-height: 1.6;
+}
+/* Side menu position — pull it back into the padded gutter so it
+ * appears next to the block bullet area, not floating in negative
+ * space. */
+.danbi-editor .bn-side-menu {
+  left: 16px !important;
+}
+.danbi-editor .bn-inline-content {
+  color: var(--color-ink);
+}
+.danbi-editor [data-content-type="heading"][data-level="1"] {
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.25;
+  color: var(--color-ink);
+}
+.danbi-editor [data-content-type="heading"][data-level="2"] {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--color-ink);
+}
+.danbi-editor [data-content-type="heading"][data-level="3"] {
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--color-ink);
+}
+.danbi-editor .bn-block-content p {
+  color: var(--color-body);
+}
+/* Inline code — short snippet inside a paragraph. Uses an accent
+ * tint so it pops against body text without being a full visual
+ * box. */
+.danbi-editor code {
+  font-family: var(--font-mono);
+  background: var(--color-accent-blue-soft);
+  color: var(--color-accent-blue);
+  border-radius: var(--radius-xs);
+  padding: 1px 5px;
+  font-size: 0.92em;
+}
+
+/* Code block — multi-line. Needs a visibly different surface from the
+ * canvas. We use surface-card (one step brighter than surface) plus a
+ * 1px hairline so the block has a clear edge even on dark canvas. */
+.danbi-editor [data-content-type="codeBlock"] {
+  font-family: var(--font-mono);
+  background: var(--color-surface-card);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin: 6px 0;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-body);
+  overflow-x: auto;
+}
+/* Reset the inline-code styling when code lives *inside* a code
+ * block — otherwise we get nested boxes. */
+.danbi-editor [data-content-type="codeBlock"] code {
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  font-size: inherit;
+}
+.danbi-editor blockquote {
+  border-left: 2px solid var(--color-hairline-strong);
+  color: var(--color-on-dark-mute);
+}
+.danbi-editor a {
+  color: var(--color-accent-blue);
+}
+
+/* Subtle custom scrollbar to keep the dark canvas clean */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-hairline);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-hairline-strong);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Indeterminate progress bar — slides left-to-right continuously while
+   a background LLM job is in flight (요약 / purpose 작성 / ghost 스캔).
+   Used by BgJobToast (메인 윈도우 우상단) + BgJobPill (사이드바). */
+@keyframes danbi-bg-progress {
+  0%   { transform: translateX(-110%); }
+  100% { transform: translateX(310%); }
+}
+.danbi-bg-progress-bar {
+  animation: danbi-bg-progress 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}

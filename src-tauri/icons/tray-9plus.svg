@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22" width="22" height="22">
+  <path d="M11 2 C 11 2, 4 11, 4 14.6 C 4 18.13, 7.13 21, 11 21 C 14.87 21, 18 18.13, 18 14.6 C 18 11, 11 2, 11 2 Z" fill="white"/>
+  <circle cx="6.5" cy="15.5" r="6.5" fill="#e0252e"/>
+  <text x="6.5" y="15.5"
+        text-anchor="middle" dominant-baseline="central"
+        font-family="-apple-system, system-ui, sans-serif"
+        font-size="8" font-weight="700" fill="white">9+</text>
+</svg>

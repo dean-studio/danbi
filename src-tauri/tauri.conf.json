@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "단비",
+  "version": "0.2.0",
+  "identifier": "com.danbi.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "단비",
+        "width": 1240,
+        "height": 820,
+        "minWidth": 960,
+        "minHeight": 640,
+        "titleBarStyle": "Transparent",
+        "hiddenTitle": true,
+        "decorations": true,
+        "backgroundColor": "#07080a",
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/Danbi_Vault/**",
+          "$HOME/**/Danbi_Vault/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "dmg",
+    "copyright": "© 2026 Dean Works inc. (https://dean.kr)",
+    "category": "Productivity",
+    "shortDescription": "Danbi — 지능형 위키 관리 에이전트",
+    "longDescription": "단비는 로컬 마크다운 vault 위에서 AI 에이전트가 메모를 프로젝트 지식으로 정리해주는 macOS 앱입니다. API 키는 키체인에만 저장되며, 모든 데이터는 사용자 기기에 머뭅니다.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
+  }
+}

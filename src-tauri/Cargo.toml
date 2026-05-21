@@ -1,0 +1,49 @@
+[package]
+name = "danbi"
+version = "0.2.0"
+description = "Danbi — Intelligent Wiki Management Agent"
+authors = ["Dean Works inc. <hckim@dean.kr>"]
+edition = "2021"
+
+[lib]
+name = "danbi_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "macos-private-api", "image-png"] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "1"
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+dirs = "5"
+keyring = { version = "3", features = ["apple-native"] }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-bedrock = "1"
+aws-sdk-bedrockruntime = "1"
+aws-types = "1"
+aws-credential-types = "1"
+aws-smithy-types = "1"
+base64 = "0.22"
+pdf-extract = "0.9"
+docx-rs = "0.4"
+tantivy = "0.22"
+axum = { version = "0.7", features = ["tokio"] }
+tower-http = { version = "0.5", features = ["cors"] }
+rand = "0.8"
+notify = "8"
+notify-debouncer-full = "0.6"
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+chrono = { version = "0.4", features = ["serde"] }
+filetime = "0.2"
