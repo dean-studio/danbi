@@ -44,7 +44,7 @@
 ## 설치 방법
 ![install-flow.svg](readme_imgs/install-flow.svg)
 
-## 원리 — 친구에게 설명하듯이
+## 원리
 
 ChatGPT · Claude 같은 AI 와 작업해본 적 있다면 이 답답함을 아실 거예요:
 
