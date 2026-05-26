@@ -34,3 +34,4 @@ HANDOFF.md
 .env
 .env.local
 .env.*.local
+release/
