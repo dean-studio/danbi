@@ -2426,6 +2426,19 @@ function AiKindRow({
   );
 }
 
+/** Tauri updater 의 에러 문구를 사용자가 이해할 수 있는 한 줄로 변환.
+ *  대부분 "아직 release 가 안 올라감" / 네트워크 끊김 / 신호 검증 실패
+ *  세 부류라서 패턴 매칭으로 충분. 매칭 안 되면 원문을 짧게 잘라 보여줌. */
+function friendlyUpdateError(raw: string): string {
+  const s = raw.toLowerCase();
+  if (s.includes("could not fetch a valid release json") || s.includes("404"))
+    return "릴리즈가 아직 등록되지 않았어요.";
+  if (s.includes("network") || s.includes("dns") || s.includes("connection"))
+    return "네트워크 연결을 확인해 주세요.";
+  if (s.includes("signature")) return "업데이트 서명 검증에 실패했어요.";
+  return raw.length > 80 ? raw.slice(0, 80) + "…" : raw;
+}
+
 function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
   const updateInfo = useApp((s) => s.updateInfo);
   const [checking, setChecking] = useState(false);
@@ -2515,7 +2528,7 @@ function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
         label="업데이트 확인"
         hint="GitHub Releases 에서 새 버전을 즉시 조회. 자동 체크는 24시간마다 한 번만 호출하므로 강제로 빨리 보고 싶을 때 사용하세요."
       >
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 flex-col items-end gap-1">
           <button
             onClick={onCheck}
             disabled={checking}
@@ -2538,8 +2551,11 @@ function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
             </span>
           )}
           {!checking && updateInfo?.status === "error" && (
-            <span className="truncate text-[11px] text-accent-red">
-              실패: {updateInfo.message}
+            <span
+              className="max-w-[260px] text-right text-[11px] leading-snug text-accent-red"
+              title={updateInfo.message}
+            >
+              {friendlyUpdateError(updateInfo.message)}
             </span>
           )}
         </div>

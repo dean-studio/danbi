@@ -1283,24 +1283,30 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
           <ProjectColorPicker
             value={cfg?.project_colors?.[colorPickerProject] ?? null}
             onSelect={async (key) => {
-              if (!cfg?.vault_path) return;
+              // 색은 closure 안의 cfg snapshot 이 stale 일 수 있어서 (다른
+               // 컴포넌트가 setCfg 한 직후 picker 가 열려 있는 경우) 저장
+               // 직전에 store 의 최신 cfg 를 다시 읽고, 그 위에 우리 patch
+               // 만 얹는다. 큰 cfg 의 다른 필드를 덮어쓰는 사고 방지.
+              const live = useApp.getState().cfg;
+              if (!live?.vault_path) return;
               const next = {
-                ...cfg,
+                ...live,
                 project_colors: {
-                  ...(cfg.project_colors ?? {}),
+                  ...(live.project_colors ?? {}),
                   [colorPickerProject]: key,
                 },
               };
-              await ipc.saveConfig(cfg.vault_path, next);
+              await ipc.saveConfig(live.vault_path, next);
               useApp.getState().setCfg(next);
               setColorPickerProject(null);
             }}
             onClear={async () => {
-              if (!cfg?.vault_path) return;
-              const nextColors = { ...(cfg.project_colors ?? {}) };
+              const live = useApp.getState().cfg;
+              if (!live?.vault_path) return;
+              const nextColors = { ...(live.project_colors ?? {}) };
               delete nextColors[colorPickerProject];
-              const next = { ...cfg, project_colors: nextColors };
-              await ipc.saveConfig(cfg.vault_path, next);
+              const next = { ...live, project_colors: nextColors };
+              await ipc.saveConfig(live.vault_path, next);
               useApp.getState().setCfg(next);
               setColorPickerProject(null);
             }}

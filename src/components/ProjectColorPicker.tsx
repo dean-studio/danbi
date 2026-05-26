@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 
 /** Per-project accent color keys. Stored verbatim in
@@ -33,10 +34,14 @@ const KEY_LABELS: Record<ProjectColorKey, string> = {
   orange: "Orange",
 };
 
-/** Resolve a color key to the dark-mode hex used for the swatch preview.
- *  Light-mode is handled at runtime via the CSS variable system, but for
- *  the picker preview we just paint the dark hex — the difference is
- *  cosmetic and avoids reading computed styles per swatch. */
+/** Resolve a color key to the dark-mode hex used for the swatch preview
+ *  AND for inline style usage across the sidebar. We deliberately bypass
+ *  Tailwind v4's `@theme` var indirection here — v4 tree-shakes theme
+ *  vars that aren't referenced by a utility class, and keys like
+ *  `purple`/`cyan`/`pink`/`orange` aren't used as `bg-accent-*` anywhere,
+ *  so their CSS custom properties get pruned. Inline-style consumers
+ *  receiving `var(--color-accent-purple)` then resolve to nothing.
+ *  Hex strings sidestep that entirely. */
 const SWATCH_HEX: Record<ProjectColorKey, string> = {
   blue: "#57c1ff",
   yellow: "#ffc533",
@@ -48,9 +53,24 @@ const SWATCH_HEX: Record<ProjectColorKey, string> = {
   orange: "#ff9554",
 };
 
-/** Map a stored color key (or null) to the CSS variables we use across
- *  the sidebar. Always returns valid vars — unknown keys collapse to the
- *  default blue accent so a stale config never breaks the UI. */
+/** Soft (alpha-blended) tone used for active row backgrounds. Same hex
+ *  family as SWATCH_HEX but at ~15% alpha so it reads as a tint over the
+ *  dark surface without overwhelming the foreground icon/text. */
+const SWATCH_SOFT: Record<ProjectColorKey, string> = {
+  blue: "rgba(87, 193, 255, 0.15)",
+  yellow: "rgba(255, 197, 51, 0.15)",
+  green: "rgba(89, 212, 153, 0.15)",
+  red: "rgba(255, 97, 97, 0.15)",
+  purple: "rgba(176, 139, 255, 0.15)",
+  cyan: "rgba(94, 211, 224, 0.15)",
+  pink: "rgba(255, 143, 200, 0.15)",
+  orange: "rgba(255, 149, 84, 0.15)",
+};
+
+/** Map a stored color key (or null) to concrete color strings we use
+ *  across the sidebar. Always returns valid colors — unknown keys
+ *  collapse to the default blue accent so a stale config never breaks
+ *  the UI. */
 export function projectColorVars(key: string | null | undefined): {
   fg: string;
   soft: string;
@@ -58,10 +78,7 @@ export function projectColorVars(key: string | null | undefined): {
   const k = (PROJECT_COLOR_KEYS as readonly string[]).includes(key ?? "")
     ? (key as ProjectColorKey)
     : "blue";
-  return {
-    fg: `var(--color-accent-${k})`,
-    soft: `var(--color-accent-${k}-soft)`,
-  };
+  return { fg: SWATCH_HEX[k], soft: SWATCH_SOFT[k] };
 }
 
 export function ProjectColorPicker({
@@ -75,6 +92,14 @@ export function ProjectColorPicker({
   onClear: () => void;
   onClose: () => void;
 }) {
+  // Picker 가 열릴 때 현재 선택된 색 버튼으로 키보드 포커스를 옮긴다.
+  // value 가 null 이면 디폴트 (blue) 로 떨어짐 — picker 가 처음 열린 직후
+  // Tab 한 번이면 바로 다른 색으로 이동할 수 있도록 anchor 가 명확해야.
+  const activeRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    activeRef.current?.focus();
+  }, []);
+
   return (
     <div
       className="flex flex-col gap-3"
@@ -88,11 +113,12 @@ export function ProjectColorPicker({
           return (
             <button
               key={key}
+              ref={active ? activeRef : undefined}
               type="button"
               onClick={() => onSelect(key)}
               title={KEY_LABELS[key]}
               className={cn(
-                "flex h-16 flex-col items-center justify-center gap-1 rounded-md border transition-colors",
+                "flex h-16 flex-col items-center justify-center gap-1 rounded-md border transition-colors focus:outline-none",
                 active
                   ? "border-transparent bg-surface-elevated ring-2 ring-offset-2 ring-offset-surface"
                   : "border-hairline bg-surface-elevated hover:border-hairline-strong",

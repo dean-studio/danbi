@@ -41,7 +41,7 @@
       "endpoints": [
         "https://github.com/dean-studio/danbi/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDUwMzIzM0MyQzkxNzg0MEEKUldRS2hCZkp3ak15VURXZ0V3aWtteXVzTm9PMkZGMHZEMjF3MVJrMVpCY0d6T2JHWS9QYkU1cTcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJFRjY4NjExNTEwQUE1RjMKUldUenBRcFJFWWIydmhyaStsYWVQdTBrM1I4cW9NOTVDYStYOWhIOWVjdTljekFNUTRNWEtUc2gK",
       "windows": {
         "installMode": "passive"
       }
