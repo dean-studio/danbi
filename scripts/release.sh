@@ -32,6 +32,8 @@ DST_TARGZ="$OUT/Danbi.app.tar.gz"
 DST_SIG="$OUT/Danbi.app.tar.gz.sig"
 DST_JSON="$OUT/latest.json"
 
+NOTARIZE_PROFILE="${NOTARIZE_PROFILE:-danbi-notarize}"
+
 if [[ "${1:-}" != "--skip-build" ]]; then
   if [[ ! -f "$KEY_PATH" ]]; then
     echo "✗ signing key not found at $KEY_PATH" >&2
@@ -43,6 +45,41 @@ if [[ "${1:-}" != "--skip-build" ]]; then
   TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_PATH")" \
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
     npx tauri build --bundles app,dmg
+
+  APP_PATH="$BUNDLE/macos/단비.app"
+  DMG_PATH=$(ls $BUNDLE/dmg/*_${VERSION}_aarch64.dmg 2>/dev/null | head -1)
+
+  if ! xcrun notarytool history --keychain-profile "$NOTARIZE_PROFILE" >/dev/null 2>&1; then
+    echo "⚠ notarize profile '$NOTARIZE_PROFILE' not found in keychain — skipping notarization." >&2
+    echo "  set up with: xcrun notarytool store-credentials \"$NOTARIZE_PROFILE\" --apple-id ... --team-id ... --password ..." >&2
+  else
+    echo "→ notarizing .app (Apple servers, may take 1-5 min)"
+    APP_ZIP="$BUNDLE/macos/단비.app.zip"
+    /usr/bin/ditto -c -k --keepParent "$APP_PATH" "$APP_ZIP"
+    xcrun notarytool submit "$APP_ZIP" --keychain-profile "$NOTARIZE_PROFILE" --wait
+    rm -f "$APP_ZIP"
+    echo "→ stapling .app"
+    xcrun stapler staple "$APP_PATH"
+
+    echo "→ re-creating .app.tar.gz from stapled .app + re-signing"
+    TARGZ="$BUNDLE/macos/단비.app.tar.gz"
+    rm -f "$TARGZ" "$TARGZ.sig"
+    /usr/bin/tar -czf "$TARGZ" -C "$BUNDLE/macos" "단비.app"
+    npx tauri signer sign \
+      --private-key-path "$KEY_PATH" \
+      --password "" \
+      "$TARGZ"
+
+    if [[ -n "$DMG_PATH" ]]; then
+      echo "→ notarizing .dmg"
+      xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARIZE_PROFILE" --wait
+      echo "→ stapling .dmg"
+      xcrun stapler staple "$DMG_PATH"
+    fi
+
+    echo "→ verifying Gatekeeper acceptance"
+    spctl -a -vvv -t exec "$APP_PATH" 2>&1 | sed 's/^/    /'
+  fi
 fi
 
 mkdir -p "$OUT"

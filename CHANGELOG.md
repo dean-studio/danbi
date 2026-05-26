@@ -7,6 +7,25 @@
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-05-27
+
+### Fixed
+
+- **Apple notarization 적용** — 0.3.0 부터 자동 업데이트 인프라가 들어왔지만
+  Apple Developer 인증서 + notarytool 단계가 누락돼 있었습니다. 이제
+  `Developer ID Application` 으로 codesign + Apple notarytool 검증 + stapler
+  staple 까지 빌드 파이프라인에 포함됩니다. 다른 Mac 에서 받아도
+  "확인되지 않은 개발자" 경고 없이 바로 열립니다.
+- 자동 업데이트 페이로드 (`.app.tar.gz`) 도 stapled 빌드를 기준으로
+  재패키징/재서명되도록 `scripts/release.sh` 에서 처리.
+
+### Build
+
+- `entitlements.plist` 추가 — hardened runtime 에서 Tauri webview 가
+  정상 동작하도록 JIT/library validation/network 권한 명시.
+- `scripts/release.sh` 가 codesign + notarize + staple + ed25519 재서명을
+  순서대로 자동 수행.
+
 ## [0.3.0] — 2026-05-26
 
 ### Added
