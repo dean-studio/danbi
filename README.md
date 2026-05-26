@@ -15,7 +15,7 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.2.0-success" alt="version 0.2.0" />
+  <img src="https://img.shields.io/badge/version-0.3.0-success" alt="version 0.3.0" />
 </p>
 
 ---

@@ -322,6 +322,13 @@ pub struct DanbiConfig {
     /// 단일 source of truth 로 둔다. 비어있으면 기본 폴더 아이콘.
     #[serde(default)]
     pub project_icons: std::collections::HashMap<String, String>,
+    /// 프로젝트별 강조 색 키. 예: `{"보니_에이전트": "yellow"}`. 사이드바
+    /// 활성 행·프로젝트 헤더·expanded 카드 테두리에 일관 적용된다. 비어있으면
+    /// 기본 accent-blue 톤. 키만 저장하고 hex 매핑은 프론트의 팔레트
+    /// 테이블에서 결정 — 테마 업데이트 시 데이터 마이그레이션 없이 톤만
+    /// 바꿀 수 있다.
+    #[serde(default)]
+    pub project_colors: std::collections::HashMap<String, String>,
     /// 사용자가 온보딩에서 고른 사용 패턴. UI 표시·배너 분기에 쓴다.
     /// "claude_code" / "builtin" / "minimal" / 비어있음(레거시).
     #[serde(default)]

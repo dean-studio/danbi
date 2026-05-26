@@ -26,6 +26,7 @@ import {
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
+import { runUpdateCheck } from "@/lib/updater";
 import appIconUrl from "@/assets/danbi-app-icon.png";
 
 type Section =
@@ -2426,6 +2427,23 @@ function AiKindRow({
 }
 
 function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
+  const updateInfo = useApp((s) => s.updateInfo);
+  const [checking, setChecking] = useState(false);
+  const [latestSeen, setLatestSeen] = useState(false);
+  const onCheck = async () => {
+    setChecking(true);
+    setLatestSeen(false);
+    try {
+      await runUpdateCheck(true);
+      // 호출 직후 store 의 updateInfo 가 null 이면 "최신". 이 상태를
+      // 잠깐 띄워주려면 직접 읽어와야 한다 (selector 는 다음 render 에서야
+      // 갱신되므로).
+      const cur = useApp.getState().updateInfo;
+      if (!cur) setLatestSeen(true);
+    } finally {
+      setChecking(false);
+    }
+  };
   return (
     <>
       <div className="mb-6 flex flex-col items-center gap-3 pt-2">
@@ -2438,7 +2456,7 @@ function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
         <div className="text-center">
           <div className="text-[18px] font-medium text-ink">단비 (Danbi)</div>
           <div className="mt-0.5 text-caption-sm text-mute">
-            v0.2 · © 2026 Dean Works inc.
+            v0.3.0 · © 2026 Dean Works inc.
           </div>
         </div>
       </div>
@@ -2490,8 +2508,54 @@ function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
       <SectionTitle title="시스템" />
       <Row label="버전">
         <code className="rounded-sm border border-hairline bg-surface-elevated px-2 py-1 font-mono text-[11px] text-on-dark-mute">
-          0.2
+          0.3.0
         </code>
+      </Row>
+      <Row
+        label="업데이트 확인"
+        hint="GitHub Releases 에서 새 버전을 즉시 조회. 자동 체크는 24시간마다 한 번만 호출하므로 강제로 빨리 보고 싶을 때 사용하세요."
+      >
+        <div className="flex items-center gap-2">
+          <button
+            onClick={onCheck}
+            disabled={checking}
+            className="inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body hover:text-on-dark disabled:opacity-50"
+          >
+            <RefreshCw
+              size={11}
+              className={checking ? "animate-spin" : ""}
+            />
+            {checking ? "확인 중" : "지금 확인"}
+          </button>
+          {!checking && updateInfo?.status === "available" && (
+            <span className="text-[11px] text-accent-blue">
+              v{updateInfo.version} 사용 가능 — footer pill 에서 설치
+            </span>
+          )}
+          {!checking && latestSeen && !updateInfo && (
+            <span className="text-[11px] text-accent-green">
+              최신 버전입니다.
+            </span>
+          )}
+          {!checking && updateInfo?.status === "error" && (
+            <span className="truncate text-[11px] text-accent-red">
+              실패: {updateInfo.message}
+            </span>
+          )}
+        </div>
+      </Row>
+      <Row
+        label="GitHub"
+        hint="소스 · 릴리즈 · 이슈 — 의견·버그는 환영합니다."
+      >
+        <a
+          href="https://github.com/dean-studio/danbi"
+          target="_blank"
+          rel="noreferrer"
+          className="rounded-sm border border-hairline bg-surface-elevated px-2 py-1 font-mono text-[11px] text-on-dark-mute hover:border-accent-blue/40 hover:text-on-dark"
+        >
+          github.com/dean-studio/danbi ↗
+        </a>
       </Row>
       <Row label="플랫폼" hint="현재는 macOS 전용입니다.">
         <code className="rounded-sm border border-hairline bg-surface-elevated px-2 py-1 font-mono text-[11px] text-on-dark-mute">

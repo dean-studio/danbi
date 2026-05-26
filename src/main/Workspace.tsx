@@ -10,6 +10,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
 import { Dialog } from "@/components/Dialog";
 import { ProjectIconPicker } from "@/components/ProjectIconPicker";
+import { ProjectColorPicker } from "@/components/ProjectColorPicker";
 import { AboutDialog } from "@/main/AboutDialog";
 import {
   PrimaryButton,
@@ -58,6 +59,9 @@ export function Workspace() {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [iconPickerProject, setIconPickerProject] = useState<string | null>(
+    null,
+  );
+  const [colorPickerProject, setColorPickerProject] = useState<string | null>(
     null,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -826,6 +830,7 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
           onCopyMcpInstall={copyMcpInstall}
           onCopyClaudeMdTemplate={copyClaudeMdTemplate}
           onChangeProjectIcon={(project) => setIconPickerProject(project)}
+          onChangeProjectColor={(project) => setColorPickerProject(project)}
           onMarkProjectRead={async (project) => {
             try {
               await ipc.projectMarkAllRead(project);
@@ -1264,6 +1269,42 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
               setIconPickerProject(null);
             }}
             onClose={() => setIconPickerProject(null)}
+          />
+        )}
+      </Dialog>
+
+      <Dialog
+        open={colorPickerProject !== null}
+        onClose={() => setColorPickerProject(null)}
+        title={`색상 선택 — ${colorPickerProject ?? ""}`}
+        width={420}
+      >
+        {colorPickerProject && (
+          <ProjectColorPicker
+            value={cfg?.project_colors?.[colorPickerProject] ?? null}
+            onSelect={async (key) => {
+              if (!cfg?.vault_path) return;
+              const next = {
+                ...cfg,
+                project_colors: {
+                  ...(cfg.project_colors ?? {}),
+                  [colorPickerProject]: key,
+                },
+              };
+              await ipc.saveConfig(cfg.vault_path, next);
+              useApp.getState().setCfg(next);
+              setColorPickerProject(null);
+            }}
+            onClear={async () => {
+              if (!cfg?.vault_path) return;
+              const nextColors = { ...(cfg.project_colors ?? {}) };
+              delete nextColors[colorPickerProject];
+              const next = { ...cfg, project_colors: nextColors };
+              await ipc.saveConfig(cfg.vault_path, next);
+              useApp.getState().setCfg(next);
+              setColorPickerProject(null);
+            }}
+            onClose={() => setColorPickerProject(null)}
           />
         )}
       </Dialog>

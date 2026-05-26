@@ -5,6 +5,7 @@ import { Wordmark } from "@/components/Wordmark";
 import { ipc } from "@/lib/ipc";
 import { useApp } from "@/state/store";
 import { installTheme, type ThemeChoice } from "@/lib/theme";
+import { runUpdateCheck } from "@/lib/updater";
 
 type AppState = "loading" | "onboarding" | "ready";
 
@@ -86,6 +87,17 @@ export default function App() {
   }, [setCfg]);
 
   useEffect(() => installTheme(themeChoice), [themeChoice]);
+
+  // Vault 가 열린 뒤 3초 정도 idle 한 다음 GitHub Releases 에 업데이트
+  // 체크. 첫 paint·tree load 등이 끝난 시점에서 한 번만 — 24h 스로틀은
+  // runUpdateCheck 내부에서 처리하므로 dev 재시작에서도 부담 없음.
+  useEffect(() => {
+    if (state !== "ready") return;
+    const t = window.setTimeout(() => {
+      void runUpdateCheck(false);
+    }, 3_000);
+    return () => window.clearTimeout(t);
+  }, [state]);
 
   return (
     <div className="h-full w-full bg-canvas">

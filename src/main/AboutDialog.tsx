@@ -56,7 +56,7 @@ export function AboutDialog({
           <div className="text-center">
             <div className="text-[18px] font-medium text-ink">단비 (Danbi)</div>
             <div className="mt-0.5 text-caption-sm text-mute">
-              Version 0.1.0 (alpha)
+              Version 0.3.0
             </div>
           </div>
 
@@ -71,6 +71,14 @@ export function AboutDialog({
           <div className="flex flex-col items-center gap-0.5 text-caption-sm text-stone">
             <span>카파시 Wiki-LLM 방법론 + MCP 내장</span>
             <span>Tauri · React · tantivy · BlockNote</span>
+            <a
+              href="https://github.com/dean-studio/danbi"
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1 text-mute hover:text-on-dark hover:underline"
+            >
+              github.com/dean-studio/danbi ↗
+            </a>
             <span className="mt-1">
               © 2026{" "}
               <a

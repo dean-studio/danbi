@@ -170,6 +170,7 @@ export type DanbiConfig = {
   project_groups?: ProjectGroup[];
   project_last_seen_at?: Record<string, number>;
   project_icons?: Record<string, string>;
+  project_colors?: Record<string, string>;
   preset?: "claude_code" | "builtin" | "minimal" | null;
 };
 
@@ -227,6 +228,10 @@ export type DomainNode = {
   name: string;
   bytes: number;
   modified_ms: number | null;
+  /** First H1/H2 heading sniffed from the file body (sans `#`s, trimmed,
+   *  capped). `daily/**` files skip this server-side to keep large
+   *  journals cheap. Renderer shows it dim next to the filename. */
+  title?: string | null;
 };
 
 export type SubfolderNode = {

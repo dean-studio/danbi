@@ -99,6 +99,11 @@ pub struct DomainNode {
     pub name: String,
     pub bytes: u64,
     pub modified_ms: Option<u128>,
+    /// First H1/H2 heading inside the file (without leading "# "), trimmed
+    /// to a sane length. Skipped for daily-style high-volume folders so a
+    /// large `daily/` tree doesn't cost extra IO on every list_tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -145,12 +150,22 @@ fn is_hidden_folder(name: &str) -> bool {
     name.starts_with('.') || name == ASSETS_DIRNAME
 }
 
+/// `daily/` (and nested under it) is the high-churn append-only journal — every
+/// file is a date stamp, so a heading peek would be noise *and* a perf tax on
+/// vaults with thousands of dailies. We only sniff titles outside that subtree.
+fn folder_skips_title(prefix: Option<&str>) -> bool {
+    let Some(p) = prefix else { return false };
+    let head = p.split('/').next().unwrap_or("");
+    head.eq_ignore_ascii_case("daily")
+}
+
 fn read_md_domains(dir: &Path, prefix: Option<&str>) -> DanbiResult<Vec<DomainNode>> {
     let mut out: Vec<DomainNode> = Vec::new();
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return Ok(out),
     };
+    let want_title = !folder_skips_title(prefix);
     for de in rd {
         let de = de?;
         let path = de.path();
@@ -168,14 +183,85 @@ fn read_md_domains(dir: &Path, prefix: Option<&str>) -> DanbiResult<Vec<DomainNo
             Some(p) => format!("{p}/{fname}"),
             None => fname.to_string(),
         };
+        let title = if want_title {
+            sniff_first_heading(&path)
+        } else {
+            None
+        };
         out.push(DomainNode {
             name,
             bytes: meta.len(),
             modified_ms: mtime_ms(&meta),
+            title,
         });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
+}
+
+/// Read just the start of `path` and return the first non-empty markdown
+/// heading line ("# Title", "## Title"). Returns `None` if no heading is in
+/// the head-buffer or on any IO error — the sidebar treats absence as "no
+/// preview". We cap the read at a few KB so very large notes don't pay a
+/// big IO cost during list_tree.
+fn sniff_first_heading(path: &Path) -> Option<String> {
+    use std::io::Read;
+    const HEAD_BYTES: usize = 4096;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; HEAD_BYTES];
+    let n = f.read(&mut buf).ok()?;
+    buf.truncate(n);
+    let head = std::str::from_utf8(&buf).ok()?;
+    // Skip a YAML front-matter block ("---\n…\n---") if present so titles
+    // declared inside the body still surface.
+    let body = strip_front_matter(head);
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix('#') {
+            // Pop additional `#` chars (ATX h1..h6) then a single space.
+            let after_hashes = rest.trim_start_matches('#');
+            let title = after_hashes.trim();
+            if title.is_empty() {
+                continue;
+            }
+            return Some(truncate_title(title));
+        }
+    }
+    None
+}
+
+fn strip_front_matter(s: &str) -> &str {
+    if !s.starts_with("---") {
+        return s;
+    }
+    let after = &s[3..];
+    // Front-matter must close on its own line; tolerate either \n--- or \r\n---.
+    if let Some(idx) = after.find("\n---") {
+        let close = idx + "\n---".len();
+        let rest = &after[close..];
+        // Skip the rest of the closing line.
+        if let Some(nl) = rest.find('\n') {
+            return &rest[nl + 1..];
+        }
+        return "";
+    }
+    s
+}
+
+fn truncate_title(s: &str) -> String {
+    const MAX_CHARS: usize = 60;
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i >= MAX_CHARS {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
 }
 
 pub fn list_tree(vault: &Path) -> DanbiResult<VaultTree> {

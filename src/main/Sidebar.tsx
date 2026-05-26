@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
+  ArrowUpCircle,
   Bell,
   ChevronDown,
   ChevronRight,
@@ -21,9 +22,11 @@ import {
 } from "lucide-react";
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
 import { ipc, type ProjectGroup, type TriggerKind } from "@/lib/ipc";
+import { applyPendingUpdate, dismissUpdatePill } from "@/lib/updater";
 import { ContextMenu, type MenuItem } from "@/components/ContextMenu";
 import { shortModel } from "@/components/ModelPicker";
 import { projectIconOf } from "@/components/ProjectIconPicker";
+import { projectColorVars } from "@/components/ProjectColorPicker";
 import { Wordmark } from "@/components/Wordmark";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
@@ -39,7 +42,7 @@ type CtxState =
  *  so the renderer doesn't have to special-case the inner level. */
 type SubfolderShape = {
   name: string;
-  domains: { name: string; bytes: number }[];
+  domains: { name: string; bytes: number; title?: string | null }[];
   subfolders: SubfolderShape[];
 };
 
@@ -61,6 +64,7 @@ export function Sidebar({
   onCopyMcpInstall,
   onCopyClaudeMdTemplate,
   onChangeProjectIcon,
+  onChangeProjectColor,
   onMarkProjectRead,
   onAddDomainInFolder,
   onAddFolder,
@@ -95,6 +99,7 @@ export function Sidebar({
   onCopyMcpInstall: (project: string) => void;
   onCopyClaudeMdTemplate: (project: string) => void;
   onChangeProjectIcon: (project: string) => void;
+  onChangeProjectColor: (project: string) => void;
   onMarkProjectRead: (project: string) => void;
   onAddFolder: (project: string) => void;
   /** Create a folder NESTED inside `parentFolder` (e.g. parent="daily"
@@ -453,6 +458,21 @@ export function Sidebar({
     }
   };
 
+  /** Open Finder with the given path selected. For files this highlights
+   *  the file inside its parent folder; for folders it opens the folder
+   *  itself. Falls back silently if the vault root isn't ready or the
+   *  plugin call fails (sandbox / unsupported platform). */
+  const revealInFinder = async (segments: string[]) => {
+    if (!vaultRoot) return;
+    const path = [vaultRoot, "Projects", ...segments].join("/");
+    try {
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      await revealItemInDir(path);
+    } catch {
+      /* opener plugin unavailable — ignore */
+    }
+  };
+
   const projectMenu = (project: string): MenuItem[] => {
     // 같은 그룹 안에서 위/아래 이동. 그룹 밖이면 (ungrouped) 표시 안 함.
     const pos = projectGroupPosition(project);
@@ -484,6 +504,7 @@ export function Sidebar({
     },
     { label: "이름 바꾸기", onClick: () => onRenameProject(project) },
     { label: "아이콘 변경…", onClick: () => onChangeProjectIcon(project) },
+    { label: "색상 변경…", onClick: () => onChangeProjectColor(project) },
     { label: "모두 읽음으로 표시", onClick: () => onMarkProjectRead(project) },
     { kind: "divider" },
     {
@@ -493,6 +514,10 @@ export function Sidebar({
     {
       label: "경로 복사 (vault 기준)",
       onClick: () => copyRelativePath([project]),
+    },
+    {
+      label: "Finder에서 보기",
+      onClick: () => revealInFinder([project]),
     },
     { kind: "divider" },
     {
@@ -560,6 +585,10 @@ export function Sidebar({
         label: "경로 복사 (vault 기준)",
         onClick: () => copyRelativePath([project, domain]),
       },
+      {
+        label: "Finder에서 보기",
+        onClick: () => revealInFinder([project, domain]),
+      },
       { kind: "divider" },
       ...moveTargets,
       {
@@ -598,6 +627,10 @@ export function Sidebar({
     items.push({
       label: "경로 복사 (vault 기준)",
       onClick: () => copyRelativePath([project, folder]),
+    });
+    items.push({
+      label: "Finder에서 보기",
+      onClick: () => revealInFinder([project, folder]),
     });
     items.push({ kind: "divider" });
     items.push({
@@ -1044,11 +1077,25 @@ function DropZone({
 }
 
 /** "N" pill next to a project name, indicating new commits since the
- *  last time the user opened it. Hidden when count is 0. */
-function UpdateBadge({ count }: { count: number }) {
+ *  last time the user opened it. Hidden when count is 0. When the project
+ *  has a custom accent color, paint the badge with that color too so the
+ *  whole row reads as one identity. */
+function UpdateBadge({
+  count,
+  colorFg,
+}: {
+  count: number;
+  colorFg?: string | null;
+}) {
   if (!count) return null;
   return (
-    <span className="ml-1 grid h-4 min-w-[16px] place-items-center rounded-full bg-accent-blue px-1 text-[10px] font-medium leading-none text-on-primary">
+    <span
+      className={cn(
+        "ml-1 grid h-4 min-w-[16px] place-items-center rounded-full px-1 text-[10px] font-medium leading-none text-on-primary",
+        colorFg ? null : "bg-accent-blue",
+      )}
+      style={colorFg ? { backgroundColor: colorFg } : undefined}
+    >
       {count > 9 ? "9+" : count}
     </span>
   );
@@ -1079,7 +1126,7 @@ function ProjectNode({
 }: {
   project: {
     name: string;
-    domains: { name: string; bytes: number }[];
+    domains: { name: string; bytes: number; title?: string | null }[];
     subfolders: SubfolderShape[];
   };
   expanded: boolean;
@@ -1110,6 +1157,11 @@ function ProjectNode({
 }) {
   const projectActive =
     selection.project === project.name && !selection.domain;
+  const colorKey = useApp(
+    (s) => s.cfg?.project_colors?.[project.name] ?? null,
+  );
+  const colorVars = projectColorVars(colorKey);
+  const hasCustomColor = !!colorKey;
   return (
     <div
       className={cn(
@@ -1119,6 +1171,11 @@ function ProjectNode({
         // Helps a lot in long sidebars where multiple projects live.
         expanded && "bg-surface-elevated/60 py-1",
       )}
+      style={
+        expanded && hasCustomColor
+          ? { boxShadow: `inset 2px 0 0 0 ${colorVars.fg}` }
+          : undefined
+      }
     >
       {/* Drag lives on just the header row so expanded domains don't get
        *  dragged accidentally. dragover/drop on the header row insert
@@ -1172,27 +1229,46 @@ function ProjectNode({
           className={cn(
             "flex flex-1 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[14px] transition-colors",
             projectActive
-              ? "bg-accent-blue-soft text-accent-blue"
+              ? hasCustomColor
+                ? null
+                : "bg-accent-blue-soft text-accent-blue"
               : expanded
                 ? "font-medium text-on-dark"
                 : "text-body hover:bg-surface-elevated hover:text-on-dark",
             isDragging && "opacity-50",
           )}
+          style={
+            projectActive && hasCustomColor
+              ? { backgroundColor: colorVars.soft, color: colorVars.fg }
+              : undefined
+          }
         >
           {expanded ? (
             <ChevronDown
               size={13}
               className={cn(
                 "shrink-0",
-                projectActive ? "text-accent-blue" : "text-on-dark",
+                projectActive && !hasCustomColor
+                  ? "text-accent-blue"
+                  : !projectActive
+                    ? "text-on-dark"
+                    : null,
               )}
+              style={
+                projectActive && hasCustomColor
+                  ? { color: colorVars.fg }
+                  : undefined
+              }
             />
           ) : (
             <ChevronRight size={13} className="shrink-0 text-mute" />
           )}
           <ProjectIcon project={project.name} />
           <span className="flex-1 truncate">{project.name}</span>
-          <UpdateBadge count={updates} />
+          <UpdateBadge
+            count={updates}
+            colorFg={hasCustomColor ? colorVars.fg : null}
+          />
         </button>
       </div>
 
@@ -1229,6 +1305,7 @@ function ProjectNode({
                 key={d.name}
                 projectName={project.name}
                 domain={d.name}
+                title={d.title}
                 active={active}
                 onSelect={() => onSelectDomain(d.name)}
                 onContextMenu={(e) => {
@@ -1315,7 +1392,7 @@ function GroupSection({
   tree: {
     projects: {
       name: string;
-      domains: { name: string; bytes: number }[];
+      domains: { name: string; bytes: number; title?: string | null }[];
       subfolders: SubfolderShape[];
     }[];
   };
@@ -1623,6 +1700,14 @@ function SubfolderRow({
     return activeDomain.startsWith(`${subfolder.name}/`);
   })();
 
+  // 프로젝트 고유 색이 설정되어 있으면 폴더 아이콘·chevron·active 톤
+  // 모두 그 색으로 통일. 미설정 프로젝트는 기존 blue 그대로.
+  const colorKey = useApp(
+    (s) => s.cfg?.project_colors?.[project] ?? null,
+  );
+  const colorVars = projectColorVars(colorKey);
+  const hasCustomColor = !!colorKey;
+
   return (
     <div
       className="mt-0.5"
@@ -1652,28 +1737,54 @@ function SubfolderRow({
           // 현재 선택된 도메인이 이 폴더 (또는 nested) 안에 있으면 폴더
           // 자체도 활성 톤으로 — 사용자가 어느 컨텍스트에 있는지 트리에서
           // 잃지 않도록.
-          containsActive
+          containsActive && !hasCustomColor
             ? "bg-accent-blue-soft/40 font-medium text-on-dark"
-            : "text-body hover:bg-surface-elevated hover:text-on-dark",
-          dragOver &&
+            : containsActive
+              ? "font-medium text-on-dark"
+              : "text-body hover:bg-surface-elevated hover:text-on-dark",
+          dragOver && !hasCustomColor &&
             "bg-accent-blue-soft/40 outline outline-1 outline-accent-blue/50",
         )}
+        style={(() => {
+          if (containsActive && hasCustomColor) {
+            return { backgroundColor: colorVars.soft };
+          }
+          if (dragOver && hasCustomColor) {
+            return {
+              backgroundColor: colorVars.soft,
+              outline: `1px solid ${colorVars.fg}`,
+            };
+          }
+          return undefined;
+        })()}
       >
         {open ? (
           <ChevronDown
             size={13}
             className={cn(
               "shrink-0",
-              containsActive ? "text-accent-blue" : "text-mute",
+              containsActive && !hasCustomColor ? "text-accent-blue" : null,
+              !containsActive ? "text-mute" : null,
             )}
+            style={
+              containsActive && hasCustomColor
+                ? { color: colorVars.fg }
+                : undefined
+            }
           />
         ) : (
           <ChevronRight
             size={13}
             className={cn(
               "shrink-0",
-              containsActive ? "text-accent-blue" : "text-mute",
+              containsActive && !hasCustomColor ? "text-accent-blue" : null,
+              !containsActive ? "text-mute" : null,
             )}
+            style={
+              containsActive && hasCustomColor
+                ? { color: colorVars.fg }
+                : undefined
+            }
           />
         )}
         {open ? (
@@ -1681,22 +1792,44 @@ function SubfolderRow({
             size={13}
             className={cn(
               "shrink-0",
-              containsActive ? "text-accent-blue" : "text-accent-blue/80",
+              hasCustomColor
+                ? null
+                : containsActive
+                  ? "text-accent-blue"
+                  : "text-accent-blue/80",
             )}
+            style={
+              hasCustomColor
+                ? { color: colorVars.fg, opacity: containsActive ? 1 : 0.8 }
+                : undefined
+            }
           />
         ) : (
           <Folder
             size={13}
             className={cn(
               "shrink-0",
-              containsActive ? "text-accent-blue" : "text-accent-blue/80",
+              hasCustomColor
+                ? null
+                : containsActive
+                  ? "text-accent-blue"
+                  : "text-accent-blue/80",
             )}
+            style={
+              hasCustomColor
+                ? { color: colorVars.fg, opacity: containsActive ? 1 : 0.8 }
+                : undefined
+            }
           />
         )}
         <span className="flex-1 truncate">{label}</span>
         {changeCount > 0 && (
           <span
-            className="grid h-4 min-w-[16px] place-items-center rounded-full bg-accent-blue px-1 text-[10px] font-medium leading-none text-on-primary"
+            className={cn(
+              "grid h-4 min-w-[16px] place-items-center rounded-full px-1 text-[10px] font-medium leading-none text-on-primary",
+              hasCustomColor ? null : "bg-accent-blue",
+            )}
+            style={hasCustomColor ? { backgroundColor: colorVars.fg } : undefined}
             title={`이 폴더에 변경된 파일 ${changeCount}개`}
           >
             {changeCount > 9 ? "9+" : changeCount}
@@ -1738,6 +1871,7 @@ function SubfolderRow({
                 projectName={project}
                 domain={d.name}
                 displayName={display}
+                title={d.title}
                 active={active}
                 onSelect={() => onSelect(d.name)}
                 onContextMenu={(e) => onDomainContext(e, d.name)}
@@ -1758,6 +1892,7 @@ function DomainRow({
   projectName,
   domain,
   displayName,
+  title,
   active,
   onSelect,
   onContextMenu,
@@ -1766,6 +1901,10 @@ function DomainRow({
   domain: string;
   /** Optional override — used by SubfolderRow to strip the folder prefix. */
   displayName?: string;
+  /** First H1/H2 from the file body, dimmed next to the filename so users
+   *  can scan project files by topic without opening each one. Backend
+   *  omits this for daily-style append-only folders. */
+  title?: string | null;
   active: boolean;
   onSelect: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
@@ -1778,6 +1917,11 @@ function DomainRow({
   );
   const change = showSidebarDots ? rawChange : null;
   const clearDomainUpdate = useApp((s) => s.clearDomainUpdate);
+  const colorKey = useApp(
+    (s) => s.cfg?.project_colors?.[projectName] ?? null,
+  );
+  const colorVars = projectColorVars(colorKey);
+  const hasCustomColor = !!colorKey;
   // daily/*.md 인 경우 그 파일에 등장한 trigger kind 들을 미니 chip 으로
   // 노출. ProjectJournalView 캐시에서 곧장 꺼내쓰므로 추가 IPC 없음.
   // selector 는 *반드시* 안정 참조를 반환해야 zustand 가 무한 렌더 안 한다
@@ -1810,33 +1954,75 @@ function DomainRow({
       }}
       onContextMenu={onContextMenu}
       className={cn(
-        "relative flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[13px] transition-colors",
+        "group relative flex w-full items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[13px] transition-colors",
         active
-          ? "bg-accent-blue-soft font-medium text-accent-blue"
+          ? hasCustomColor
+            ? "font-medium"
+            : "bg-accent-blue-soft font-medium text-accent-blue"
           : "text-body hover:bg-surface-elevated hover:text-on-dark",
       )}
-      title={domain}
+      style={
+        active && hasCustomColor
+          ? { backgroundColor: colorVars.soft, color: colorVars.fg }
+          : undefined
+      }
+      title={title ? `${domain} — ${title}` : domain}
     >
       {/* 좌측 가장자리 accent strip — 사이드바 settings nav 의
           active 표시와 같은 패턴. 도메인이 깊이 indent 돼있어도 어느
           파일이 열려있는지 한 눈에 인지 가능. */}
       {active && (
-        <span className="absolute inset-y-1 left-0 w-[2px] rounded-r-full bg-accent-blue" />
+        <span
+          className={cn(
+            "absolute inset-y-1 left-0 w-[2px] rounded-r-full",
+            hasCustomColor ? null : "bg-accent-blue",
+          )}
+          style={hasCustomColor ? { backgroundColor: colorVars.fg } : undefined}
+        />
       )}
       <FileText
         size={12}
         className={cn(
-          "shrink-0",
-          active ? "text-accent-blue" : "text-mute",
+          "shrink-0 self-start",
+          title ? "mt-[3px]" : "",
+          active && !hasCustomColor ? "text-accent-blue" : null,
+          !active ? "text-mute" : null,
         )}
+        style={
+          active && hasCustomColor ? { color: colorVars.fg } : undefined
+        }
       />
-      <span className="flex-1 truncate font-mono">
-        {displayName ?? domain}
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate font-mono">{displayName ?? domain}</span>
+        {title && (
+          <span
+            className={cn(
+              "truncate text-[11px] leading-tight transition-colors",
+              active
+                ? hasCustomColor
+                  ? null
+                  : "text-accent-blue/70"
+                : "text-stone group-hover:text-on-dark-mute",
+            )}
+            style={
+              active && hasCustomColor
+                ? { color: colorVars.fg, opacity: 0.75 }
+                : undefined
+            }
+          >
+            {title}
+          </span>
+        )}
       </span>
       {fileKinds && fileKinds.length > 0 && (
         <DomainKindChips kinds={fileKinds} />
       )}
-      {change && <DomainChangeDot kind={change} />}
+      {change && (
+        <DomainChangeDot
+          kind={change}
+          colorFg={hasCustomColor ? colorVars.fg : null}
+        />
+      )}
     </button>
   );
 }
@@ -1894,16 +2080,33 @@ function ProjectIcon({ project }: { project: string }) {
 }
 
 /** Tiny "new"/"modified" indicator. We use a colored dot rather than
- *  text labels to keep rows compact. Tooltip carries the meaning. */
-function DomainChangeDot({ kind }: { kind: "new" | "modified" }) {
-  const tone =
-    kind === "new"
-      ? "bg-accent-green"
-      : "bg-accent-blue";
+ *  text labels to keep rows compact. Tooltip carries the meaning. The
+ *  "modified" dot picks up the project's custom color when set so it
+ *  matches the rest of that project's identity; "new" always stays green
+ *  because the semantic (newly created file) is universal. */
+function DomainChangeDot({
+  kind,
+  colorFg,
+}: {
+  kind: "new" | "modified";
+  colorFg?: string | null;
+}) {
+  if (kind === "new") {
+    return (
+      <span
+        className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent-green"
+        title="신규"
+      />
+    );
+  }
   return (
     <span
-      className={cn("h-1.5 w-1.5 shrink-0 rounded-full", tone)}
-      title={kind === "new" ? "신규" : "수정됨"}
+      className={cn(
+        "h-1.5 w-1.5 shrink-0 rounded-full",
+        colorFg ? null : "bg-accent-blue",
+      )}
+      style={colorFg ? { backgroundColor: colorFg } : undefined}
+      title="수정됨"
     />
   );
 }
@@ -1943,6 +2146,7 @@ function SidebarFooter({
 
   return (
     <footer className="shrink-0 border-t border-hairline px-2 py-2.5">
+      <UpdatePill />
       <BgJobPill />
       <div className="flex items-center justify-between gap-2">
         <div
@@ -1981,6 +2185,135 @@ function SidebarFooter({
         </div>
       )}
     </footer>
+  );
+}
+
+/** Tauri updater 신호를 footer pill 로 표시.
+ *  - available  : "v{X} 사용 가능" 클릭 → 다운로드 시작
+ *  - downloading: 진행 바 (progress 0..1)
+ *  - ready      : 다운로드 완료 — relaunch 는 applyPendingUpdate 가 이미
+ *                 호출했으므로 사용자가 인지할 짧은 신호만
+ *  - error      : 사용자가 닫을 수 있는 에러 toast (자동 8초 후 사라짐) */
+function UpdatePill() {
+  const info = useApp((s) => s.updateInfo);
+  useEffect(() => {
+    if (!info || info.status !== "error") return;
+    const t = window.setTimeout(() => {
+      const cur = useApp.getState().updateInfo;
+      if (cur && cur.status === "error") dismissUpdatePill();
+    }, 8_000);
+    return () => window.clearTimeout(t);
+  }, [info]);
+
+  if (!info) return null;
+
+  if (info.status === "available") {
+    return (
+      <div className="mb-2 rounded-md border border-accent-blue/40 bg-accent-blue-soft/40 px-2.5 py-2">
+        <div className="flex items-center gap-2">
+          <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-accent-blue text-on-primary">
+            <ArrowUpCircle size={11} />
+          </span>
+          <span className="flex-1 truncate text-[11px] text-accent-blue">
+            v{info.version} 사용 가능
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              void applyPendingUpdate();
+            }}
+            className="text-[10px] text-stone hover:text-on-dark"
+          >
+            설치 →
+          </button>
+        </div>
+        <div className="mt-1 flex items-center gap-2 pl-6 text-[10px] text-stone">
+          <button
+            type="button"
+            onClick={async () => {
+              try {
+                const { openUrl } = await import("@tauri-apps/plugin-opener");
+                await openUrl(
+                  `https://github.com/dean-studio/danbi/releases/tag/v${info.version}`,
+                );
+              } catch (e) {
+                console.error("[danbi] open release notes", e);
+              }
+            }}
+            className="hover:text-on-dark"
+          >
+            업데이트 로그 ↗
+          </button>
+          <span aria-hidden>·</span>
+          <button
+            type="button"
+            onClick={() => dismissUpdatePill()}
+            className="hover:text-on-dark"
+          >
+            나중에
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (info.status === "downloading") {
+    const pct = Math.max(0, Math.min(100, Math.round(info.progress * 100)));
+    return (
+      <div className="mb-2 rounded-md border border-hairline bg-surface-elevated px-2.5 py-2">
+        <div className="flex items-center gap-2 text-[11px]">
+          <span className="grid h-4 w-4 place-items-center rounded-full bg-accent-blue-soft text-[9px] font-bold text-accent-blue">
+            ↓
+          </span>
+          <span className="flex-1 truncate text-body">
+            v{info.version} 다운로드 중
+          </span>
+          <span className="font-mono text-stone">{pct}%</span>
+        </div>
+        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-surface">
+          <div
+            className="h-full bg-accent-blue transition-[width] duration-200 ease-out"
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (info.status === "ready") {
+    return (
+      <div className="mb-2 flex w-full items-center gap-2 rounded-md border border-accent-green/40 bg-accent-green-soft/40 px-2.5 py-2">
+        <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-accent-green text-[9px] font-bold text-on-primary">
+          ✓
+        </span>
+        <span className="flex-1 truncate text-[11px] text-accent-green">
+          v{info.version} 설치 완료 — 재시작 중
+        </span>
+      </div>
+    );
+  }
+
+  // error
+  return (
+    <div className="mb-2 rounded-md border border-accent-red/40 bg-accent-red-soft/40 px-2.5 py-2">
+      <div className="flex items-center gap-2 text-[11px]">
+        <span className="grid h-4 w-4 place-items-center rounded-full bg-accent-red text-[9px] font-bold text-on-primary">
+          !
+        </span>
+        <span className="flex-1 truncate text-accent-red">
+          업데이트 실패
+        </span>
+        <button
+          onClick={() => dismissUpdatePill()}
+          className="text-[10px] text-stone hover:text-on-dark"
+        >
+          닫기
+        </button>
+      </div>
+      <div className="mt-1 truncate font-mono text-[10px] text-mute">
+        {info.message}
+      </div>
+    </div>
   );
 }
 

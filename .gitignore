@@ -29,3 +29,8 @@ HANDOFF.md
 
 # Local dev artifacts
 .DS_Store
+
+# Build/sign secrets — never commit
+.env
+.env.local
+.env.*.local

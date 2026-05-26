@@ -120,7 +120,36 @@ export type AppStore = {
     provider: string;
   } | null;
   setPendingCompose: (v: AppStore["pendingCompose"]) => void;
+
+  /** Tauri updater 가 새 버전을 발견하면 여기에 메타가 들어온다.
+   *  사이드바 footer 의 UpdatePill 이 이걸 보고 "v0.4.0 사용 가능" 을
+   *  띄움. 사용자가 다운로드를 시작하면 status 가 진행되며,
+   *  완료 후 재시작 액션까지 같은 pill 이 안내. */
+  updateInfo: UpdateInfo | null;
+  setUpdateInfo: (v: UpdateInfo | null) => void;
 };
+
+export type UpdateInfo =
+  | {
+      status: "available";
+      version: string;
+      currentVersion: string;
+      notes: string | null;
+    }
+  | {
+      status: "downloading";
+      version: string;
+      progress: number; // 0..1
+    }
+  | {
+      status: "ready";
+      version: string;
+    }
+  | {
+      status: "error";
+      version: string | null;
+      message: string;
+    };
 
 export type AppNotification = {
   id: string;
@@ -303,6 +332,9 @@ export const useApp = create<AppStore>((set) => ({
 
   pendingCompose: null,
   setPendingCompose: (v) => set({ pendingCompose: v }),
+
+  updateInfo: null,
+  setUpdateInfo: (v) => set({ updateInfo: v }),
 
   notifications: [],
   pushNotification: (n) =>
