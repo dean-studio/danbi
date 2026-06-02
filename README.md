@@ -55,7 +55,7 @@
 
 ---
 
-![01.png](readme_imgs/01.png?v=040)
+![Danbi v0.4.0 — MCP 저장 토큰 카드](readme_imgs/home-v040.png)
 
 ## 한 마디로
 세 가지 도구가 표면상 비슷해 보이지만 정체성이 다릅니다:
