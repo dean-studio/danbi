@@ -4,6 +4,7 @@ import {
   ArrowUp,
   ArrowUpCircle,
   Bell,
+  CheckCheck,
   ChevronDown,
   ChevronRight,
   FileText,
@@ -680,27 +681,29 @@ export function Sidebar({
           <Wordmark className="h-5 w-auto shrink-0 transition-opacity group-hover:opacity-90" />
         </button>
         <div className="flex items-center gap-0.5">
+          <Tip text="검색 (⌘K)">
           <button
             onClick={onOpenSearch}
-            title="검색 (⌘K)"
             className="grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
           >
             <SearchIcon size={16} />
           </button>
+          </Tip>
+          <Tip text="그래프 (⌘G)">
           <button
             onClick={onOpenGraph}
-            title="그래프 (⌘G)"
             className="grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
           >
             <Network size={16} />
           </button>
+          </Tip>
           {/* 리뷰 인박스는 ghost scan / compound preview 등 LLM 결과를
               사용자가 승인·거부하는 곳이라, LLM 미연결 상태에선 의미 없음.
               cfg.provider 가 있을 때만 노출. */}
           {cfg?.provider && (
+            <Tip text={`리뷰 인박스${reviewCount > 0 ? ` (${reviewCount})` : ""}`}>
             <button
               onClick={onOpenReviews}
-              title={`리뷰 인박스${reviewCount > 0 ? ` (${reviewCount})` : ""}`}
               className="relative grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
             >
               <Inbox size={16} />
@@ -710,10 +713,11 @@ export function Sidebar({
                 </span>
               )}
             </button>
+            </Tip>
           )}
+          <Tip text="휴지통">
           <button
             onClick={onOpenTrash}
-            title="휴지통"
             className="relative grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
           >
             <Trash2 size={15} />
@@ -725,21 +729,25 @@ export function Sidebar({
               />
             )}
           </button>
+          </Tip>
           <NotificationBell />
+          <MarkAllReadButton onAfter={onRefreshTree} />
+          <Tip text="새로고침">
           <button
             onClick={onRefreshTree}
-            title="새로고침"
             className="grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
           >
             <RefreshCw size={15} />
           </button>
+          </Tip>
+          <Tip text="프로젝트 추가">
           <button
             onClick={onAddProject}
-            title="프로젝트 추가"
             className="grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
           >
             <Plus size={17} />
           </button>
+          </Tip>
         </div>
       </header>
 
@@ -2503,6 +2511,116 @@ function ModelLine({
  *  - 클릭 시 list popover 펼침 (요약 완료 / 에러 / 정보)
  *  - 항목 클릭 → 해당 export HTML 페이지 열기 또는 도메인 이동
  *  - "모두 읽음" / "모두 비우기" footer 액션 */
+/** Lightweight tooltip wrapper. Shows a styled balloon below the
+ *  child after a short hover delay — replaces the OS-native title
+ *  attribute which Tauri webviews on macOS sometimes swallow.
+ *
+ *  Renders the child unchanged via a flex span so existing button
+ *  classes (grid place-items-center, etc.) keep working. The balloon
+ *  is `position: absolute` and `pointer-events: none` so it never
+ *  intercepts clicks. */
+function Tip({
+  text,
+  children,
+}: {
+  text: string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const timer = useRef<number | null>(null);
+
+  function show() {
+    if (timer.current) window.clearTimeout(timer.current);
+    timer.current = window.setTimeout(() => setOpen(true), 350);
+  }
+  function hide() {
+    if (timer.current) {
+      window.clearTimeout(timer.current);
+      timer.current = null;
+    }
+    setOpen(false);
+  }
+  return (
+    <span
+      className="relative inline-flex"
+      onMouseEnter={show}
+      onMouseLeave={hide}
+      onMouseDown={hide}
+    >
+      {children}
+      {open && (
+        <span
+          role="tooltip"
+          className="pointer-events-none absolute left-1/2 top-full z-50 mt-1 -translate-x-1/2 whitespace-nowrap rounded-md border border-hairline bg-surface-card px-2 py-1 text-[11px] text-on-dark shadow-lg"
+        >
+          {text}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** Sidebar header button — mark every project + every domain as read.
+ *  Clears the "N" badges across the whole vault in one click, which is
+ *  faster than right-clicking each project. */
+function MarkAllReadButton({ onAfter }: { onAfter?: () => void }) {
+  const setProjectUpdates = useApp((s) => s.setProjectUpdates);
+  const setDomainUpdates = useApp((s) => s.setDomainUpdates);
+  const projectUpdates = useApp((s) => s.projectUpdates);
+  const domainUpdates = useApp((s) => s.domainUpdates);
+  const showToast = useApp((s) => s.showToast);
+  const [busy, setBusy] = useState(false);
+
+  // Cheap heuristic: hide the button when there's nothing to clear.
+  // We keep the slot to avoid layout shift, but render it disabled
+  // and dimmed so the row icons don't dance.
+  const hasAnything =
+    Object.keys(projectUpdates).length > 0 ||
+    Object.keys(domainUpdates).length > 0;
+
+  async function run() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const stamped = await ipc.vaultMarkAllRead();
+      // Clear local badge state immediately so the UI updates before
+      // the next tree refresh lands. Server is the source of truth on
+      // next refresh anyway.
+      setProjectUpdates({});
+      setDomainUpdates({});
+      showToast(
+        "ok",
+        stamped > 0
+          ? `${stamped.toLocaleString()}개 도메인을 모두 읽음으로 표시했어요.`
+          : "이미 모두 읽음 상태였어요.",
+      );
+    } catch (e) {
+      console.error("[sidebar] mark all read failed", e);
+      showToast("err", "모두 읽음 처리에 실패했어요.");
+    } finally {
+      setBusy(false);
+      onAfter?.();
+    }
+  }
+
+  return (
+    <Tip text={hasAnything ? "모두 읽음으로 표시" : "읽지 않은 항목 없음"}>
+      <button
+        onClick={run}
+        disabled={busy || !hasAnything}
+        className={cn(
+          "grid h-8 w-8 place-items-center rounded-md transition-colors",
+          hasAnything
+            ? "text-mute hover:bg-surface-elevated hover:text-on-dark"
+            : "cursor-default text-stone/40",
+        )}
+      >
+        <CheckCheck size={15} />
+      </button>
+    </Tip>
+  );
+}
+
 function NotificationBell() {
   const list = useApp((s) => s.notifications);
   const markAll = useApp((s) => s.markAllNotificationsRead);

@@ -127,6 +127,13 @@ export type AppStore = {
    *  완료 후 재시작 액션까지 같은 pill 이 안내. */
   updateInfo: UpdateInfo | null;
   setUpdateInfo: (v: UpdateInfo | null) => void;
+
+  /** Lightweight global toast — 어떤 컴포넌트에서든 짧은 성공/실패
+   *  메시지를 띄울 수 있게 하는 store-level 슬롯. Workspace 의
+   *  로컬 toast 시스템과 별개로 동작 — 둘 다 화면 우상단에 동시에
+   *  떠도 된다 (Z-스택 분리). */
+  toast: { tone: "ok" | "err"; text: string; id: number } | null;
+  showToast: (tone: "ok" | "err", text: string) => void;
 };
 
 export type UpdateInfo =
@@ -335,6 +342,18 @@ export const useApp = create<AppStore>((set) => ({
 
   updateInfo: null,
   setUpdateInfo: (v) => set({ updateInfo: v }),
+
+  toast: null,
+  showToast: (tone, text) => {
+    const id = Date.now() + Math.floor(Math.random() * 1000);
+    set({ toast: { tone, text, id } });
+    // Auto-dismiss after 2.4s — same as the Workspace local toast.
+    // We check the id before clearing so a newer toast doesn't get
+    // wiped by an older one's timer.
+    setTimeout(() => {
+      set((s) => (s.toast?.id === id ? { toast: null } : s));
+    }, 2400);
+  },
 
   notifications: [],
   pushNotification: (n) =>

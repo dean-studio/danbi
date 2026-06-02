@@ -233,6 +233,19 @@ fn default_backup_excludes() -> Vec<String> {
 pub struct UsageConfig {
     /// 1 USD = N KRW. UI 에서 정수로 보여주되 내부적으로는 float.
     pub krw_per_usd: f64,
+    /// MCP inbound 이벤트 추적 ON/OFF. v0.4.0 기준 기본 ON.
+    /// 끄면 MCP 핸들러는 record_mcp_inbound 자체를 스킵해 디스크 쓰기 0.
+    #[serde(default = "default_true")]
+    pub mcp_tracking: bool,
+    /// MCP inbound 이벤트 보존 기간 (일). 이 기간 이전 이벤트는
+    /// 매일 자정 sweep 에서 archive 파일로 옮기고 usage.jsonl 에서
+    /// 삭제한다. 0 또는 음수면 retention 비활성 (영구 보존).
+    #[serde(default = "default_retention_days")]
+    pub mcp_retention_days: i64,
+}
+
+fn default_retention_days() -> i64 {
+    365
 }
 
 impl Default for UsageConfig {
@@ -240,6 +253,8 @@ impl Default for UsageConfig {
         // 2026-05 기준 ~1,380 KRW/USD. 분기 업데이트.
         Self {
             krw_per_usd: 1_380.0,
+            mcp_tracking: true,
+            mcp_retention_days: 365,
         }
     }
 }

@@ -1411,6 +1411,60 @@ pub fn project_mark_all_read(project: String) -> DanbiResult<()> {
     Ok(())
 }
 
+/// Mark every project + every domain in the vault as read in one shot.
+/// Used by the sidebar's "모두 읽음" button so the user can dismiss
+/// every "N" badge across all projects without clicking each one.
+#[tauri::command]
+pub fn vault_mark_all_read() -> DanbiResult<usize> {
+    let vault = default_vault_path()?;
+    let mut cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let tree = vault::list_tree(&vault_path)?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let now_secs = chrono::Utc::now().timestamp();
+
+    fn recurse<F: FnMut(&str, Option<u128>)>(
+        subs: &[crate::vault::SubfolderNode],
+        cb: &mut F,
+    ) {
+        for sub in subs {
+            for d in &sub.domains {
+                cb(&d.name, d.modified_ms);
+            }
+            recurse(&sub.subfolders, cb);
+        }
+    }
+
+    let mut stamped = 0usize;
+    for p in &tree.projects {
+        // Stamp every domain — both top-level files and recursively
+        // nested ones — so per-domain "modified" dots clear too.
+        let project = &p.name;
+        for d in &p.domains {
+            let mtime_ms = d.modified_ms.map(|m| m as i64).unwrap_or(0);
+            let stamp = mtime_ms.max(now_ms);
+            cfg.domain_last_seen_at
+                .insert(format!("{}/{}", project, d.name), stamp);
+            stamped += 1;
+        }
+        let mut stamp_one = |domain_name: &str, modified_ms: Option<u128>| {
+            let mtime_ms = modified_ms.map(|m| m as i64).unwrap_or(0);
+            let stamp = mtime_ms.max(now_ms);
+            cfg.domain_last_seen_at
+                .insert(format!("{}/{}", project, domain_name), stamp);
+            stamped += 1;
+        };
+        recurse(&p.subfolders, &mut stamp_one);
+
+        // Project-level seen stamp (drives the project-row badge).
+        cfg.project_last_seen_at
+            .insert(project.clone(), now_secs);
+    }
+    config::save_config(&vault, &cfg)?;
+    Ok(stamped)
+}
+
 /// Replace the full group list. Sidebar sends the whole array back on
 /// every edit (drag-reorder, rename, create, delete) — keeps the IPC
 /// surface dead simple. Groups that reference unknown project names are
@@ -2950,6 +3004,112 @@ pub fn dashboard_snapshot() -> DanbiResult<crate::dashboard::DashboardSnapshot> 
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
     crate::dashboard::snapshot(&vault_path)
+}
+
+// ---------- MCP inbound dashboard (v0.4.0) -----------------------------
+//
+// Three resolutions matching the UI's drill-down:
+//   - vault-wide (the big "오늘 단비에 X 토큰 저장됨" card)
+//   - per-project (clicked row in the project list)
+//   - per-domain (clicked row in the domain list)
+//
+// All three return a self-describing payload that includes the
+// disclaimer string, so the renderer can't accidentally hide it.
+
+#[tauri::command]
+pub fn dashboard_mcp_inbound(
+    range: String,
+) -> DanbiResult<crate::mcp_inbound::VaultSummary> {
+    let r = crate::mcp_inbound::Range::parse(&range);
+    Ok(crate::mcp_inbound::summarize_vault(r))
+}
+
+#[tauri::command]
+pub fn dashboard_mcp_inbound_project(
+    project: String,
+    range: String,
+) -> DanbiResult<crate::mcp_inbound::ProjectDetail> {
+    let r = crate::mcp_inbound::Range::parse(&range);
+    Ok(crate::mcp_inbound::summarize_project(&project, r))
+}
+
+#[tauri::command]
+pub fn dashboard_mcp_inbound_domain(
+    project: String,
+    domain: String,
+    range: String,
+) -> DanbiResult<crate::mcp_inbound::DomainDetail> {
+    let r = crate::mcp_inbound::Range::parse(&range);
+    Ok(crate::mcp_inbound::summarize_domain(&project, &domain, r))
+}
+
+/// Export every usage event as JSON to the supplied path. The frontend
+/// presents the dialog and passes us the chosen path; we own the write
+/// so we don't have to enable Tauri's `fs` plugin (every plugin we
+/// add is one more attack-surface entry in the Tauri ACL).
+#[tauri::command]
+pub fn usage_export_json(path: String) -> DanbiResult<()> {
+    let body = crate::usage::export_json()
+        .map_err(|e| DanbiError::Config(format!("export failed: {e}")))?;
+    std::fs::write(&path, body)
+        .map_err(|e| DanbiError::Config(format!("write {path}: {e}")))?;
+    Ok(())
+}
+
+/// Same as `usage_export_json` but CSV.
+#[tauri::command]
+pub fn usage_export_csv(path: String) -> DanbiResult<()> {
+    let body = crate::usage::export_csv()
+        .map_err(|e| DanbiError::Config(format!("export failed: {e}")))?;
+    std::fs::write(&path, body)
+        .map_err(|e| DanbiError::Config(format!("write {path}: {e}")))?;
+    Ok(())
+}
+
+/// Run the retention sweep on demand. Normally fires automatically
+/// during startup (see `lib.rs`); this command lets the user trigger
+/// it from Settings if they're worried about the live log size.
+#[tauri::command]
+pub fn usage_retention_sweep() -> DanbiResult<usize> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let n = crate::usage::run_retention_sweep(cfg.usage.mcp_retention_days)
+        .map_err(|e| DanbiError::Config(format!("retention sweep failed: {e}")))?;
+    if n > 0 {
+        crate::mcp_inbound::invalidate_cache();
+    }
+    Ok(n)
+}
+
+/// Toggle MCP inbound tracking from Settings. `true` re-enables a
+/// disabled tracker; `false` causes future MCP writes to skip the
+/// usage log entirely.
+#[tauri::command]
+pub fn usage_set_mcp_tracking(enabled: bool) -> DanbiResult<()> {
+    let vault = default_vault_path()?;
+    let mut cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    cfg.usage.mcp_tracking = enabled;
+    config::save_config(&vault, &cfg)?;
+    Ok(())
+}
+
+/// Update the MCP retention window. Negative or zero means "keep
+/// forever". Triggers an immediate sweep so the user sees the file
+/// shrink right after lowering the retention.
+#[tauri::command]
+pub fn usage_set_mcp_retention(days: i64) -> DanbiResult<usize> {
+    let vault = default_vault_path()?;
+    let mut cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    cfg.usage.mcp_retention_days = days;
+    config::save_config(&vault, &cfg)?;
+    let n = crate::usage::run_retention_sweep(days).unwrap_or(0);
+    if n > 0 {
+        crate::mcp_inbound::invalidate_cache();
+    }
+    Ok(n)
 }
 
 // ---------- Backup (mirror vault to external folder) ----------

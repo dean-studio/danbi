@@ -17,6 +17,7 @@ import {
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
+import { McpInboundCard } from "./McpInboundCard";
 
 export function Home({ onAddProject }: { onAddProject: () => void }) {
   const cfg = useApp((s) => s.cfg);
@@ -77,6 +78,10 @@ export function Home({ onAddProject }: { onAddProject: () => void }) {
           <p className="mt-2 text-[15px] text-mute">
             좌측에서 도메인을 고르거나 바로 명령해도 돼요.
           </p>
+
+          {/* MCP inbound — Claude Code / Codex 가 단비에 저장한 콘텐츠 추정량.
+              0.4.0 부터 홈 최상단으로 노출 (활동 신호가 가장 먼저 보이도록). */}
+          <McpInboundCard onOpenProject={selectProject} />
 
           {/* Claude Code 통합 셋업 — Skill 한 번 설치 / CLAUDE.md 프로젝트별 */}
           <SkillSetupCard />

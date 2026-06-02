@@ -166,7 +166,11 @@ export type DanbiConfig = {
   capture: CaptureState;
   mcp: McpConfig;
   backup: BackupConfig;
-  usage?: { krw_per_usd: number };
+  usage?: {
+    krw_per_usd: number;
+    mcp_tracking: boolean;
+    mcp_retention_days: number;
+  };
   project_groups?: ProjectGroup[];
   project_last_seen_at?: Record<string, number>;
   project_icons?: Record<string, string>;
@@ -466,6 +470,128 @@ export type DashboardSnapshot = {
   healing: VaultSuggestion[];
   daily: DailySnapshot;
   activity: ActivityWindow;
+};
+
+// ---- MCP inbound dashboard (v0.4.0) ----
+//
+// Counts content tokens that external agents (Claude Code / Codex) saved
+// into the vault via the MCP server. The numbers are estimates from
+// cl100k_base — see the disclaimer field on every payload.
+
+export type McpInboundRange = "today" | "7d" | "30d" | "90d" | "all";
+
+export type McpClientBreakdown = {
+  client: string;
+  tokens: number;
+  calls: number;
+};
+
+export type McpToolBreakdown = {
+  tool: string;
+  tokens: number;
+  calls: number;
+};
+
+export type McpDailyPoint = {
+  date: string; // YYYY-MM-DD, local time
+  tokens: number;
+  calls: number;
+};
+
+export type McpDomainStub = {
+  domain: string;
+  tokens: number;
+  calls: number;
+};
+
+export type McpProjectStats = {
+  project: string;
+  tokens: number;
+  calls: number;
+  by_client: McpClientBreakdown[];
+  top_domains: McpDomainStub[];
+};
+
+export type McpAnomaly = {
+  project: string;
+  domain: string;
+  date: string;
+  tokens: number;
+  baseline: number;
+  multiple: number;
+};
+
+export type McpCostEstimate = {
+  model_stem: string;
+  usd_per_mtok_input: number;
+  krw_per_usd: number;
+  krw: number;
+  usd: number;
+  reference_only: boolean;
+};
+
+export type McpTopContributor = {
+  project: string;
+  domain: string;
+  tokens: number;
+  calls: number;
+};
+
+export type McpHeatmap = {
+  /// `cells[dow][hour]`. dow 0 = Sunday.
+  cells: number[][];
+  max_cell: number;
+  total_tokens: number;
+};
+
+export type McpVaultSummary = {
+  range: string;
+  from_ms: number;
+  to_ms: number;
+  total_tokens: number;
+  total_calls: number;
+  by_client: McpClientBreakdown[];
+  by_tool: McpToolBreakdown[];
+  by_project: McpProjectStats[];
+  daily: McpDailyPoint[];
+  top_contributors: McpTopContributor[];
+  anomalies: McpAnomaly[];
+  cost_estimate: McpCostEstimate;
+  heatmap: McpHeatmap;
+  disclaimer: string;
+  estimated: boolean;
+};
+
+export type McpProjectDetail = {
+  project: string;
+  range: string;
+  from_ms: number;
+  to_ms: number;
+  total_tokens: number;
+  total_calls: number;
+  by_client: McpClientBreakdown[];
+  by_tool: McpToolBreakdown[];
+  by_domain: McpDomainStub[];
+  daily: McpDailyPoint[];
+  cost_estimate: McpCostEstimate;
+  disclaimer: string;
+  estimated: boolean;
+};
+
+export type McpDomainDetail = {
+  project: string;
+  domain: string;
+  range: string;
+  from_ms: number;
+  to_ms: number;
+  total_tokens: number;
+  total_calls: number;
+  by_client: McpClientBreakdown[];
+  by_tool: McpToolBreakdown[];
+  daily: McpDailyPoint[];
+  cost_estimate: McpCostEstimate;
+  disclaimer: string;
+  estimated: boolean;
 };
 
 // ---- Graph view ----
@@ -953,6 +1079,31 @@ export const ipc = {
   projectBriefing: (project: string, range: "today" | "yesterday" | "last_week") =>
     invoke<BriefingResult>("project_briefing", { project, range }),
   dashboardSnapshot: () => invoke<DashboardSnapshot>("dashboard_snapshot"),
+
+  dashboardMcpInbound: (range: McpInboundRange) =>
+    invoke<McpVaultSummary>("dashboard_mcp_inbound", { range }),
+  dashboardMcpInboundProject: (project: string, range: McpInboundRange) =>
+    invoke<McpProjectDetail>("dashboard_mcp_inbound_project", { project, range }),
+  dashboardMcpInboundDomain: (
+    project: string,
+    domain: string,
+    range: McpInboundRange,
+  ) =>
+    invoke<McpDomainDetail>("dashboard_mcp_inbound_domain", {
+      project,
+      domain,
+      range,
+    }),
+
+  usageExportJson: (path: string) =>
+    invoke<void>("usage_export_json", { path }),
+  usageExportCsv: (path: string) =>
+    invoke<void>("usage_export_csv", { path }),
+  usageRetentionSweep: () => invoke<number>("usage_retention_sweep"),
+  usageSetMcpTracking: (enabled: boolean) =>
+    invoke<void>("usage_set_mcp_tracking", { enabled }),
+  usageSetMcpRetention: (days: number) =>
+    invoke<number>("usage_set_mcp_retention", { days }),
   buildGraph: (project?: string) =>
     invoke<GraphData>("build_graph", { project: project ?? null }),
   backupNow: () => invoke<BackupReport>("backup_now"),
@@ -1003,6 +1154,7 @@ export const ipc = {
     invoke<void>("domain_mark_seen", { project, domain }),
   projectMarkAllRead: (project: string) =>
     invoke<void>("project_mark_all_read", { project }),
+  vaultMarkAllRead: () => invoke<number>("vault_mark_all_read"),
   groupsSet: (groups: ProjectGroup[]) =>
     invoke<ProjectGroup[]>("groups_set", { groups }),
 

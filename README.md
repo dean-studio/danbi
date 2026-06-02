@@ -12,15 +12,48 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/dean-studio/danbi/releases/latest">
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.4.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.4.0" />
+  </a>
+</p>
+
+<p align="center">
+  <sub>
+    <a href="https://github.com/dean-studio/danbi/releases/latest">최신 릴리즈</a> ·
+    <a href="https://github.com/dean-studio/danbi/releases">전체 버전</a> ·
+    Apple Silicon · Intel · macOS 11+ 지원
+  </sub>
+</p>
+
+<p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.3.0-success" alt="version 0.3.0" />
+  <img src="https://img.shields.io/badge/version-0.4.0-success" alt="version 0.4.0" />
 </p>
 
 ---
 
+## What's new in v0.4.0 — *MCP 저장 토큰 대시보드*
 
+이번 릴리즈는 "Claude Code · Codex 가 단비에 얼마나 쌓고 있는지" 를 한눈에 보여주는 데 집중했습니다.
+
+- 📊 **MCP 저장 토큰 카드 (홈)** — 외부 에이전트가 `danbi_log` · `danbi_append` · `danbi_create_file` · `danbi_create_folder` · `v1_vault PUT` 으로 저장한 콘텐츠를 cl100k_base 로 추정해서 누적. 오늘 / 7일 / 30일 / 90일 / 전체 토글.
+- 🤖 **에이전트별 · 도구별 · 프로젝트별 분해** — 누가 어디에 얼마나 썼는지 자동 집계. Claude Code · Codex · Cursor · Continue 분리 인식.
+- 🌶️ **이상치(anomaly) 알림** — 7일 평균 대비 3σ 이상 튄 도메인을 노란 callout 으로 표시. "어제 `notes/auth.md` 에 평소의 8배" 류 자기 인식 신호.
+- 🏆 **Top contributors** — 가장 많이 저장된 (project / domain) 5개 — 시간 어디에 쓰고 있는지 셀프 리뷰.
+- 🔥 **시간대 heatmap (24h × 7d)** — "주로 새벽에 단비 쓰는구나" 같은 패턴 시각화. 현재 시각이 grid 위에 highlight.
+- 💰 **참고용 KRW 추정치** — Sonnet 4.6 input price 기준. 실제 청구액 아닌 "재투입 했을 때 비용" 참고치 (disclaimer 항상 노출).
+- 📤 **JSON / CSV Export** — 카드 우상단 "내보내기" 메뉴.
+- 🗄️ **Retention 정책** — 기본 365일 보존, 그 이전 이벤트는 `usage.archive.jsonl` 로 자동 이동. Settings → MCP → 저장 토큰 추적에서 조정.
+- 🛡️ **추적 ON/OFF 토글** — 끄면 이후 MCP 쓰기는 usage.jsonl 에 기록되지 않음.
+- ⚠️ **고정 disclaimer 배너** — "이 숫자는 LLM 청구액이 아니다. 시스템 프롬프트 · 대화 히스토리 · tool 스키마 미포함" 이 카드 하단에 항상 노출.
+
+> 추정치임을 솔직히 표기합니다. Claude / GPT 청구서를 흉내내려 하지 않고, "단비에 얼마나 많은 지식이 쌓였나" 라는 별개 축의 신호로 자리 잡습니다.
+
+이전 릴리즈 노트는 [Releases 페이지](https://github.com/dean-studio/danbi/releases) 에서 확인할 수 있어요.
+
+---
 
 ![01.png](readme_imgs/01.png)
 

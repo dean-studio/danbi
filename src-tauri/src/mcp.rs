@@ -398,6 +398,34 @@ async fn handle_v1_vault_put(
     )
     .unwrap_or_default();
 
+    // Token-track this write under a synthetic tool name so the
+    // dashboard shows v1/vault PUT volume alongside the JSON-RPC
+    // tools. The body itself is what got saved (overwrite) or
+    // appended; either way `body` is what crossed the wire from the
+    // external caller, which is what we want to count.
+    //
+    // Honours `usage.mcp_tracking` — when off, skip the recording.
+    let tracking_on = config::load_config(&vault_path)
+        .ok()
+        .flatten()
+        .map(|c| c.usage.mcp_tracking)
+        .unwrap_or(true);
+    if tracking_on {
+        let user_agent = headers
+            .get("user-agent")
+            .and_then(|v| v.to_str().ok());
+        let client = crate::usage::classify_user_agent(user_agent);
+        let tokens = crate::usage::estimate_tokens(&body);
+        crate::usage::record_mcp_inbound(
+            client,
+            "v1_vault_put",
+            Some(&resolved_project),
+            Some(&domain),
+            tokens,
+            user_agent,
+        );
+    }
+
     (
         StatusCode::OK,
         Json(json!({
@@ -463,8 +491,17 @@ fn run_api_call(
         }
     }
 
+    let inbound_meta = extract_inbound_meta(&tool, &args);
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     match dispatch(&tool, args) {
         Ok(text) => {
+            if let Some(meta) = inbound_meta.as_ref() {
+                record_inbound_after_success(&tool, meta, &text, user_agent.as_deref());
+            }
             // Most tools return a JSON document as a string. Try to
             // surface it as parsed JSON so REST consumers get structured
             // data without an extra parse step. If parsing fails we just
@@ -609,6 +646,16 @@ async fn run_rpc(
                     }
                 }
             }
+            // Capture inbound metadata BEFORE we move `args` into
+            // dispatch — write tools need their content for token
+            // estimation but dispatch consumes the value. `None` for
+            // read tools, which we don't track here.
+            let inbound_meta = extract_inbound_meta(name, &args);
+            let user_agent = headers
+                .get("user-agent")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+
             // danbi_search 만 RRF 하이브리드 fast-path 로 분기. 임베딩
             // provider 가 cfg 에 있으면 BM25 + 벡터 결과를 RRF 로 병합해서
             // 외부 AI 의 자연어 쿼리도 정확히 잡아낸다. 임베딩 없으면
@@ -619,7 +666,19 @@ async fn run_rpc(
                 dispatch(name, args)
             };
             match result {
-                Ok(text) => (
+                Ok(text) => {
+                    // Token-track *only* on success — failed writes
+                    // never reach disk, so they shouldn't inflate
+                    // saved-content metrics.
+                    if let Some(meta) = inbound_meta.as_ref() {
+                        record_inbound_after_success(
+                            name,
+                            meta,
+                            &text,
+                            user_agent.as_deref(),
+                        );
+                    }
+                    (
                     StatusCode::OK,
                     Json(rpc_ok(
                         req.id,
@@ -628,7 +687,8 @@ async fn run_rpc(
                             "isError": false,
                         }),
                     )),
-                ),
+                )
+                }
                 Err(e) => (
                     StatusCode::OK,
                     Json(rpc_ok(
@@ -1091,6 +1151,99 @@ fn is_write_tool(name: &str) -> bool {
             | "danbi_create_folder"
             | "danbi_create_file"
     )
+}
+
+/// Snapshot of a write-tool invocation that we'll need *after* dispatch
+/// has consumed `args`. We pull these out before dispatch so the post-
+/// success token bookkeeping doesn't have to re-parse the request body.
+struct InboundMeta {
+    project: Option<String>,
+    domain: Option<String>,
+    /// Pre-tokenized content for this call. Empty for `danbi_create_folder`.
+    content: String,
+}
+
+/// Extract the project/domain/content needed for inbound token tracking.
+/// Returns `None` for read tools (we don't track those) and for malformed
+/// requests where the args we'd need are missing — better to skip the
+/// metric than to crash on bad input.
+fn extract_inbound_meta(tool: &str, args: &Value) -> Option<InboundMeta> {
+    if !is_write_tool(tool) {
+        return None;
+    }
+    let project = args
+        .get("project")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let domain = args
+        .get("domain")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let content = args
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    Some(InboundMeta {
+        project,
+        domain,
+        content,
+    })
+}
+
+/// Record an MCP inbound write event after `dispatch` succeeded.
+///
+/// `dispatch_text` is the JSON string the tool returned — for
+/// `danbi_log`, the daily note's filename gets resolved server-side and
+/// only shows up there, not in the request args. We look it up so the
+/// per-domain breakdown still attributes the write to the right file.
+///
+/// Honours the `usage.mcp_tracking` config flag — when off, this is a
+/// no-op so the user can fully disable inbound tracking without losing
+/// a release.
+fn record_inbound_after_success(
+    tool: &str,
+    meta: &InboundMeta,
+    dispatch_text: &str,
+    user_agent: Option<&str>,
+) {
+    // Tracking opt-out: read the config inline. Cheap (file is tiny)
+    // and avoids threading state into every dispatch call. If the
+    // config can't be loaded we err on the side of recording — better
+    // a stray data point than a silent gap.
+    if let Ok(vault) = config::default_vault_path() {
+        if let Ok(Some(cfg)) = config::load_config(&vault) {
+            if !cfg.usage.mcp_tracking {
+                return;
+            }
+        }
+    }
+    // For `danbi_log` the request only carries the project — the domain
+    // (`daily/YYYY-MM-DD.md`) is decided by the dispatcher. Pull it back
+    // from the structured response so the dashboard can attribute.
+    let resolved_domain: Option<String> = if tool == "danbi_log" {
+        serde_json::from_str::<Value>(dispatch_text)
+            .ok()
+            .and_then(|v| {
+                v.get("domain")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| meta.domain.clone())
+    } else {
+        meta.domain.clone()
+    };
+
+    let tokens = crate::usage::estimate_tokens(&meta.content);
+    let client = crate::usage::classify_user_agent(user_agent);
+    crate::usage::record_mcp_inbound(
+        client,
+        tool,
+        meta.project.as_deref(),
+        resolved_domain.as_deref(),
+        tokens,
+        user_agent,
+    );
 }
 
 fn string_arg(args: &Value, key: &str) -> Result<String, DanbiError> {

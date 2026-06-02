@@ -40,6 +40,7 @@ import { projectIconOf } from "@/components/ProjectIconPicker";
 import { ReindexProgressCard } from "@/main/Settings";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
+import { McpInboundProjectMini } from "./McpInboundProjectMini";
 
 export function ProjectHome({
   project,
@@ -254,6 +255,12 @@ export function ProjectHome({
           </div>
           <div className="mt-6">
             <SevenDayBar project={project} />
+          </div>
+          <div className="mt-6">
+            <McpInboundProjectMini
+              project={project}
+              onOpenDomain={(d) => selectDomain(project, d)}
+            />
           </div>
           <div className="mt-6">
             <AutoJournalPanel

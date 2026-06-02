@@ -21,6 +21,7 @@ mod journal;
 mod journal_view;
 mod links;
 mod mcp;
+mod mcp_inbound;
 mod popover;
 mod preview;
 mod tray_badge;
@@ -98,6 +99,18 @@ pub fn run() {
                 if let Ok(Some(cfg)) = config::load_config(&default_vault) {
                     if let Some(vp) = cfg.vault_path.as_ref() {
                         let _ = trash::expire_old(std::path::Path::new(vp));
+                    }
+                    // Usage retention sweep — trim the live usage log to
+                    // the configured retention window. Older lines are
+                    // moved to `usage.archive.jsonl` rather than deleted
+                    // so the user never loses data they cared about.
+                    if cfg.usage.mcp_retention_days > 0 {
+                        if let Ok(n) = usage::run_retention_sweep(cfg.usage.mcp_retention_days) {
+                            if n > 0 {
+                                eprintln!("[usage] retention sweep moved {n} events to archive");
+                                mcp_inbound::invalidate_cache();
+                            }
+                        }
                     }
                 }
             }
@@ -443,6 +456,14 @@ pub fn run() {
             commands::list_voyage_models,
             commands::test_voyage,
             commands::dashboard_snapshot,
+            commands::dashboard_mcp_inbound,
+            commands::dashboard_mcp_inbound_project,
+            commands::dashboard_mcp_inbound_domain,
+            commands::usage_export_json,
+            commands::usage_export_csv,
+            commands::usage_retention_sweep,
+            commands::usage_set_mcp_tracking,
+            commands::usage_set_mcp_retention,
             commands::build_graph,
             commands::backup_now,
             commands::backup_validate_path,
@@ -463,6 +484,7 @@ pub fn run() {
             commands::domain_updates,
             commands::domain_mark_seen,
             commands::project_mark_all_read,
+            commands::vault_mark_all_read,
             commands::groups_set,
             commands::vector_clear,
             commands::vector_search,

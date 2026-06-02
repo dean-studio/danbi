@@ -1353,7 +1353,37 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
           </div>
         </div>
       )}
+
+      {/* Global store-level toast — Sidebar / 다른 컴포넌트들이 어디서든
+          호출할 수 있는 글로벌 슬롯. 우상단에 띄워서 위 toast 와 충돌
+          안 하게. */}
+      <GlobalToast />
     </>
+  );
+}
+
+function GlobalToast() {
+  const t = useApp((s) => s.toast);
+  if (!t) return null;
+  return (
+    <div className="pointer-events-none fixed right-6 top-14 z-[60]">
+      <div
+        className={
+          "pointer-events-auto inline-flex max-w-[440px] items-start gap-3 rounded-lg border bg-surface-elevated px-4 py-3 text-[13px] leading-[1.55] shadow-2xl shadow-black/60 " +
+          (t.tone === "ok"
+            ? "border-accent-green text-ink"
+            : "border-accent-red text-ink")
+        }
+      >
+        <span
+          className={
+            "mt-1 inline-block h-2 w-2 shrink-0 rounded-full " +
+            (t.tone === "ok" ? "bg-accent-green" : "bg-accent-red")
+          }
+        />
+        <span className="flex-1">{t.text}</span>
+      </div>
+    </div>
   );
 }
 

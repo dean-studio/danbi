@@ -1137,6 +1137,8 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
         </>
       )}
 
+      <McpInboundTracking />
+
       {err && (
         <div className="mt-3 rounded-md border border-hairline bg-surface-elevated p-2 font-mono text-[11px] text-accent-red">
           {err}
@@ -1148,6 +1150,137 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
         </div>
       )}
     </>
+  );
+}
+
+/** v0.4.0 — MCP inbound 토큰 추적 ON/OFF + retention. 외부 에이전트가
+ *  vault 에 저장한 콘텐츠 양을 대시보드에 누적할지 여부와, 너무 오래된
+ *  이벤트의 archive 정책을 제어합니다. */
+function McpInboundTracking() {
+  const cfg = useApp((s) => s.cfg);
+  const setCfg = useApp((s) => s.setCfg);
+  const [tracking, setTracking] = useState<boolean>(
+    cfg?.usage?.mcp_tracking ?? true,
+  );
+  const [retentionDays, setRetentionDays] = useState<number>(
+    cfg?.usage?.mcp_retention_days ?? 365,
+  );
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (cfg?.usage) {
+      setTracking(cfg.usage.mcp_tracking);
+      setRetentionDays(cfg.usage.mcp_retention_days);
+    }
+  }, [cfg?.usage?.mcp_tracking, cfg?.usage?.mcp_retention_days]);
+
+  async function reloadCfg() {
+    try {
+      const next = await ipc.loadConfig();
+      if (next) setCfg(next);
+    } catch {
+      /* ignore — local UI state already updated */
+    }
+  }
+
+  async function applyTracking(next: boolean) {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await ipc.usageSetMcpTracking(next);
+      setTracking(next);
+      await reloadCfg();
+    } catch (e) {
+      setMsg(`설정 저장 실패: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyRetention(days: number) {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const moved = await ipc.usageSetMcpRetention(days);
+      setRetentionDays(days);
+      if (moved > 0) setMsg(`${moved.toLocaleString()}개 이벤트 archive 로 이동`);
+      await reloadCfg();
+    } catch (e) {
+      setMsg(`설정 저장 실패: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runSweep() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      const moved = await ipc.usageRetentionSweep();
+      setMsg(
+        moved > 0
+          ? `${moved.toLocaleString()}개 이벤트 archive 로 이동`
+          : "정리할 항목이 없습니다.",
+      );
+    } catch (e) {
+      setMsg(`스윕 실패: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-6 border-t border-hairline pt-5">
+      <SectionTitle
+        title="저장 토큰 추적"
+        hint="Claude Code / Codex 가 단비에 저장한 콘텐츠를 cl100k_base 토크나이저로 추정해서 홈 대시보드에 누적합니다. 실제 LLM 청구액과는 별개의 수치입니다."
+      />
+      <Row
+        label="추적 활성화"
+        hint="끄면 이후 MCP 쓰기는 usage.jsonl 에 기록되지 않습니다. 기존 이벤트는 그대로 남아있어요."
+      >
+        <Toggle
+          value={tracking}
+          onChange={(v) => {
+            if (!busy) applyTracking(v);
+          }}
+        />
+      </Row>
+      <Row
+        label="보존 기간"
+        hint="이 기간보다 오래된 이벤트는 자동으로 usage.archive.jsonl 로 이동합니다. 0 또는 음수면 영구 보존."
+      >
+        <div className="flex items-center gap-2">
+          <input
+            type="number"
+            min={0}
+            value={retentionDays}
+            onChange={(e) => setRetentionDays(parseInt(e.target.value) || 0)}
+            onBlur={() => applyRetention(retentionDays)}
+            disabled={busy}
+            className="h-7 w-20 rounded-md border border-hairline bg-surface-elevated px-2 text-right font-mono text-[12px] text-on-dark focus:border-hairline-strong focus:outline-none"
+          />
+          <span className="text-caption-sm text-stone">일</span>
+        </div>
+      </Row>
+      <Row
+        label="지금 정리"
+        hint="보존 기간 밖 이벤트를 즉시 archive 로 옮깁니다."
+      >
+        <button
+          type="button"
+          onClick={runSweep}
+          disabled={busy}
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-hairline bg-surface-elevated px-2.5 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark disabled:opacity-50"
+        >
+          정리 실행
+        </button>
+      </Row>
+      {msg && (
+        <div className="mt-2 text-caption-sm text-stone">{msg}</div>
+      )}
+    </div>
   );
 }
 
