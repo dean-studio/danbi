@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.4.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.4.0" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.5.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.5.0" />
   </a>
 </p>
 
@@ -29,27 +29,20 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.4.0-success" alt="version 0.4.0" />
+  <img src="https://img.shields.io/badge/version-0.5.0-success" alt="version 0.5.0" />
 </p>
 
 ---
 
-## What's new in v0.4.0 — *MCP 저장 토큰 대시보드*
+## What's new in v0.5.0 — *Goal · 활동 분포 · popover 정리*
 
-이번 릴리즈는 "Claude Code · Codex 가 단비에 얼마나 쌓고 있는지" 를 한눈에 보여주는 데 집중했습니다.
+이번 릴리즈는 "지금 뭘 하려는지" 를 단비가 외부 AI 세션에 자연스럽게 흘려주고, 홈 대시보드를 한눈에 더 가볍게 만드는 데 집중했습니다.
 
-- 📊 **MCP 저장 토큰 카드 (홈)** — 외부 에이전트가 `danbi_log` · `danbi_append` · `danbi_create_file` · `danbi_create_folder` · `v1_vault PUT` 으로 저장한 콘텐츠를 cl100k_base 로 추정해서 누적. 오늘 / 7일 / 30일 / 90일 / 전체 토글.
-- 🤖 **에이전트별 · 도구별 · 프로젝트별 분해** — 누가 어디에 얼마나 썼는지 자동 집계. Claude Code · Codex · Cursor · Continue 분리 인식.
-- 🌶️ **이상치(anomaly) 알림** — 7일 평균 대비 3σ 이상 튄 도메인을 노란 callout 으로 표시. "어제 `notes/auth.md` 에 평소의 8배" 류 자기 인식 신호.
-- 🏆 **Top contributors** — 가장 많이 저장된 (project / domain) 5개 — 시간 어디에 쓰고 있는지 셀프 리뷰.
-- 🔥 **시간대 heatmap (24h × 7d)** — "주로 새벽에 단비 쓰는구나" 같은 패턴 시각화. 현재 시각이 grid 위에 highlight.
-- 💰 **참고용 KRW 추정치** — Sonnet 4.6 input price 기준. 실제 청구액 아닌 "재투입 했을 때 비용" 참고치 (disclaimer 항상 노출).
-- 📤 **JSON / CSV Export** — 카드 우상단 "내보내기" 메뉴.
-- 🗄️ **Retention 정책** — 기본 365일 보존, 그 이전 이벤트는 `usage.archive.jsonl` 로 자동 이동. Settings → MCP → 저장 토큰 추적에서 조정.
-- 🛡️ **추적 ON/OFF 토글** — 끄면 이후 MCP 쓰기는 usage.jsonl 에 기록되지 않음.
-- ⚠️ **고정 disclaimer 배너** — "이 숫자는 LLM 청구액이 아니다. 시스템 프롬프트 · 대화 히스토리 · tool 스키마 미포함" 이 카드 하단에 항상 노출.
-
-> 추정치임을 솔직히 표기합니다. Claude / GPT 청구서를 흉내내려 하지 않고, "단비에 얼마나 많은 지식이 쌓였나" 라는 별개 축의 신호로 자리 잡습니다.
+- 🎯 **프로젝트별 Goal** — 각 프로젝트 대시보드에서 "지금 뭘 하려는지" 한 줄로 등록·archive. 외부 Claude · Codex 세션이 단비 도구를 부를 때 응답 본문에 `_active_goals` 가 자동으로 끼어들어서, 사용자가 따로 리마인드 안 해도 AI 가 컨텍스트를 잃지 않습니다.
+- 📊 **프로젝트 활동 분포 카드 (홈)** — git commit + MCP 외부 호출을 합산한 활동량을 도넛 + 랭킹 바로 시각화. 7일 / 30일 / 90일 토글. 행 클릭하면 그 프로젝트 대시보드로 바로 이동.
+- 🪟 **메뉴바 popover 정리** — "단비 열기" + 최근 활동 프로젝트 4개 퀵셔트 (클릭 → 본체로 이동) + MCP 상태 / 종료 버튼. 이전의 daily · recent · reviews · settings 탭은 본체에서 더 잘 보여 제거.
+- 🪞 **첫 진입 splash** — 사이드바 노출 전 단비 로고만 보이는 가벼운 로딩 화면. 큰 vault 도 webview 가 멈춰 보이는 시간 없이 매끄럽게 들어옵니다.
+- 🚪 **Cmd+Q 가 종료하지 않음** — 메인 창만 숨기고 tray + MCP 서버는 계속 떠 있어서 외부 세션 연결이 끊기지 않습니다. 진짜 종료는 popover 의 종료 버튼 / tray 의 Quit 으로만.
 
 이전 릴리즈 노트는 [Releases 페이지](https://github.com/dean-studio/danbi/releases) 에서 확인할 수 있어요.
 
