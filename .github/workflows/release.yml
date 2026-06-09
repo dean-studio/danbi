@@ -1,0 +1,186 @@
+name: release
+
+# v* 태그를 push 하면 macOS arm64 runner 에서 단비 release 를 빌드한다.
+# 로컬 scripts/release.sh 와 동일한 흐름:
+#   tauri build (arm64) → arch verify → notarize → staple → repackage
+#   .app.tar.gz → ed25519 sign → assemble latest.json (aarch64 + x86_64
+#   fallback) → release upload --clobber.
+#
+# 필요한 GitHub Secrets (Settings → Secrets and variables → Actions):
+#   APPLE_CERT_P12_BASE64   — Developer ID Application .p12 (base64 인코딩)
+#   APPLE_CERT_PASSWORD     — 위 .p12 password
+#   APPLE_ID                — Apple ID 이메일 (e.g. hckim@dean.kr)
+#   APPLE_TEAM_ID           — 10자리 team id (e.g. 663S56834K)
+#   APPLE_APP_PWD           — Apple ID 앱 전용 비밀번호 (xxxx-xxxx-xxxx-xxxx)
+#   TAURI_SIGNING_PRIVATE_KEY — ~/.tauri/danbi.key 파일 내용 그대로
+#
+# 등록 방법 (gh cli):
+#   base64 -i ~/path/to/danbi.p12 | pbcopy
+#   gh secret set APPLE_CERT_P12_BASE64
+#   gh secret set APPLE_CERT_PASSWORD
+#   gh secret set APPLE_ID
+#   gh secret set APPLE_TEAM_ID
+#   gh secret set APPLE_APP_PWD
+#   gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/danbi.key
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "릴리즈할 버전 (예: v0.5.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: macOS arm64 release
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve version from package.json
+        id: ver
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=$VERSION"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Setup Rust (arm64)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Import Apple Developer ID cert
+        env:
+          P12_BASE64: ${{ secrets.APPLE_CERT_P12_BASE64 }}
+          P12_PWD: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PWD=$(openssl rand -base64 24)
+          KEYCHAIN_PATH="$RUNNER_TEMP/danbi-build.keychain-db"
+          P12_PATH="$RUNNER_TEMP/danbi-cert.p12"
+
+          echo "$P12_BASE64" | base64 --decode > "$P12_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+          security import "$P12_PATH" -k "$KEYCHAIN_PATH" -P "$P12_PWD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN_PATH"
+
+          # Prepend our keychain so codesign finds the identity first.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            $(security list-keychains -d user | tr -d '"')
+
+          rm -f "$P12_PATH"
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          echo "KEYCHAIN_PWD=$KEYCHAIN_PWD" >> "$GITHUB_ENV"
+
+      - name: Store notarytool credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PWD: ${{ secrets.APPLE_APP_PWD }}
+        run: |
+          xcrun notarytool store-credentials "danbi-notarize" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PWD"
+
+      - name: Stage Tauri signing key
+        env:
+          TAURI_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.tauri
+          printf '%s' "$TAURI_KEY" > ~/.tauri/danbi.key
+          chmod 600 ~/.tauri/danbi.key
+
+      - name: Build signed release
+        env:
+          # release.sh 가 keychain profile / signing key path 를 참고함.
+          NOTARIZE_PROFILE: danbi-notarize
+          TAURI_SIGNING_PRIVATE_KEY_PATH: /Users/runner/.tauri/danbi.key
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: bash scripts/release.sh
+
+      - name: Verify built binary is arm64
+        run: |
+          BIN="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app/Contents/MacOS/danbi"
+          file "$BIN"
+          file "$BIN" | grep -q arm64 || {
+            echo "✗ built binary is NOT arm64" >&2
+            exit 1
+          }
+
+      - name: Upload artifacts (workflow run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: danbi-${{ steps.ver.outputs.tag }}-macos-arm64
+          path: |
+            release/${{ steps.ver.outputs.tag }}/Danbi_${{ steps.ver.outputs.version }}_aarch64.dmg
+            release/${{ steps.ver.outputs.tag }}/Danbi.app.tar.gz
+            release/${{ steps.ver.outputs.tag }}/Danbi.app.tar.gz.sig
+            release/${{ steps.ver.outputs.tag }}/latest.json
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUT="release/$TAG"
+          # Make sure the release exists; create if it doesn't.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file CHANGELOG.md \
+              --draft=false
+          fi
+          gh release upload "$TAG" \
+            "$OUT/Danbi_${VERSION}_aarch64.dmg" \
+            "$OUT/Danbi.app.tar.gz" \
+            "$OUT/Danbi.app.tar.gz.sig" \
+            "$OUT/latest.json" \
+            --clobber
+
+      - name: Cleanup keychain
+        if: always()
+        run: |
+          if [[ -n "${KEYCHAIN_PATH:-}" && -f "$KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
