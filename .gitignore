@@ -16,6 +16,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 .dev.log
+.release.log
 
 # Tauri / Rust
 src-tauri/target

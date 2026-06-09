@@ -4,7 +4,6 @@ import {
   CalendarDays,
   Clock4,
   FileText,
-  FolderOpen,
   GitCommit,
   HardDrive,
   Layers,
@@ -25,8 +24,7 @@ import {
   projectColorVars,
 } from "@/components/ProjectColorPicker";
 
-export function Home({ onAddProject }: { onAddProject: () => void }) {
-  const cfg = useApp((s) => s.cfg);
+export function Home() {
   const tree = useApp((s) => s.tree);
   const selectDomain = useApp((s) => s.selectDomain);
   const selectProject = useApp((s) => s.selectProject);
@@ -66,13 +64,10 @@ export function Home({ onAddProject }: { onAddProject: () => void }) {
     <div className="flex h-full flex-col">
       <header
         data-tauri-drag-region
-        className="flex h-12 shrink-0 items-center justify-between border-b border-hairline px-6"
+        className="flex h-12 shrink-0 items-center border-b border-hairline px-6"
       >
         <span className="text-[15px] font-medium tracking-[0.2px] text-ink">
           홈
-        </span>
-        <span className="text-[13px] text-stone">
-          {cfg?.vault_path?.split("/").slice(-1)[0] ?? "Vault"}
         </span>
       </header>
 
@@ -139,106 +134,9 @@ export function Home({ onAddProject }: { onAddProject: () => void }) {
             <ActivityCard commits={commits.length} data={activity} />
           </div>
 
-          {/* Project grid */}
-          <section className="mt-9">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-[18px] font-medium text-ink">프로젝트</h2>
-              <button
-                onClick={onAddProject}
-                className="inline-flex h-8 items-center gap-1.5 rounded-sm border border-hairline bg-surface-elevated px-3 text-[13px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark"
-              >
-                <Plus size={13} /> 새 프로젝트
-              </button>
-            </div>
-            {tree && tree.projects.length === 0 ? (
-              <div className="flex flex-col items-center gap-3 rounded-lg border border-dashed border-hairline bg-surface py-12 text-center">
-                <FolderOpen size={22} className="text-stone" />
-                <div className="text-[13px] text-mute">
-                  아직 프로젝트가 없어요.
-                  <br />
-                  <span className="text-stone">
-                    좌측 상단 +버튼 혹은 여기에서 시작해 보세요.
-                  </span>
-                </div>
-                <button
-                  onClick={onAddProject}
-                  className="inline-flex h-8 items-center rounded-md bg-primary px-3 text-[13px] font-medium text-on-primary hover:bg-primary-pressed"
-                >
-                  프로젝트 만들기
-                </button>
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-3">
-                {tree?.projects.map((p) => {
-                  const lastModified = p.domains.reduce(
-                    (a, d) => Math.max(a, d.modified_ms ?? 0),
-                    0,
-                  );
-                  const bytes = p.domains.reduce((a, d) => a + d.bytes, 0);
-                  const empty = p.domains.length === 0;
-                  return (
-                    <button
-                      key={p.name}
-                      onClick={() => selectProject(p.name)}
-                      className={cn(
-                        "group flex flex-col items-stretch rounded-lg border p-4 text-left transition-colors",
-                        empty
-                          ? "border-dashed border-hairline bg-surface/60 hover:border-hairline-strong"
-                          : "border-hairline bg-surface-elevated hover:border-hairline-strong",
-                      )}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <span
-                          className={cn(
-                            "truncate text-[16px] font-medium",
-                            empty ? "text-mute" : "text-ink",
-                          )}
-                        >
-                          {p.name}
-                        </span>
-                        <span
-                          className={cn(
-                            "shrink-0 rounded-xs px-2 py-0.5 font-mono text-[11px]",
-                            empty
-                              ? "bg-surface text-stone"
-                              : "bg-accent-blue-soft text-accent-blue",
-                          )}
-                        >
-                          {p.domains.length}
-                        </span>
-                      </div>
-                      {!empty && (
-                        <div className="mt-2.5 flex flex-wrap gap-1">
-                          {p.domains.slice(0, 4).map((d) => (
-                            <span
-                              key={d.name}
-                              className="inline-flex items-center gap-1 rounded-xs bg-surface px-2 py-0.5 font-mono text-[12px] text-on-dark-mute"
-                            >
-                              <FileText size={10} className="text-stone" />
-                              {d.name}
-                            </span>
-                          ))}
-                          {p.domains.length > 4 && (
-                            <span className="text-[12px] text-stone">
-                              +{p.domains.length - 4}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      <div className="mt-3.5 flex items-center justify-between text-[12px] text-stone">
-                        <span>
-                          {lastModified > 0
-                            ? `최근 ${timeAgo(lastModified)}`
-                            : "비어있음"}
-                        </span>
-                        <span className="font-mono">{prettyBytes(bytes)}</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </section>
+          {/* Project grid 는 사이드바와 정보가 중복돼서 v0.5.0 부터 제거.
+              "프로젝트 활동 분포" 카드의 행이 클릭 가능 + 사이드바 트리가
+              항상 떠있어서 진입 경로는 충분. */}
 
           {/* Recent activity — table */}
           {commits.length > 0 && (
@@ -254,7 +152,12 @@ export function Home({ onAddProject }: { onAddProject: () => void }) {
                   {commits.length.toLocaleString()} commits
                 </span>
               </header>
-              <table className="w-full text-caption-md">
+              <table className="w-full table-fixed text-caption-md">
+                <colgroup>
+                  <col style={{ width: 78 }} />
+                  <col />
+                  <col style={{ width: 88 }} />
+                </colgroup>
                 <tbody className="divide-y divide-hairline">
                   {commits.slice(0, 8).map((c) => (
                     <tr key={c.id} className="hover:bg-surface-elevated">
@@ -264,7 +167,7 @@ export function Home({ onAddProject }: { onAddProject: () => void }) {
                       <td className="truncate px-2 py-2 text-body">
                         {c.summary}
                       </td>
-                      <td className="px-4 py-2 text-right text-caption-sm text-stone">
+                      <td className="whitespace-nowrap px-4 py-2 text-right text-caption-sm text-stone">
                         {timeAgo(c.ts * 1000)}
                       </td>
                     </tr>
@@ -716,6 +619,7 @@ function ProjectActivityCard() {
   const [data, setData] = useState<ActivityOverview | null>(null);
   const [loading, setLoading] = useState(false);
   const projectColors = useApp((s) => s.cfg?.project_colors ?? {});
+  const selectProject = useApp((s) => s.selectProject);
 
   useEffect(() => {
     let cancelled = false;
@@ -738,10 +642,6 @@ function ProjectActivityCard() {
 
   const active = useMemo(
     () => (data?.by_project ?? []).filter((p) => p.activity_score > 0),
-    [data],
-  );
-  const quiet = useMemo(
-    () => (data?.by_project ?? []).filter((p) => p.activity_score === 0),
     [data],
   );
 
@@ -813,39 +713,43 @@ function ProjectActivityCard() {
             </div>
           </div>
 
-          {/* Ranked bars */}
-          <ul className="flex flex-col gap-2">
+          {/* Ranked bars — clickable rows that jump straight into the
+              project's dashboard. */}
+          <ul className="flex flex-col gap-1">
             {active.map((p) => {
               const pct =
                 totalScore > 0 ? (p.activity_score / totalScore) * 100 : 0;
               const color = colorByProject[p.project];
               return (
-                <li
-                  key={p.project}
-                  className="flex items-center gap-3 rounded-sm py-1"
-                >
-                  <span
-                    className="h-2.5 w-2.5 shrink-0 rounded-full"
-                    style={{ background: color }}
-                  />
-                  <span className="w-28 truncate text-[13px] text-ink">
-                    {p.project}
-                  </span>
-                  <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-surface-elevated">
-                    <div
-                      className="absolute inset-y-0 left-0 rounded-full"
-                      style={{
-                        width: `${Math.max(pct, 1.5)}%`,
-                        background: color,
-                      }}
+                <li key={p.project}>
+                  <button
+                    type="button"
+                    onClick={() => selectProject(p.project)}
+                    className="group flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-surface-elevated"
+                  >
+                    <span
+                      className="h-2.5 w-2.5 shrink-0 rounded-full"
+                      style={{ background: color }}
                     />
-                  </div>
-                  <span className="w-20 text-right font-mono text-[11px] tabular-nums text-mute">
-                    {p.activity_score.toLocaleString()}
-                  </span>
-                  <span className="w-14 text-right text-[10px] text-stone">
-                    {pct.toFixed(0)}%
-                  </span>
+                    <span className="w-28 truncate text-[13px] text-ink">
+                      {p.project}
+                    </span>
+                    <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-surface-elevated">
+                      <div
+                        className="absolute inset-y-0 left-0 rounded-full"
+                        style={{
+                          width: `${Math.max(pct, 1.5)}%`,
+                          background: color,
+                        }}
+                      />
+                    </div>
+                    <span className="w-20 shrink-0 whitespace-nowrap text-right font-mono text-[11px] tabular-nums text-mute">
+                      {p.activity_score.toLocaleString()}
+                    </span>
+                    <span className="w-12 shrink-0 whitespace-nowrap text-right text-[10px] text-stone">
+                      {pct.toFixed(0)}%
+                    </span>
+                  </button>
                 </li>
               );
             })}
@@ -873,11 +777,6 @@ function ProjectActivityCard() {
               {compactNumber(data.total_mcp_tokens)}
             </span>
           </span>
-          {quiet.length > 0 && (
-            <span className="ml-auto">
-              조용한 프로젝트 {quiet.length}개
-            </span>
-          )}
         </footer>
       )}
     </section>

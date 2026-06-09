@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
-  Bot,
   ChevronRight,
   Code2,
   Coins,
@@ -122,18 +121,9 @@ export function McpInboundCard({
           {/* Sparkline — bare bones SVG. ~120px tall. */}
           <Sparkline daily={data?.daily ?? []} max={sparklineMax} />
 
-          {/* Per-client + per-tool side-by-side. */}
-          <div className="mt-4 grid grid-cols-2 gap-3">
-            <BreakdownPanel
-              title="에이전트별"
-              icon={<Bot size={11} className="text-accent-blue" />}
-              rows={(data?.by_client ?? []).map((c) => ({
-                label: clientLabel(c.client),
-                tokens: c.tokens,
-                calls: c.calls,
-              }))}
-              total={data?.total_tokens ?? 0}
-            />
+          {/* 도구별 breakdown — 에이전트별 패널은 홈 카드에선 노이즈가
+              많아 제거. 에이전트별 분포가 필요하면 프로젝트 상세에서 확인. */}
+          <div className="mt-4">
             <BreakdownPanel
               title="도구별"
               icon={<Code2 size={11} className="text-accent-green" />}

@@ -2281,15 +2281,15 @@ function GoalsCard({ project }: { project: string }) {
   }
 
   return (
-    <section className="rounded-lg border border-hairline bg-surface p-4">
+    <section className="overflow-hidden rounded-lg border border-accent-yellow/30 bg-accent-yellow-soft/15 p-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Target className="h-3.5 w-3.5 text-stone" />
-          <span className="text-[12px] font-semibold uppercase tracking-[0.6px] text-mute">
+          <Target className="h-3.5 w-3.5 text-accent-yellow" />
+          <span className="text-[12px] font-semibold uppercase tracking-[0.6px] text-accent-yellow">
             Goals
           </span>
           {goals.length > 0 && (
-            <span className="text-[11px] tabular-nums text-stone">
+            <span className="rounded-xs bg-accent-yellow-soft px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-accent-yellow">
               {goals.length}
             </span>
           )}
@@ -2300,7 +2300,7 @@ function GoalsCard({ project }: { project: string }) {
             setAdding(true);
             setDraft("");
           }}
-          className="flex items-center gap-1 rounded-md border border-hairline bg-surface-elevated px-2 py-1 text-[11px] text-mute hover:text-ink"
+          className="flex items-center gap-1 rounded-md border border-accent-yellow/40 bg-accent-yellow-soft/40 px-2 py-1 text-[11px] font-medium text-accent-yellow transition-colors hover:bg-accent-yellow-soft"
         >
           <Plus className="h-3 w-3" />
           추가
@@ -2308,7 +2308,7 @@ function GoalsCard({ project }: { project: string }) {
       </div>
 
       {goals.length === 0 && !adding && !loading && (
-        <p className="mt-3 text-[12px] text-stone">
+        <p className="mt-3 text-[12px] text-on-dark-mute">
           아직 goal 이 없어요. 이 프로젝트에서 지금 뭘 하려는지 한 줄로
           남겨두면 Claude 세션에 자동으로 노출돼요.
         </p>
@@ -2319,23 +2319,26 @@ function GoalsCard({ project }: { project: string }) {
           {goals.map((g) => (
             <li
               key={g.id}
-              className="group flex items-start justify-between gap-3 rounded-md border border-hairline bg-surface-elevated px-3 py-2"
+              className="group flex items-start justify-between gap-3 rounded-md border border-accent-yellow/25 bg-surface-elevated px-3 py-2"
             >
-              <div className="flex min-w-0 flex-col">
-                <span className="truncate text-[13px] text-ink">
-                  {g.title}
-                </span>
-                {g.note && (
-                  <span className="mt-0.5 truncate text-[11px] text-stone">
-                    {g.note}
+              <div className="flex min-w-0 items-start gap-2">
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent-yellow" />
+                <div className="flex min-w-0 flex-col">
+                  <span className="truncate text-[13px] text-ink">
+                    {g.title}
                   </span>
-                )}
+                  {g.note && (
+                    <span className="mt-0.5 truncate text-[11px] text-stone">
+                      {g.note}
+                    </span>
+                  )}
+                </div>
               </div>
               <button
                 type="button"
                 disabled={busyId === g.id}
                 onClick={() => handleArchive(g.id)}
-                className="shrink-0 rounded-sm p-1 text-stone opacity-0 transition group-hover:opacity-100 hover:text-ink disabled:opacity-30"
+                className="shrink-0 rounded-sm p-1 text-stone opacity-0 transition group-hover:opacity-100 hover:text-accent-yellow disabled:opacity-30"
                 title="archive"
               >
                 {busyId === g.id ? (
@@ -2365,12 +2368,12 @@ function GoalsCard({ project }: { project: string }) {
               }
             }}
             placeholder="예: v0.5 릴리즈 노트 정리"
-            className="flex-1 rounded-md border border-hairline bg-surface-elevated px-2.5 py-1.5 text-[13px] text-ink placeholder:text-stone focus:border-ink focus:outline-none"
+            className="flex-1 rounded-md border border-accent-yellow/40 bg-surface-elevated px-2.5 py-1.5 text-[13px] text-ink placeholder:text-stone focus:border-accent-yellow focus:outline-none"
           />
           <button
             type="button"
             onClick={handleAdd}
-            className="rounded-md bg-primary px-3 py-1.5 text-[12px] font-medium text-on-primary hover:opacity-90"
+            className="rounded-md bg-accent-yellow px-3 py-1.5 text-[12px] font-medium text-canvas hover:opacity-90"
           >
             저장
           </button>

@@ -936,7 +936,7 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
                 onCopyMcpInstall={copyMcpInstall}
               />
             ) : (
-              <Home onAddProject={() => openDialog({ kind: "add-project" })} />
+              <Home />
             )}
           </div>
           {/* CommandBar 는 LLM provider 가 연결된 경우에만 노출. 단비
