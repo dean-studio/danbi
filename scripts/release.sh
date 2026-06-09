@@ -16,11 +16,19 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# rustup toolchain (arm64) 을 항상 우선시. Homebrew 의 cargo 가
+# /usr/local/bin (Intel) 에 깔려 있으면 host triple 이 x86_64 로 잡혀
+# Intel 바이너리가 빠지는 사고가 났던 적 있음 (v0.3.0). 다음 릴리즈에
+# 같은 함정에 빠지지 않도록 PATH 우선순위 + 명시적 --target.
+export PATH="$HOME/.cargo/bin:$PATH"
+
 KEY_PATH="${TAURI_SIGNING_PRIVATE_KEY_PATH:-$HOME/.tauri/danbi.key}"
 ROOT="$(pwd)"
 VERSION="$(node -p "require('./package.json').version")"
 OUT="$ROOT/release/v$VERSION"
-BUNDLE="$ROOT/src-tauri/target/release/bundle"
+# --target 을 박으면 산출물 경로에 target triple 한 단 더 들어감.
+TARGET_TRIPLE="aarch64-apple-darwin"
+BUNDLE="$ROOT/src-tauri/target/$TARGET_TRIPLE/release/bundle"
 
 # productName 이 바뀌어도 글롭으로 잡히도록 패턴화. 현재는 "단비".
 DMG_GLOB="$BUNDLE/dmg/*_${VERSION}_aarch64.dmg"
@@ -41,13 +49,26 @@ if [[ "${1:-}" != "--skip-build" ]]; then
     exit 1
   fi
 
-  echo "→ building signed release v$VERSION"
+  echo "→ building signed release v$VERSION (target=$TARGET_TRIPLE)"
+  echo "  using cargo: $(which cargo)"
+  echo "  host triple: $(rustc -vV | awk '/^host:/ {print $2}')"
   TAURI_SIGNING_PRIVATE_KEY="$(cat "$KEY_PATH")" \
   TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
-    npx tauri build --bundles app,dmg
+    npx tauri build --bundles app,dmg --target "$TARGET_TRIPLE"
 
   APP_PATH="$BUNDLE/macos/단비.app"
   DMG_PATH=$(ls $BUNDLE/dmg/*_${VERSION}_aarch64.dmg 2>/dev/null | head -1)
+
+  # Sanity check: built binary must actually be arm64. v0.3.0 went out as
+  # x86_64 by accident — guard so it never repeats.
+  BIN_PATH="$APP_PATH/Contents/MacOS/danbi"
+  ARCH_DESC="$(file "$BIN_PATH" 2>/dev/null || true)"
+  if ! grep -q "arm64" <<<"$ARCH_DESC"; then
+    echo "✗ built binary is NOT arm64 — got: $ARCH_DESC" >&2
+    echo "  this would trigger the 'fallback platforms not found' updater bug." >&2
+    exit 1
+  fi
+  echo "  ✓ verified arm64: $(basename "$BIN_PATH")"
 
   if ! xcrun notarytool history --keychain-profile "$NOTARIZE_PROFILE" >/dev/null 2>&1; then
     echo "⚠ notarize profile '$NOTARIZE_PROFILE' not found in keychain — skipping notarization." >&2
@@ -104,6 +125,10 @@ cp "$SIG_SRC"   "$DST_SIG"
 SIG_CONTENT="$(cat "$DST_SIG")"
 PUB_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
+# darwin-x86_64 도 같은 url/sig 로 노출 — 0.3.0 사고로 일부 사용자가 Intel
+# 빌드를 깔린 상태라 그쪽 updater 가 darwin-x86_64 키만 찾는다.
+# .app.tar.gz 안 의 .app 는 실제로 native arm64 라 다운로드받은 사용자는
+# 자동으로 native 로 전환됨.
 cat > "$DST_JSON" <<EOF
 {
   "version": "$VERSION",
@@ -111,6 +136,10 @@ cat > "$DST_JSON" <<EOF
   "pub_date": "$PUB_DATE",
   "platforms": {
     "darwin-aarch64": {
+      "signature": "$SIG_CONTENT",
+      "url": "https://github.com/dean-studio/danbi/releases/download/v$VERSION/Danbi.app.tar.gz"
+    },
+    "darwin-x86_64": {
       "signature": "$SIG_CONTENT",
       "url": "https://github.com/dean-studio/danbi/releases/download/v$VERSION/Danbi.app.tar.gz"
     }

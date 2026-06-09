@@ -1074,6 +1074,36 @@ export const ipc = {
   ghostReject: (project: string, id: string) =>
     invoke<GhostStore>("ghost_reject", { project, id }),
 
+  goalsList: (project: string, includeArchived = false) =>
+    invoke<Goal[]>("goals_list", { project, includeArchived }),
+  goalsAdd: (project: string, title: string, note?: string | null) =>
+    invoke<Goal>("goals_add", { project, title, note: note ?? null }),
+  goalsEdit: (
+    project: string,
+    id: string,
+    patch: { title?: string; note?: string | null },
+  ) => {
+    const args: Record<string, unknown> = {
+      project,
+      id,
+      title: patch.title ?? null,
+      note: null,
+      clearNote: false,
+    };
+    if (patch.note === null) {
+      args.clearNote = true;
+    } else if (patch.note !== undefined) {
+      args.note = patch.note;
+    }
+    return invoke<Goal>("goals_edit", args);
+  },
+  goalsArchive: (project: string, id: string) =>
+    invoke<Goal>("goals_archive", { project, id }),
+  goalsUnarchive: (project: string, id: string) =>
+    invoke<Goal>("goals_unarchive", { project, id }),
+  goalsDelete: (project: string, id: string) =>
+    invoke<void>("goals_delete", { project, id }),
+
   projectQaAsk: (project: string, question: string) =>
     invoke<QaAnswer>("project_qa_ask", { project, question }),
   projectBriefing: (project: string, range: "today" | "yesterday" | "last_week") =>
@@ -1242,6 +1272,14 @@ export type UsageSummary = {
   krw_per_usd: number;
   by_role: UsageRoleSummary[];
   calls: number;
+};
+
+export type Goal = {
+  id: string;
+  title: string;
+  note?: string | null;
+  created_at: number;
+  archived_at?: number | null;
 };
 
 export type QuickCaptureResult =

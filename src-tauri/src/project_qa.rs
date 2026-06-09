@@ -67,11 +67,13 @@ pub async fn ask(
     vault: &Path,
     project: &str,
     question: &str,
+    question_embedding: Option<&[f32]>,
     provider: &dyn Provider,
     writer_model: &str,
 ) -> DanbiResult<QaAnswer> {
-    // Run Tier-2 search but restrict to this project's files.
-    let all_hits = search::full_search(vault, question, 24)?;
+    // BM25 + (optional) vector RRF; the project filter is applied after
+    // ranking because tantivy doesn't index project as a filter field.
+    let all_hits = search::full_search_hybrid(vault, question, 24, question_embedding)?;
     let filtered: Vec<_> = all_hits
         .into_iter()
         .filter(|h| h.project == project)

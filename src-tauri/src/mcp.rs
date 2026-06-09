@@ -496,12 +496,19 @@ fn run_api_call(
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    let args_for_banner = args.clone();
 
     match dispatch(&tool, args) {
         Ok(text) => {
             if let Some(meta) = inbound_meta.as_ref() {
                 record_inbound_after_success(&tool, meta, &text, user_agent.as_deref());
             }
+            let text = inject_active_goals_into_text(
+                text,
+                &tool,
+                &args_for_banner,
+                scoped_project.as_deref(),
+            );
             // Most tools return a JSON document as a string. Try to
             // surface it as parsed JSON so REST consumers get structured
             // data without an extra parse step. If parsing fails we just
@@ -655,6 +662,9 @@ async fn run_rpc(
                 .get("user-agent")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
+            // Snapshot args before dispatch consumes them — banner
+            // injection later needs the project hint from the args.
+            let args_for_banner = args.clone();
 
             // danbi_search 만 RRF 하이브리드 fast-path 로 분기. 임베딩
             // provider 가 cfg 에 있으면 BM25 + 벡터 결과를 RRF 로 병합해서
@@ -678,6 +688,12 @@ async fn run_rpc(
                             user_agent.as_deref(),
                         );
                     }
+                    let text = inject_active_goals_into_text(
+                        text,
+                        name,
+                        &args_for_banner,
+                        scoped_project.as_deref(),
+                    );
                     (
                     StatusCode::OK,
                     Json(rpc_ok(
@@ -843,6 +859,113 @@ fn tool_catalog() -> Vec<Value> {
     ]
 }
 
+// ---------- Goal banner injection -----------------------------------------
+//
+// Per-project goals surface inside MCP tool responses so external Claude
+// sessions stay oriented. The banner is best-effort: if no project is
+// identifiable from the args/scope/result, we skip injection. We also
+// preserve compatibility — JSON arrays are returned untouched (clients
+// like Claude Code parse arrays as array), JSON objects gain an
+// `_active_goals` field, and raw markdown gets a single-line HTML
+// comment prefix.
+
+/// Identify the project(s) whose active goals should be surfaced for a
+/// tool response. Order matters — we keep the args/scope source first
+/// because that's the most authoritative ("you asked about project P").
+fn identify_projects_for_banner(
+    name: &str,
+    args: &Value,
+    scoped_project: Option<&str>,
+    parsed_result: Option<&Value>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |s: &str| {
+        let s = s.trim();
+        if s.is_empty() {
+            return;
+        }
+        if !out.iter().any(|p| p == s) {
+            out.push(s.to_string());
+        }
+    };
+    if let Some(p) = scoped_project {
+        push(p);
+    }
+    if let Some(p) = args.get("project").and_then(|v| v.as_str()) {
+        push(p);
+    }
+    // For search/recent results, the top hit's project is a strong
+    // signal — the user is clearly working in that area right now.
+    if matches!(name, "danbi_search" | "danbi_recent") {
+        if let Some(arr) = parsed_result.and_then(|v| v.as_array()) {
+            if let Some(first) = arr.first() {
+                if let Some(p) = first.get("project").and_then(|v| v.as_str()) {
+                    push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn inject_active_goals_into_text(
+    text: String,
+    name: &str,
+    args: &Value,
+    scoped_project: Option<&str>,
+) -> String {
+    let vault_path = match current_vault_path() {
+        Ok(p) => p,
+        Err(_) => return text,
+    };
+    // Try parsing — most tools return JSON. read returns raw markdown.
+    let parsed: Option<Value> = serde_json::from_str(&text).ok();
+    let projects =
+        identify_projects_for_banner(name, args, scoped_project, parsed.as_ref());
+    if projects.is_empty() {
+        return text;
+    }
+    // Collect (project, [titles]) once per project; skip projects with no
+    // active goals so the field isn't noise on the wire.
+    let mut by_project: Vec<(String, Vec<String>)> = Vec::new();
+    for p in &projects {
+        let titles = crate::goals::active_titles(&vault_path, p);
+        if !titles.is_empty() {
+            by_project.push((p.clone(), titles));
+        }
+    }
+    if by_project.is_empty() {
+        return text;
+    }
+    let goals_value = json!(
+        by_project
+            .iter()
+            .map(|(p, titles)| json!({ "project": p, "titles": titles }))
+            .collect::<Vec<_>>()
+    );
+
+    match parsed {
+        Some(Value::Object(mut map)) => {
+            map.insert("_active_goals".into(), goals_value);
+            serde_json::to_string_pretty(&Value::Object(map)).unwrap_or(text)
+        }
+        // Arrays stay arrays for backward-compat — clients that read
+        // hits[i] from the response shouldn't suddenly get an object.
+        Some(Value::Array(_)) => text,
+        // Raw markdown (read tool) — one-line HTML comment prefix so the
+        // model sees the goals without breaking the markdown body.
+        _ => {
+            let banner_lines: Vec<String> = by_project
+                .iter()
+                .map(|(p, titles)| {
+                    format!("danbi · [{}] active goals: {}", p, titles.join(" / "))
+                })
+                .collect();
+            format!("<!-- {} -->\n{}", banner_lines.join(" | "), text)
+        }
+    }
+}
+
 // ---------- Tool dispatcher ----------
 
 /// `danbi_search` 만의 async 처리 경로. 임베딩 provider 가 cfg 에 설정돼
@@ -863,31 +986,8 @@ async fn search_hybrid_dispatch(args: Value) -> Result<String, DanbiError> {
 
     // cfg 의 embed provider 로 query 를 임베딩한다. 키 없거나 호출 실패
     // 면 None — `full_search_hybrid` 가 BM25 only 로 graceful fallback.
-    let cfg = crate::config::load_config(&vault_path)?;
-    let embedding: Option<Vec<f32>> = match cfg {
-        Some(c) => match crate::commands::resolve_embed_provider(&c) {
-            Ok(provider) => {
-                let model = crate::commands::resolve_embed_model(
-                    &c,
-                    provider.as_ref(),
-                    None,
-                );
-                if model.is_empty() {
-                    None
-                } else {
-                    let res = crate::usage::with_role(
-                        "embed",
-                        provider.embed(&model, &[query.clone()]),
-                    )
-                    .await;
-                    match res {
-                        Ok(embs) => embs.into_iter().next(),
-                        Err(_) => None,
-                    }
-                }
-            }
-            Err(_) => None,
-        },
+    let embedding: Option<Vec<f32>> = match crate::config::load_config(&vault_path)? {
+        Some(c) => crate::commands::embed_query_for_search(&c, &query).await,
         None => None,
     };
 

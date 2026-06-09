@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Archive,
   CalendarDays,
   Check,
   Clock4,
@@ -17,6 +18,7 @@ import {
   Send,
   Server,
   Sparkles,
+  Target,
   X,
 } from "lucide-react";
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
@@ -28,6 +30,7 @@ import {
   type DayCounts,
   type GhostLink,
   type GhostStore,
+  type Goal,
   type McpProjectEndpoint,
   type ProjectContextStatus,
   type ProjectJournalView,
@@ -252,6 +255,9 @@ export function ProjectHome({
               onAddDomain={() => onAddDomain(project)}
               onOpenGraph={() => onOpenGraph(project)}
             />
+          </div>
+          <div className="mt-6">
+            <GoalsCard project={project} />
           </div>
           <div className="mt-6">
             <SevenDayBar project={project} />
@@ -2216,3 +2222,170 @@ function Stat2({ label, value }: { label: string; value: number }) {
 }
 
 // (옛 inline progress 코드는 ReindexModal 로 통합됨.)
+
+/** Per-project goals — short statements of "what I'm trying to do here
+ *  right now". Surfaced both in this card and in MCP tool responses (as
+ *  `_active_goals`) so external Claude sessions stay oriented even when
+ *  the user doesn't explicitly remind them. Drift detection is not
+ *  attempted — the user decides what counts as on-track. */
+function GoalsCard({ project }: { project: string }) {
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const g = await ipc.goalsList(project);
+      setGoals(g);
+    } catch (e) {
+      console.error("[danbi] goals list failed", e);
+      setGoals([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [project]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function handleAdd() {
+    const title = draft.trim();
+    if (!title) {
+      setAdding(false);
+      return;
+    }
+    try {
+      await ipc.goalsAdd(project, title);
+      setDraft("");
+      setAdding(false);
+      await load();
+    } catch (e) {
+      console.error("[danbi] goals add failed", e);
+    }
+  }
+
+  async function handleArchive(id: string) {
+    setBusyId(id);
+    try {
+      await ipc.goalsArchive(project, id);
+      await load();
+    } catch (e) {
+      console.error("[danbi] goals archive failed", e);
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <section className="rounded-lg border border-hairline bg-surface p-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Target className="h-3.5 w-3.5 text-stone" />
+          <span className="text-[12px] font-semibold uppercase tracking-[0.6px] text-mute">
+            Goals
+          </span>
+          {goals.length > 0 && (
+            <span className="text-[11px] tabular-nums text-stone">
+              {goals.length}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setAdding(true);
+            setDraft("");
+          }}
+          className="flex items-center gap-1 rounded-md border border-hairline bg-surface-elevated px-2 py-1 text-[11px] text-mute hover:text-ink"
+        >
+          <Plus className="h-3 w-3" />
+          추가
+        </button>
+      </div>
+
+      {goals.length === 0 && !adding && !loading && (
+        <p className="mt-3 text-[12px] text-stone">
+          아직 goal 이 없어요. 이 프로젝트에서 지금 뭘 하려는지 한 줄로
+          남겨두면 Claude 세션에 자동으로 노출돼요.
+        </p>
+      )}
+
+      {goals.length > 0 && (
+        <ul className="mt-3 flex flex-col gap-1.5">
+          {goals.map((g) => (
+            <li
+              key={g.id}
+              className="group flex items-start justify-between gap-3 rounded-md border border-hairline bg-surface-elevated px-3 py-2"
+            >
+              <div className="flex min-w-0 flex-col">
+                <span className="truncate text-[13px] text-ink">
+                  {g.title}
+                </span>
+                {g.note && (
+                  <span className="mt-0.5 truncate text-[11px] text-stone">
+                    {g.note}
+                  </span>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled={busyId === g.id}
+                onClick={() => handleArchive(g.id)}
+                className="shrink-0 rounded-sm p-1 text-stone opacity-0 transition group-hover:opacity-100 hover:text-ink disabled:opacity-30"
+                title="archive"
+              >
+                {busyId === g.id ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Archive className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {adding && (
+        <div className="mt-3 flex items-center gap-2">
+          <input
+            autoFocus
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleAdd();
+              } else if (e.key === "Escape") {
+                setAdding(false);
+                setDraft("");
+              }
+            }}
+            placeholder="예: v0.5 릴리즈 노트 정리"
+            className="flex-1 rounded-md border border-hairline bg-surface-elevated px-2.5 py-1.5 text-[13px] text-ink placeholder:text-stone focus:border-ink focus:outline-none"
+          />
+          <button
+            type="button"
+            onClick={handleAdd}
+            className="rounded-md bg-primary px-3 py-1.5 text-[12px] font-medium text-on-primary hover:opacity-90"
+          >
+            저장
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setAdding(false);
+              setDraft("");
+            }}
+            className="rounded-md p-1.5 text-stone hover:text-ink"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+    </section>
+  );
+}

@@ -7,6 +7,40 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-09
+
+### Added
+
+- **프로젝트별 Goal** — 각 프로젝트 대시보드에 "지금 뭘 하려는지" 한 줄로
+  적어두는 카드. 추가/archive 토글 가능. 저장 위치는
+  `<vault>/Projects/<P>/.danbi/goals.json` (atomic write).
+- **MCP 응답에 active goal 자동 노출** — 외부 Claude 세션이 단비 도구를
+  부를 때 응답에 `_active_goals` 필드가 자동으로 끼어듭니다. 식별 가능한
+  프로젝트가 있을 때만 (scoped endpoint, args.project, 검색 top hit). JSON
+  object 응답엔 필드 추가, array 응답(search/recent)은 호환성 위해
+  그대로 두고, raw markdown(read)엔 한 줄 HTML 주석 prefix.
+- **하이브리드 검색을 grounding 흐름까지 확장** — `search::full_search_hybrid`
+  (BM25 + 벡터 RRF 병합) 를 plan preview · quick capture · compound
+  preview · project Q&A 의 grounding 단계에도 배선. 임베딩 provider 가
+  꺼져 있으면 BM25 only 로 자동 fallback.
+
+### Build
+
+- **arm64 강제 빌드** — `scripts/release.sh` 가 `~/.cargo/bin` PATH 우선시 +
+  `--target aarch64-apple-darwin` 명시 + 빌드 직후 산출물 Mach-O arch 검증.
+  v0.3.0/0.4.0 에서 발생한 Intel 빌드 사고 재발 방지.
+- **updater manifest 에 darwin-x86_64 fallback 키 추가** — 0.3.0/0.4.0 을
+  Intel 바이너리로 받은 사용자도 같은 manifest 에서 v0.5.0 native arm64
+  payload 로 자동 업데이트되도록.
+
+## [0.4.0] — 2026-06-02
+
+### Added
+
+- **MCP 저장 토큰 대시보드** — 외부 Claude/Cursor 세션이 MCP 로 vault 에
+  쓴 토큰량을 프로젝트·도메인 단위로 집계해서 대시보드에 노출.
+  사이드바에서 프로젝트 선택 시 미니 카드로도 확인 가능.
+
 ## [0.3.1] — 2026-05-27
 
 ### Fixed

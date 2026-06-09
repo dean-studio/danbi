@@ -13,6 +13,7 @@ mod cache;
 mod edit_ops;
 mod error;
 mod ghost_links;
+mod goals;
 mod graph;
 mod grounding;
 mod healing;
@@ -563,6 +564,12 @@ pub fn run() {
             commands::project_briefing,
             commands::extract_file_path,
             commands::extract_file_bytes,
+            commands::goals_list,
+            commands::goals_add,
+            commands::goals_edit,
+            commands::goals_archive,
+            commands::goals_unarchive,
+            commands::goals_delete,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -35,10 +35,16 @@ pub struct GroundingSnippet {
 ///     Writer to drag in noise from unrelated projects.
 ///   - `project_filter = None` scans the whole vault (useful for cross-
 ///     project Q&A flows later).
+///
+/// `query_embedding` is optional — when present, BM25 hits are RRF-merged
+/// with cosine-similarity hits from the persisted vector index so the
+/// Writer also sees semantically related notes that wouldn't surface from
+/// keyword overlap alone. Pass None when no embed provider is configured.
 pub fn gather_grounding(
     vault: &Path,
     project_filter: Option<&str>,
     query: &str,
+    query_embedding: Option<&[f32]>,
     exclude_domain: Option<&str>,
     max_docs: usize,
     max_chars_per_doc: usize,
@@ -48,9 +54,14 @@ pub fn gather_grounding(
         return Ok(Vec::new());
     }
 
-    // tantivy already handles ranking; we just over-fetch a bit and trim
-    // after applying the project/domain filters.
-    let raw = search::full_search(vault, query_trim, max_docs.saturating_mul(3).max(8))?;
+    // tantivy + (optional) vector RRF; over-fetch a bit so the project
+    // filter below still leaves enough candidates.
+    let raw = search::full_search_hybrid(
+        vault,
+        query_trim,
+        max_docs.saturating_mul(3).max(8),
+        query_embedding,
+    )?;
 
     let mut out: Vec<GroundingSnippet> = Vec::new();
     for hit in raw {

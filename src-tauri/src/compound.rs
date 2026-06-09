@@ -36,10 +36,16 @@ const MAX_PER_SOURCE_CHARS: usize = 12_000;
 const MAX_SOURCES: usize = 12;
 
 /// Gathers up to N most relevant documents for a topic query. Uses Tier 2
-/// (tantivy) search for speed + precision. Falls back to preview-only Tier 1
-/// if tantivy ever misbehaves.
-pub fn gather_sources(vault: &Path, topic: &str) -> DanbiResult<Vec<CompoundSource>> {
-    let hits = match search::full_search(vault, topic, MAX_SOURCES) {
+/// (tantivy) plus, when a query embedding is provided, RRF-merged vector
+/// hits — semantic recall matters here because the synthesizer has to
+/// pull in scattered notes that may not share keywords with the topic.
+/// Falls back to preview-only Tier 1 when both tiers come up empty.
+pub fn gather_sources(
+    vault: &Path,
+    topic: &str,
+    topic_embedding: Option<&[f32]>,
+) -> DanbiResult<Vec<CompoundSource>> {
+    let hits = match search::full_search_hybrid(vault, topic, MAX_SOURCES, topic_embedding) {
         Ok(h) if !h.is_empty() => h,
         _ => {
             let idx = search::build_index(vault)?;

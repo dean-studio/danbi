@@ -744,6 +744,25 @@ pub fn resolve_embed_model(
     provider.default_embed_model().to_string()
 }
 
+/// Embed a single query string using whatever embed provider the user has
+/// configured. Returns None when no provider is configured, the model id
+/// resolves to empty, or the embed call fails (rate-limit, network, etc.) —
+/// callers can then fall back to BM25-only search transparently.
+pub async fn embed_query_for_search(cfg: &DanbiConfig, query: &str) -> Option<Vec<f32>> {
+    let provider = resolve_embed_provider(cfg).ok()?;
+    let model = resolve_embed_model(cfg, provider.as_ref(), None);
+    if model.is_empty() {
+        return None;
+    }
+    let res = crate::usage::with_role(
+        "embed",
+        provider.embed(&model, &[query.to_string()]),
+    )
+    .await
+    .ok()?;
+    res.into_iter().next()
+}
+
 #[tauri::command]
 pub async fn route_message(
     message: String,
@@ -843,10 +862,12 @@ pub async fn preview_plan(
     // Wiki grounding: pull related passages from the same project so the
     // Writer can reference accumulated knowledge and insert [[link]]s
     // instead of re-deriving everything from scratch.
+    let grounding_embedding = embed_query_for_search(&cfg, &message).await;
     let grounding = crate::grounding::gather_grounding(
         &PathBuf::from(&vault_path),
         Some(&project),
         &message,
+        grounding_embedding.as_deref(),
         Some(&domain),
         4,
         800,
@@ -1634,10 +1655,12 @@ pub async fn quick_capture(
     let dom = route.domain.clone().unwrap();
     let doc = vault::read_doc(&vault_path, &proj, &dom)?;
 
+    let grounding_embedding = embed_query_for_search(&cfg, &message).await;
     let grounding = crate::grounding::gather_grounding(
         &vault_path,
         Some(&proj),
         &message,
+        grounding_embedding.as_deref(),
         Some(&dom),
         4,
         800,
@@ -1860,26 +1883,8 @@ pub async fn search_full(
     let lim = limit.unwrap_or(10);
 
     // 사용자가 임베딩 provider 를 설정해뒀으면 RRF 하이브리드 검색,
-    // 아니면 BM25 만 사용. 0.1 의 메시지 ("Gemini 키 넣으면 진짜 더 좋아짐")
-    // 은 정확히 이 분기에서 발생한다.
-    let embedding = match resolve_embed_provider(&cfg) {
-        Ok(provider) => {
-            let model = resolve_embed_model(&cfg, provider.as_ref(), None);
-            if model.is_empty() {
-                None
-            } else {
-                let res =
-                    crate::usage::with_role("embed", provider.embed(&model, &[query.clone()]))
-                        .await;
-                match res {
-                    Ok(embs) => embs.into_iter().next(),
-                    Err(_) => None, // rate-limited / network: BM25 만으로 fallback
-                }
-            }
-        }
-        Err(_) => None,
-    };
-
+    // 아니면 BM25 만 사용.
+    let embedding = embed_query_for_search(&cfg, &query).await;
     crate::search::full_search_hybrid(&vault_path, &query, lim, embedding.as_deref())
 }
 
@@ -1911,7 +1916,9 @@ pub async fn compound_preview(
         .ok_or_else(|| DanbiError::Config("writer model missing".into()))?;
     let vault_path = require_vault(&cfg)?;
 
-    let mut sources = crate::compound::gather_sources(&vault_path, &topic)?;
+    let topic_embedding = embed_query_for_search(&cfg, &topic).await;
+    let mut sources =
+        crate::compound::gather_sources(&vault_path, &topic, topic_embedding.as_deref())?;
     if let Some(cap) = max_sources {
         sources.truncate(cap.max(1));
     }
@@ -2994,7 +3001,16 @@ pub async fn project_qa_ask(project: String, question: String) -> DanbiResult<Qa
         .ok_or_else(|| DanbiError::Config("writer model missing".into()))?;
     let vault_path = require_vault(&cfg)?;
     let provider = resolve_provider(&cfg)?;
-    project_qa::ask(&vault_path, &project, &question, provider.as_ref(), &writer).await
+    let question_embedding = embed_query_for_search(&cfg, &question).await;
+    project_qa::ask(
+        &vault_path,
+        &project,
+        &question,
+        question_embedding.as_deref(),
+        provider.as_ref(),
+        &writer,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3593,4 +3609,84 @@ pub fn skill_status(project: String) -> DanbiResult<bool> {
         .join(skill_dir_for(&project))
         .join("SKILL.md");
     Ok(skill_md.exists())
+}
+
+// ---------- Goals ----------------------------------------------------------
+
+#[tauri::command]
+pub fn goals_list(
+    project: String,
+    include_archived: Option<bool>,
+) -> DanbiResult<Vec<crate::goals::Goal>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    if include_archived.unwrap_or(false) {
+        crate::goals::list_all(&vault_path, &project)
+    } else {
+        crate::goals::list_active(&vault_path, &project)
+    }
+}
+
+#[tauri::command]
+pub fn goals_add(
+    project: String,
+    title: String,
+    note: Option<String>,
+) -> DanbiResult<crate::goals::Goal> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::goals::add(&vault_path, &project, &title, note)
+}
+
+#[tauri::command]
+pub fn goals_edit(
+    project: String,
+    id: String,
+    title: Option<String>,
+    note: Option<String>,
+    clear_note: Option<bool>,
+) -> DanbiResult<crate::goals::Goal> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    // `clear_note=true` overrides any provided note and wipes it.
+    // Otherwise, Some(value) sets, None leaves untouched.
+    let note_patch = if clear_note.unwrap_or(false) {
+        Some(None)
+    } else {
+        note.map(Some)
+    };
+    crate::goals::edit(&vault_path, &project, &id, title, note_patch)
+}
+
+#[tauri::command]
+pub fn goals_archive(project: String, id: String) -> DanbiResult<crate::goals::Goal> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::goals::archive(&vault_path, &project, &id)
+}
+
+#[tauri::command]
+pub fn goals_unarchive(project: String, id: String) -> DanbiResult<crate::goals::Goal> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::goals::unarchive(&vault_path, &project, &id)
+}
+
+#[tauri::command]
+pub fn goals_delete(project: String, id: String) -> DanbiResult<()> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::goals::delete(&vault_path, &project, &id)
 }
