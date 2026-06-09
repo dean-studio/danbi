@@ -57,9 +57,8 @@ jobs:
           echo "Resolved version=$VERSION"
 
       - name: Setup pnpm
+        # version 은 package.json 의 `packageManager` 필드를 따라감.
         uses: pnpm/action-setup@v4
-        with:
-          version: 10
 
       - name: Setup Node
         uses: actions/setup-node@v4
