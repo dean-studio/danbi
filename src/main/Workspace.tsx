@@ -11,6 +11,7 @@ import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-ma
 import { Dialog } from "@/components/Dialog";
 import { ProjectIconPicker } from "@/components/ProjectIconPicker";
 import { ProjectColorPicker } from "@/components/ProjectColorPicker";
+import { LoadingScreen } from "@/App";
 import { AboutDialog } from "@/main/AboutDialog";
 import {
   PrimaryButton,
@@ -140,6 +141,7 @@ export function Workspace() {
     let unlistenAbout: UnlistenFn | null = null;
     let unlistenSettings: UnlistenFn | null = null;
     let unlistenOpenDoc: UnlistenFn | null = null;
+    let unlistenSelectProject: UnlistenFn | null = null;
     (async () => {
       unlistenAbout = await listen("about:show", () => setAboutOpen(true));
       unlistenSettings = await listen("settings:show", () =>
@@ -158,11 +160,22 @@ export function Workspace() {
           }
         },
       );
+      // Popover 의 프로젝트 퀵셔트 클릭이 emit. payload = { project }.
+      unlistenSelectProject = await listen<{ project: string }>(
+        "danbi:select-project",
+        (e) => {
+          const p = e.payload?.project;
+          if (typeof p === "string") {
+            useApp.getState().selectProject(p);
+          }
+        },
+      );
     })();
     return () => {
       if (unlistenAbout) unlistenAbout();
       if (unlistenSettings) unlistenSettings();
       if (unlistenOpenDoc) unlistenOpenDoc();
+      if (unlistenSelectProject) unlistenSelectProject();
     };
   }, []);
   const [toast, setToast] = useState<{
@@ -516,14 +529,21 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
         refresh();
       }, 200);
     };
-    (async () => {
-      await ipc.initVault(vault);
-      await refresh();
-      await ipc.startWatching(vault);
-      unlisten = await onVaultChanged(() => {
-        scheduleRefresh();
+    // 첫 paint 가 끝난 다음 tick 에 무거운 IPC 시작. webview 가 splash
+    // 화면을 먼저 그리고 나서 백엔드 호출을 시작해야 macOS 가 webview
+    // 를 unresponsive 로 보지 않음 (= 비치볼 spinner 안 뜸).
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        (async () => {
+          await ipc.initVault(vault);
+          await refresh();
+          await ipc.startWatching(vault);
+          unlisten = await onVaultChanged(() => {
+            scheduleRefresh();
+          });
+        })();
       });
-    })();
+    });
     return () => {
       if (pending) clearTimeout(pending);
       if (unlisten) unlisten();
@@ -767,6 +787,15 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
   const onEnter = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.key === "Enter") handleSubmit();
   };
+
+  // 첫 진입 splash — tree 가 도착하기 전엔 App.tsx 의 단비 LoadingScreen
+  // 그대로 보여줌. App splash 와 같은 화면이라 시각적 끊김 없이 로딩 →
+  // 실 화면 swap 이 자연스럽다. macOS 비치볼이 webview 위에서 빈 사이드바
+  // 위로 뜨는 케이스도 같이 막힌다.
+  const treeReady = useApp((s) => s.tree !== null);
+  if (!treeReady) {
+    return <LoadingScreen />;
+  }
 
   return (
     <>

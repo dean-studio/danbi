@@ -4,8 +4,10 @@ use tauri::{
 };
 
 pub const POPOVER_LABEL: &str = "popover";
-const POPOVER_WIDTH: f64 = 380.0;
-const POPOVER_HEIGHT: f64 = 540.0;
+// v0.5.0+: popover = 컴팩트 CTA + 최근 활동 프로젝트 4개 퀵셔트 + MCP/종료
+// footer. 그 외 패널은 본체에서 보면 됨.
+const POPOVER_WIDTH: f64 = 300.0;
+const POPOVER_HEIGHT: f64 = 245.0;
 /// Gap between the top of the screen (menu bar) and the top of the popover.
 const MENUBAR_GAP: f64 = 32.0;
 /// Horizontal nudge from the tray icon's x position so the popover's right

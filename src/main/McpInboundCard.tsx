@@ -87,7 +87,9 @@ export function McpInboundCard({
         </div>
       </header>
 
-      {empty ? (
+      {loading && !data ? (
+        <McpCardSkeleton />
+      ) : empty ? (
         <EmptyState />
       ) : (
         <div className="px-4 py-4">
@@ -596,6 +598,23 @@ function ProjectRow({
         )}
       </button>
     </li>
+  );
+}
+
+function McpCardSkeleton() {
+  return (
+    <div className="px-4 py-4">
+      <div className="flex items-baseline gap-3">
+        <div className="h-9 w-32 animate-pulse rounded-sm bg-surface-elevated" />
+        <div className="h-3 w-12 animate-pulse rounded-sm bg-surface-elevated" />
+        <div className="ml-auto h-3 w-16 animate-pulse rounded-sm bg-surface-elevated" />
+      </div>
+      <div className="mt-4 h-[120px] animate-pulse rounded-md bg-surface-elevated" />
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <div className="h-24 animate-pulse rounded-md bg-surface-elevated" />
+        <div className="h-24 animate-pulse rounded-md bg-surface-elevated" />
+      </div>
+    </div>
   );
 }
 

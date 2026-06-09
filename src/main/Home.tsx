@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  Activity,
   CalendarDays,
   Clock4,
   FileText,
@@ -12,12 +13,17 @@ import {
 } from "lucide-react";
 import {
   ipc,
+  type ActivityOverview,
   type CommitSummary,
   type DailySnapshot,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 import { McpInboundCard } from "./McpInboundCard";
+import {
+  PROJECT_COLOR_KEYS,
+  projectColorVars,
+} from "@/components/ProjectColorPicker";
 
 export function Home({ onAddProject }: { onAddProject: () => void }) {
   const cfg = useApp((s) => s.cfg);
@@ -82,6 +88,13 @@ export function Home({ onAddProject }: { onAddProject: () => void }) {
           {/* MCP inbound — Claude Code / Codex 가 단비에 저장한 콘텐츠 추정량.
               0.4.0 부터 홈 최상단으로 노출 (활동 신호가 가장 먼저 보이도록). */}
           <McpInboundCard onOpenProject={selectProject} />
+
+          {/* 프로젝트별 활동 분포 — MCP 인바운드 바로 아래에 둬서 "외부에서
+              들어온 토큰" → "전체 활동량" 흐름이 위에서 아래로 자연스럽게
+              이어지게. */}
+          <div className="mt-6">
+            <ProjectActivityCard />
+          </div>
 
           {/* Claude Code 통합 셋업 — Skill 한 번 설치 / CLAUDE.md 프로젝트별 */}
           <SkillSetupCard />
@@ -683,5 +696,333 @@ function SkillSetupCard() {
         </div>
       )}
     </section>
+  );
+}
+
+// ─── ProjectActivityCard ────────────────────────────────────────────────
+//
+// "어느 프로젝트에 시간 쓰고 있나" 를 가장 cheap 한 두 신호 — vault git
+// commit 수 + MCP 외부 쓰기 호출 수 — 의 합으로 시각화. 타이머가 아니라
+// "활동량" 이라 절대 시간(분) 은 아니지만 트렌드 비교는 정확하다.
+
+const RANGE_OPTIONS: Array<{ days: number; label: string }> = [
+  { days: 7, label: "7일" },
+  { days: 30, label: "30일" },
+  { days: 90, label: "90일" },
+];
+
+function ProjectActivityCard() {
+  const [days, setDays] = useState(30);
+  const [data, setData] = useState<ActivityOverview | null>(null);
+  const [loading, setLoading] = useState(false);
+  const projectColors = useApp((s) => s.cfg?.project_colors ?? {});
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    ipc
+      .projectActivityOverview(days)
+      .then((res) => {
+        if (!cancelled) setData(res);
+      })
+      .catch(() => {
+        if (!cancelled) setData(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [days]);
+
+  const active = useMemo(
+    () => (data?.by_project ?? []).filter((p) => p.activity_score > 0),
+    [data],
+  );
+  const quiet = useMemo(
+    () => (data?.by_project ?? []).filter((p) => p.activity_score === 0),
+    [data],
+  );
+
+  const totalScore = useMemo(
+    () => active.reduce((acc, p) => acc + p.activity_score, 0),
+    [active],
+  );
+
+  // 프로젝트별 cfg 색을 우선 쓰되, 같은 도넛 안에서 색이 충돌하면
+  // 팔레트 남은 키 중에서 채워서 segment 구분이 명확하게.
+  const colorByProject = useMemo(
+    () => assignDistinctColors(active.map((p) => p.project), projectColors),
+    [active, projectColors],
+  );
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-hairline bg-surface">
+      <header className="flex items-center justify-between border-b border-hairline px-5 py-3">
+        <div className="flex items-center gap-2">
+          <Activity size={14} className="text-stone" />
+          <span className="text-[12px] font-semibold uppercase tracking-[0.6px] text-mute">
+            프로젝트 활동 분포
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          {RANGE_OPTIONS.map((opt) => (
+            <button
+              key={opt.days}
+              onClick={() => setDays(opt.days)}
+              className={cn(
+                "rounded-sm px-2 py-1 text-[11px] transition-colors",
+                days === opt.days
+                  ? "bg-surface-elevated text-ink"
+                  : "text-stone hover:text-mute",
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      {loading && !data && <ActivityCardSkeleton />}
+
+      {data && active.length === 0 && (
+        <div className="px-5 py-10 text-center text-[13px] text-stone">
+          이 기간에 활동이 없어요.
+        </div>
+      )}
+
+      {data && active.length > 0 && (
+        <div className="grid gap-6 p-5 md:grid-cols-[180px_1fr]">
+          {/* Donut */}
+          <div className="flex flex-col items-center gap-3">
+            <ActivityDonut
+              segments={active.map((p) => ({
+                key: p.project,
+                value: p.activity_score,
+                color: colorByProject[p.project],
+              }))}
+            />
+            <div className="flex flex-col items-center text-center">
+              <span className="text-[20px] font-medium text-ink">
+                {totalScore.toLocaleString()}
+              </span>
+              <span className="text-[11px] text-stone">
+                {days}일 활동량
+              </span>
+            </div>
+          </div>
+
+          {/* Ranked bars */}
+          <ul className="flex flex-col gap-2">
+            {active.map((p) => {
+              const pct =
+                totalScore > 0 ? (p.activity_score / totalScore) * 100 : 0;
+              const color = colorByProject[p.project];
+              return (
+                <li
+                  key={p.project}
+                  className="flex items-center gap-3 rounded-sm py-1"
+                >
+                  <span
+                    className="h-2.5 w-2.5 shrink-0 rounded-full"
+                    style={{ background: color }}
+                  />
+                  <span className="w-28 truncate text-[13px] text-ink">
+                    {p.project}
+                  </span>
+                  <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-surface-elevated">
+                    <div
+                      className="absolute inset-y-0 left-0 rounded-full"
+                      style={{
+                        width: `${Math.max(pct, 1.5)}%`,
+                        background: color,
+                      }}
+                    />
+                  </div>
+                  <span className="w-20 text-right font-mono text-[11px] tabular-nums text-mute">
+                    {p.activity_score.toLocaleString()}
+                  </span>
+                  <span className="w-14 text-right text-[10px] text-stone">
+                    {pct.toFixed(0)}%
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      {data && (
+        <footer className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-hairline bg-surface-elevated/30 px-5 py-2.5 text-[11px] text-stone">
+          <span>
+            commit{" "}
+            <span className="font-mono text-mute">
+              {data.total_commits.toLocaleString()}
+            </span>
+          </span>
+          <span>
+            MCP 호출{" "}
+            <span className="font-mono text-mute">
+              {data.total_mcp_calls.toLocaleString()}
+            </span>
+          </span>
+          <span>
+            MCP 토큰{" "}
+            <span className="font-mono text-mute">
+              {compactNumber(data.total_mcp_tokens)}
+            </span>
+          </span>
+          {quiet.length > 0 && (
+            <span className="ml-auto">
+              조용한 프로젝트 {quiet.length}개
+            </span>
+          )}
+        </footer>
+      )}
+    </section>
+  );
+}
+
+function ActivityCardSkeleton() {
+  return (
+    <div className="grid gap-6 p-5 md:grid-cols-[180px_1fr]">
+      <div className="flex flex-col items-center gap-3">
+        <div className="h-[140px] w-[140px] animate-pulse rounded-full border-[18px] border-surface-elevated" />
+        <div className="flex flex-col items-center gap-1.5">
+          <div className="h-5 w-16 animate-pulse rounded-sm bg-surface-elevated" />
+          <div className="h-3 w-14 animate-pulse rounded-sm bg-surface-elevated" />
+        </div>
+      </div>
+      <ul className="flex flex-col gap-2">
+        {[0, 1, 2, 3, 4].map((i) => (
+          <li key={i} className="flex items-center gap-3 py-1">
+            <span className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-surface-elevated" />
+            <span
+              className="h-3 animate-pulse rounded-sm bg-surface-elevated"
+              style={{ width: `${50 + ((i * 7) % 30)}%` }}
+            />
+            <span className="ml-auto h-3 w-10 animate-pulse rounded-sm bg-surface-elevated" />
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function compactNumber(n: number): string {
+  if (n < 1000) return n.toString();
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/** Build a `project → hex` map for the donut so adjacent slices can't
+ *  share a color. We seed with each project's configured color when it's
+ *  unique; collisions and unset projects get filled deterministically
+ *  from the remaining palette keys (in declaration order). When the
+ *  palette runs out (>8 active projects) we wrap, which is fine — the
+ *  ranked-list label below the donut disambiguates. */
+function assignDistinctColors(
+  projects: string[],
+  cfg: Record<string, string | undefined> = {},
+): Record<string, string> {
+  const palette = PROJECT_COLOR_KEYS;
+  const result: Record<string, string> = {};
+  const used = new Set<string>();
+  const pending: string[] = [];
+
+  // Pass 1: take cfg color when free.
+  for (const p of projects) {
+    const key = cfg[p];
+    if (key && (palette as readonly string[]).includes(key) && !used.has(key)) {
+      used.add(key);
+      result[p] = projectColorVars(key).fg;
+    } else {
+      pending.push(p);
+    }
+  }
+
+  // Pass 2: unique fallback from palette in declaration order.
+  let cursor = 0;
+  for (const p of pending) {
+    let pick: string | null = null;
+    for (let tries = 0; tries < palette.length; tries++) {
+      const candidate = palette[cursor % palette.length];
+      cursor++;
+      if (!used.has(candidate)) {
+        pick = candidate;
+        used.add(candidate);
+        break;
+      }
+    }
+    if (!pick) {
+      // Wrap — palette exhausted. Hue-shift via cursor so we still vary.
+      pick = palette[cursor % palette.length];
+      cursor++;
+    }
+    result[p] = projectColorVars(pick).fg;
+  }
+  return result;
+}
+
+/** SVG donut. Each segment is a stroke-dasharray slice on a centered
+ *  circle. 1.5° gap between slices keeps colors visually distinct on
+ *  the dark surface without losing tiny segments. */
+function ActivityDonut({
+  segments,
+}: {
+  segments: Array<{ key: string; value: number; color: string }>;
+}) {
+  const size = 140;
+  const stroke = 18;
+  const radius = (size - stroke) / 2;
+  const cx = size / 2;
+  const cy = size / 2;
+  const circumference = 2 * Math.PI * radius;
+  const total = segments.reduce((acc, s) => acc + s.value, 0);
+
+  let offset = 0;
+  const arcs = segments
+    .filter((s) => s.value > 0)
+    .map((s) => {
+      const fraction = total > 0 ? s.value / total : 0;
+      const length = fraction * circumference;
+      const dasharray = `${length} ${circumference - length}`;
+      const dashoffset = -offset;
+      offset += length;
+      return { ...s, dasharray, dashoffset };
+    });
+
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      className="block"
+    >
+      <circle
+        cx={cx}
+        cy={cy}
+        r={radius}
+        fill="none"
+        stroke="var(--color-surface-elevated, #1d1f21)"
+        strokeWidth={stroke}
+      />
+      {arcs.map((a, i) => (
+        <circle
+          key={a.key + i}
+          cx={cx}
+          cy={cy}
+          r={radius}
+          fill="none"
+          stroke={a.color}
+          strokeWidth={stroke}
+          strokeDasharray={a.dasharray}
+          strokeDashoffset={a.dashoffset}
+          strokeLinecap="butt"
+          transform={`rotate(-90 ${cx} ${cy})`}
+        />
+      ))}
+    </svg>
   );
 }

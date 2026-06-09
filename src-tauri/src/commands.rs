@@ -2859,6 +2859,42 @@ pub fn open_main_window(app: AppHandle) -> DanbiResult<()> {
     Ok(())
 }
 
+/// Set when the user explicitly requested a real quit (popover 종료
+/// 버튼, tray Quit). Cmd+Q / macOS menu Quit don't set this flag, so
+/// the run-loop's ExitRequested handler can tell them apart and deny
+/// the implicit exits.
+pub static QUIT_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Real quit — fully exits the process. Distinct from the main window's
+/// CloseRequested handler which only hides the window (single-instance
+/// tray app pattern). Wired into the popover's tiny "종료" button as the
+/// user-explicit exit path.
+#[tauri::command]
+pub fn quit_app(app: AppHandle) -> DanbiResult<()> {
+    QUIT_REQUESTED.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.exit(0);
+    Ok(())
+}
+
+/// Open main window AND tell the React app to switch sidebar selection
+/// to the given project. Used by the popover's project quick-shortcuts.
+#[tauri::command]
+pub fn open_project_in_main(app: AppHandle, project: String) -> DanbiResult<()> {
+    crate::popover::hide_popover_window(&app);
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = main.show();
+        let _ = main.set_focus();
+        let _ = main.unminimize();
+    }
+    use tauri::Emitter;
+    let _ = app.emit(
+        "danbi:select-project",
+        serde_json::json!({ "project": project }),
+    );
+    Ok(())
+}
+
 /// Quick Capture 검색 결과를 클릭했을 때 메인 윈도우로 selection 을
 /// 전달하고 vault 화면을 띄운다. capture popup 은 호출자가 별도로
 /// 닫는다 (UI 분기 분리).
@@ -3020,6 +3056,19 @@ pub fn dashboard_snapshot() -> DanbiResult<crate::dashboard::DashboardSnapshot> 
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
     crate::dashboard::snapshot(&vault_path)
+}
+
+/// Per-project activity overview for the home dashboard donut. Combines
+/// commit count + MCP inbound calls/tokens within a rolling N-day window.
+#[tauri::command]
+pub fn project_activity_overview(
+    days: Option<i64>,
+) -> DanbiResult<crate::dashboard::ActivityOverview> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::dashboard::project_activity_overview(&vault_path, days.unwrap_or(30))
 }
 
 // ---------- MCP inbound dashboard (v0.4.0) -----------------------------

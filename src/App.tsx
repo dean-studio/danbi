@@ -122,8 +122,13 @@ export default function App() {
  * droplet falls into a still pool, ripples spread, and a faint wordmark
  * fades in. Kept under ~120 lines of inline CSS so it can render
  * before any other JS chunk has parsed.
+ *
+ * Exported so Workspace can keep showing the same splash while its
+ * heavy first IPCs (listTree, recentCommits, daily) resolve — without
+ * this the user sees Workspace flash empty cards for ~300ms and macOS
+ * paints the busy beach-ball cursor over the dead time.
  */
-function LoadingScreen() {
+export function LoadingScreen() {
   // Cycling tagline phrases. The fade-in/out happens via key change
   // re-mounting the span, which restarts the CSS animation cleanly.
   const phrases = [
@@ -143,7 +148,11 @@ function LoadingScreen() {
   }, []);
 
   return (
-    <main className="relative flex h-full w-full items-center justify-center overflow-hidden bg-canvas">
+    <main
+      data-tauri-drag-region
+      className="relative flex h-full w-full items-center justify-center overflow-hidden bg-canvas"
+      style={{ cursor: "default" }}
+    >
       <style>{`
         @keyframes danbi-splash-in {
           from { opacity: 0; transform: translateY(10px); }

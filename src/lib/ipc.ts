@@ -1104,6 +1104,12 @@ export const ipc = {
   goalsDelete: (project: string, id: string) =>
     invoke<void>("goals_delete", { project, id }),
 
+  projectActivityOverview: (days = 30) =>
+    invoke<ActivityOverview>("project_activity_overview", { days }),
+  openProjectInMain: (project: string) =>
+    invoke<void>("open_project_in_main", { project }),
+  quitApp: () => invoke<void>("quit_app"),
+
   projectQaAsk: (project: string, question: string) =>
     invoke<QaAnswer>("project_qa_ask", { project, question }),
   projectBriefing: (project: string, range: "today" | "yesterday" | "last_week") =>
@@ -1280,6 +1286,25 @@ export type Goal = {
   note?: string | null;
   created_at: number;
   archived_at?: number | null;
+};
+
+export type ProjectActivity = {
+  project: string;
+  commits: number;
+  mcp_calls: number;
+  mcp_tokens: number;
+  activity_score: number;
+  last_activity_at?: number | null;
+};
+
+export type ActivityOverview = {
+  days: number;
+  from_ms: number;
+  to_ms: number;
+  total_commits: number;
+  total_mcp_calls: number;
+  total_mcp_tokens: number;
+  by_project: ProjectActivity[];
 };
 
 export type QuickCaptureResult =

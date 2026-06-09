@@ -159,7 +159,19 @@ pub fn run() {
                 let separator2 = PredefinedMenuItem::separator(&handle)?;
                 let separator3 = PredefinedMenuItem::separator(&handle)?;
                 let separator4 = PredefinedMenuItem::separator(&handle)?;
-                let quit = PredefinedMenuItem::quit(&handle, Some("Quit Danbi"))?;
+                // 기본 PredefinedMenuItem::quit 은 macOS 의 NSApp terminate 를
+                // 직접 호출해서 우리 ExitRequested 가드를 통과 못 함. 커스텀
+                // MenuItem 으로 바꿔서 on_menu_event 에서 hide 만 시킴 — 단비
+                // 는 tray 상주 + MCP 가 떠 있어야 하는 게 정체성. 진짜 종료는
+                // popover 의 종료 버튼 (quit_app command) 이나 tray 메뉴 의
+                // Quit 만.
+                let quit = MenuItem::with_id(
+                    &handle,
+                    "app:quit",
+                    "Quit Danbi",
+                    true,
+                    Some("CmdOrCtrl+Q"),
+                )?;
                 let app_submenu = Submenu::with_items(
                     &handle,
                     "Danbi",
@@ -220,6 +232,15 @@ pub fn run() {
                                 let _ = main.show();
                                 let _ = main.set_focus();
                                 let _ = main.emit("settings:show", ());
+                            }
+                        }
+                        "app:quit" => {
+                            // Cmd+Q 또는 메뉴 Quit Danbi → 진짜 종료 대신 main
+                            // 윈도우만 숨김. 단비는 tray 상주 + MCP 가 죽지
+                            // 않아야 외부 Claude Code 세션이 끊기지 않으므로,
+                            // 명시적 종료 (popover 의 종료 / tray Quit) 만 통과.
+                            if let Some(main) = app.get_webview_window("main") {
+                                let _ = main.hide();
                             }
                         }
                         _ => {}
@@ -327,6 +348,8 @@ pub fn run() {
                         tray_badge::clear_and_sync(app);
                     }
                     "quit" => {
+                        commands::QUIT_REQUESTED
+                            .store(true, std::sync::atomic::Ordering::SeqCst);
                         app.exit(0);
                     }
                     _ => {}
@@ -399,6 +422,30 @@ pub fn run() {
                     }
                 });
             }
+
+            // --- Background prefetch: keep activity overview warm so the
+            // popover (and Home dashboard) hits the cache instead of
+            // walking 500 commits + scanning the MCP usage log on every
+            // open. Initial fill, then every 5min. Non-fatal — failures
+            // just leave the cache empty for that cycle.
+            tauri::async_runtime::spawn(async move {
+                use tokio::time::{sleep, Duration};
+                loop {
+                    if let Ok(default_vault) = config::default_vault_path() {
+                        if let Ok(Some(cfg)) = config::load_config(&default_vault) {
+                            if let Some(vp) = cfg.vault_path.as_ref() {
+                                let vault = std::path::PathBuf::from(vp);
+                                // Warm the 30d window — the default in the
+                                // dashboard. 7d/90d toggles still pay one
+                                // miss the first time but that's a user-
+                                // initiated click.
+                                let _ = dashboard::warm_activity_cache(&vault, 30);
+                            }
+                        }
+                    }
+                    sleep(Duration::from_secs(300)).await;
+                }
+            });
 
             // Reset any crash-queue records that were marked Running when
             // the previous process exited. Converts them to Pending so the
@@ -570,7 +617,32 @@ pub fn run() {
             commands::goals_archive,
             commands::goals_unarchive,
             commands::goals_delete,
+            commands::project_activity_overview,
+            commands::open_project_in_main,
+            commands::quit_app,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Cmd+Q (또는 macOS 메뉴 Quit) 가 들어오면 진짜 종료 대신 메인
+            // 윈도우만 숨김. 단비는 tray 상주 + MCP 서버가 떠 있어야
+            // 외부 Claude Code 세션이 끊기지 않으므로, 사용자가 명시적으로
+            // 종료하기 전엔 프로세스 유지가 정체성. 진짜 종료는 tray 메뉴
+            // 의 Quit, 또는 popover 의 quit 버튼 (quit_app command) 으로만.
+            //
+            // macOS Quit 메뉴는 ExitRequested 의 code 를 Some(0) 으로 보내서
+            // 우리가 명시적으로 호출한 app.exit(0) 와 구분이 안 됨. 그래서
+            // QUIT_REQUESTED 플래그를 별도로 들고 있다가 — set 됐을 때만
+            // 진짜로 통과시킨다.
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let user_intent = commands::QUIT_REQUESTED
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                if !user_intent {
+                    api.prevent_exit();
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.hide();
+                    }
+                }
+            }
+        });
 }

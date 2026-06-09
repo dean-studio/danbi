@@ -11,27 +11,16 @@
 
 ### Added
 
-- **프로젝트별 Goal** — 각 프로젝트 대시보드에 "지금 뭘 하려는지" 한 줄로
-  적어두는 카드. 추가/archive 토글 가능. 저장 위치는
-  `<vault>/Projects/<P>/.danbi/goals.json` (atomic write).
-- **MCP 응답에 active goal 자동 노출** — 외부 Claude 세션이 단비 도구를
-  부를 때 응답에 `_active_goals` 필드가 자동으로 끼어듭니다. 식별 가능한
-  프로젝트가 있을 때만 (scoped endpoint, args.project, 검색 top hit). JSON
-  object 응답엔 필드 추가, array 응답(search/recent)은 호환성 위해
-  그대로 두고, raw markdown(read)엔 한 줄 HTML 주석 prefix.
-- **하이브리드 검색을 grounding 흐름까지 확장** — `search::full_search_hybrid`
-  (BM25 + 벡터 RRF 병합) 를 plan preview · quick capture · compound
-  preview · project Q&A 의 grounding 단계에도 배선. 임베딩 provider 가
-  꺼져 있으면 BM25 only 로 자동 fallback.
+- **프로젝트별 Goal** — 각 프로젝트 대시보드에서 active goal 등록/archive.
+  외부 Claude 세션은 MCP 응답에 자동 노출돼서 항상 인지.
+- **프로젝트 활동 분포 카드** — 홈에서 30/7/90일 단위 도넛 + 랭킹 바.
+- **메뉴바 popover 정리** — 단비 열기 + 최근 활동 프로젝트 퀵셔트 + 종료 버튼.
+- **첫 진입 splash** — 사이드바 노출 전 단비 로고만 보이는 로딩 화면.
 
-### Build
+### Changed
 
-- **arm64 강제 빌드** — `scripts/release.sh` 가 `~/.cargo/bin` PATH 우선시 +
-  `--target aarch64-apple-darwin` 명시 + 빌드 직후 산출물 Mach-O arch 검증.
-  v0.3.0/0.4.0 에서 발생한 Intel 빌드 사고 재발 방지.
-- **updater manifest 에 darwin-x86_64 fallback 키 추가** — 0.3.0/0.4.0 을
-  Intel 바이너리로 받은 사용자도 같은 manifest 에서 v0.5.0 native arm64
-  payload 로 자동 업데이트되도록.
+- **Cmd+Q 가 종료하지 않음** — 메인 윈도우만 숨기고 tray + MCP 유지. 진짜
+  종료는 popover 의 종료 버튼 / tray 의 Quit.
 
 ## [0.4.0] — 2026-06-02
 
