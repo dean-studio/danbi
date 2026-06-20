@@ -4,7 +4,7 @@
 //! edit it directly through the sidebar. `{{PROJECT}}` and `{{MCP_URL}}`
 //! are substituted at install time (see `commands::install_skill`).
 
-pub const DEFAULT_SKILL_TEMPLATE: &str = r#"---
+pub const DEFAULT_SKILL_TEMPLATE: &str = r####"---
 name: danbi-{{PROJECT}}
 description: Use this skill when the user is working in the "{{PROJECT}}" project's Danbi vault. Triggers include past decisions ("어떻게 정했지", "예전에"), past debugging ("이 에러 본 적", "또 떴어"), session continuity ("어제 뭐 했지", "이어서"), or saving knowledge worth remembering. Also use when the user mentions "단비", "vault", "daily note", "{{PROJECT}}", or wiki-link cross-references. Reads run vault-wide; writes auto-clamp to "{{PROJECT}}".
 ---
@@ -41,6 +41,8 @@ MCP endpoint: `{{MCP_URL}}` (이미 등록돼 있으면 무시. 안 등록돼 �
 - `danbi_append` — 임의 도메인 파일에 append (없으면 자동 생성). project 파라미터 **생략**.
 - `danbi_create_folder` — 1~2단계 sub-folder 생성. 카테고리·시기별 누적용.
 - `danbi_create_file` — 폴더+파일+내용을 한 번에 보장. 매일 통계 자동 기록 같은 자동화에 적합.
+- `danbi_replace_section` — 지정 헤딩(`## ...`) 아래 본문 전체를 새 내용으로 **교체**. 같은 섹션이 자주 갱신되는 문서에 사용 (append 누적 X).
+- `danbi_upsert_item` — 리스트 섹션의 한 항목을 in-place 교체 (없으면 추가). `[#id]` 마커 또는 첫 줄 텍스트로 매칭. 진행 상태가 바뀌는 체크리스트·카드 리스트에 적합.
 
 ## Read — 언제 무엇을 읽는가
 
@@ -80,6 +82,26 @@ MCP endpoint: `{{MCP_URL}}` (이미 등록돼 있으면 무시. 안 등록돼 �
 **기록 형식**: `###` 헤더 + 2-4줄 본문. 코드는 핵심만 5줄 이내. "결정/원인/TODO/노하우/재발 방지" 중 하나로 분류. 잡담 금지.
 
 특정 도메인 파일 갱신은 `danbi_append`.
+
+### Append vs Replace vs Upsert — 어느 쓰기 도구를 고르나
+
+| 상황 | 도구 | 이유 |
+|---|---|---|
+| daily 일지 / 시간순 누적 / 새로운 사실 추가 | `danbi_log` · `danbi_append` | 누적이 곧 가치. 과거 항목은 그대로 보존. |
+| 한 섹션의 **현재 상태**를 갱신 (예: 알림톡 리스트 전체, 오늘의 KPI 표) | `danbi_replace_section` | 같은 내용이 append 로 쌓이면 가독성 망가짐. 헤딩 아래만 교체. |
+| 리스트 안의 **한 항목**만 갱신 (예: `- [#a] 결제 완료` 의 본문 변경) | `danbi_upsert_item` | 다른 항목 보존, 매칭 항목만 교체. 같은 key 로 다시 호출하면 또 update. |
+
+`danbi_upsert_item` 항목 ID 권장 형식 — `- [#kebab-slug] 제목 ...`. 첫 호출에는 `[#id]` 안 넣어도 텍스트 매칭으로 동작하지만, 자주 변경되는 항목은 ID 마커를 넣어두면 제목이 바뀌어도 추적된다.
+
+예시:
+```
+danbi_upsert_item(
+  domain="marketing/알림톡-리스트.md",
+  heading="## 알림톡 리스트",
+  key="checkout-success",
+  item="- [#checkout-success] 결제 완료\n  - body: 변경된 본문\n  - updated: 2026-06-20"
+)
+```
 
 ### 폴더로 누적할 때
 
@@ -143,4 +165,4 @@ danbi_create_file(domain="stats/2026-05-17.md", content="...")
 - **❌ 일반 지식으로 답**: 이 vault 의 결정이 중요하다. 먼저 검색.
 - **❌ 링크 없이 기록**: 관련 문서 있는데 `[[]]` 안 걺 → 그래프 안 자람.
 - **❌ project 파라미터 수동 지정**: scoped endpoint 가 자동 clamp. 생략이 맞다.
-"#;
+"####;

@@ -828,6 +828,52 @@ fn tool_catalog() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "danbi_replace_section",
+            "description": "지정한 markdown 헤딩(예: \"## 알림톡 리스트\") 아래 본문 전체를 새 내용으로 교체합니다. 헤딩 줄 자체는 유지되고 헤딩 직후부터 다음 동급/상위 헤딩 직전까지가 교체 대상입니다. 대상 헤딩이 없으면 파일 끝에 새 섹션을 추가합니다. 기존 항목이 변경될 때 append 로 누적 안 시키고 깔끔하게 갱신하고 싶은 리스트성 문서에 적합합니다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "domain": { "type": "string", "description": ".md 로 끝나는 도메인 파일명" },
+                    "heading": {
+                        "type": "string",
+                        "description": "교체할 섹션의 markdown 헤딩 줄. 예: \"## 알림톡 리스트\" — `##` 포함 또는 텍스트만 둘 다 허용."
+                    },
+                    "new_body": {
+                        "type": "string",
+                        "description": "그 섹션 안에 들어갈 새 markdown 본문. 헤딩 줄은 다시 적지 말 것."
+                    }
+                },
+                "required": ["project", "domain", "heading", "new_body"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_upsert_item",
+            "description": "리스트 섹션 안의 한 항목을 in-place 교체하거나 (없으면) 추가합니다. 매칭은 1) 항목 첫 줄에 `[#id]` 마커가 있으면 그 id 정확 매치, 2) 없으면 항목 첫 줄 텍스트(공백/대소문자 무시) 매치. 같은 항목이 변경되어도 append 가 누적되지 않습니다. 알림톡 / 체크리스트 / 카드 리스트처럼 항목 단위로 진행 상태가 바뀌는 문서에 사용하세요.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "domain": { "type": "string", "description": ".md 로 끝나는 도메인 파일명" },
+                    "heading": {
+                        "type": "string",
+                        "description": "항목이 속한 섹션의 markdown 헤딩. 섹션이 없으면 파일 끝에 만들어집니다."
+                    },
+                    "key": {
+                        "type": "string",
+                        "description": "항목 식별자. `[#abc]` 마커의 id (`abc`) 또는 항목 첫 줄 텍스트."
+                    },
+                    "item": {
+                        "type": "string",
+                        "description": "넣을 항목 markdown. 보통 `- ` 로 시작하는 bullet 한 덩어리. ID 마커를 쓰려면 `- [#abc] ...` 형태."
+                    }
+                },
+                "required": ["project", "domain", "heading", "key", "item"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "danbi_recent",
             "description": "최근 수정된 도메인 파일 목록 (기본 10개).",
             "inputSchema": {
@@ -1092,6 +1138,108 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             })
             .to_string())
         }
+        "danbi_replace_section" => {
+            let project = string_arg(&args, "project")?;
+            let domain = string_arg(&args, "domain")?;
+            let heading = string_arg(&args, "heading")?;
+            let new_body = string_arg(&args, "new_body")?;
+            let tree = vault::list_tree(&vault_path)?;
+            if !tree.projects.iter().any(|p| p.name == project) {
+                return Err(DanbiError::Config(format!("unknown project: {project}")));
+            }
+            let domain_norm = if domain.to_lowercase().ends_with(".md") {
+                domain.clone()
+            } else {
+                format!("{domain}.md")
+            };
+            let current =
+                vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
+            let op = EditOp::ReplaceSection {
+                heading: heading.clone(),
+                new_body,
+            };
+            edit_ops::validate(&op)?;
+            let next = edit_ops::apply(&current, &op)?;
+
+            vcs::ensure_repo(&vault_path)?;
+            let _ = vcs::snapshot(
+                &vault_path,
+                &format!(
+                    "danbi: mcp replace_section · {project}/{domain_norm} (pre)"
+                ),
+            );
+            let _ = vault::create_domain(&vault_path, &project, &domain_norm);
+            vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
+            let commit = vcs::snapshot(
+                &vault_path,
+                &format!(
+                    "danbi: mcp replace_section · {project}/{domain_norm} · {heading}"
+                ),
+            )?;
+            Ok(json!({
+                "project": project,
+                "domain": domain_norm,
+                "heading": heading,
+                "commit": commit,
+                "bytes": next.len(),
+            })
+            .to_string())
+        }
+        "danbi_upsert_item" => {
+            let project = string_arg(&args, "project")?;
+            let domain = string_arg(&args, "domain")?;
+            let heading = string_arg(&args, "heading")?;
+            let key = string_arg(&args, "key")?;
+            let item = string_arg(&args, "item")?;
+            let tree = vault::list_tree(&vault_path)?;
+            if !tree.projects.iter().any(|p| p.name == project) {
+                return Err(DanbiError::Config(format!("unknown project: {project}")));
+            }
+            let domain_norm = if domain.to_lowercase().ends_with(".md") {
+                domain.clone()
+            } else {
+                format!("{domain}.md")
+            };
+            let current =
+                vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
+            // Detect whether the key already lives in the section so we can
+            // tell the caller whether this was an in-place update or an add.
+            let was_replace = edit_ops::upsert_item_would_replace(&current, &heading, &key);
+            let op = EditOp::UpsertItem {
+                heading: heading.clone(),
+                key: key.clone(),
+                item,
+            };
+            edit_ops::validate(&op)?;
+            let next = edit_ops::apply(&current, &op)?;
+
+            vcs::ensure_repo(&vault_path)?;
+            let mode = if was_replace { "update" } else { "add" };
+            let _ = vcs::snapshot(
+                &vault_path,
+                &format!(
+                    "danbi: mcp upsert_item · {project}/{domain_norm} (pre)"
+                ),
+            );
+            let _ = vault::create_domain(&vault_path, &project, &domain_norm);
+            vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
+            let commit = vcs::snapshot(
+                &vault_path,
+                &format!(
+                    "danbi: mcp upsert_item · {project}/{domain_norm} · {mode} · {key}"
+                ),
+            )?;
+            Ok(json!({
+                "project": project,
+                "domain": domain_norm,
+                "heading": heading,
+                "key": key,
+                "mode": mode,
+                "commit": commit,
+                "bytes": next.len(),
+            })
+            .to_string())
+        }
         "danbi_create_file" => {
             // Convenience for "make sure this folder + file exist, here's
             // the content". Combines create_folder + create_domain +
@@ -1250,6 +1398,8 @@ fn is_write_tool(name: &str) -> bool {
             | "danbi_append"
             | "danbi_create_folder"
             | "danbi_create_file"
+            | "danbi_replace_section"
+            | "danbi_upsert_item"
     )
 }
 
@@ -1279,8 +1429,14 @@ fn extract_inbound_meta(tool: &str, args: &Value) -> Option<InboundMeta> {
         .get("domain")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    // Different write tools name the payload field differently. We grab
+    // whichever is present so token accounting reflects what crossed the
+    // wire — `content` (log/append/create_file), `new_body`
+    // (replace_section), or `item` (upsert_item).
     let content = args
         .get("content")
+        .or_else(|| args.get("new_body"))
+        .or_else(|| args.get("item"))
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();

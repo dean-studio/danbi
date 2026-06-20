@@ -984,7 +984,11 @@ export function DocView({ refreshKey }: { refreshKey: number }) {
             {err}
           </div>
         ) : (
-          <div className="danbi-editor">
+          <div
+            className="danbi-editor"
+            onCopy={stripMarkdownHardBreaksOnCopy}
+            onCut={stripMarkdownHardBreaksOnCopy}
+          >
             <BlockNoteView
               editor={editor}
               editable={true}
@@ -1006,6 +1010,27 @@ export function DocView({ refreshKey }: { refreshKey: number }) {
       </div>
     </div>
   );
+}
+
+/**
+ * BlockNote 가 클립보드의 text/plain 슬롯에 markdown 을 쓰는데, 줄바꿈을
+ * CommonMark hard break (`\\\n`) 로 직렬화한다. 다른 메모/문서 앱에 붙여
+ * 넣으면 매 줄 끝에 `\` 가 보여서 거슬린다. React 의 onCopy 가 PM plugin
+ * 의 setData 직후에 발화하므로, 여기서 text/plain 만 한 번 더 덮어써서
+ * trailing `\` 를 떼낸다.
+ */
+function stripMarkdownHardBreaksOnCopy(
+  e: React.ClipboardEvent<HTMLDivElement>,
+) {
+  const dt = e.clipboardData;
+  if (!dt) return;
+  const md = dt.getData("text/plain");
+  if (!md || !md.includes("\\\n")) return;
+  // Only strip a *trailing* backslash on a line — escaped backslashes inside
+  // text (e.g. literal "\\n") look like `\\\n` only at line ends after
+  // BlockNote's hard-break serializer.
+  const cleaned = md.replace(/\\\n/g, "\n");
+  if (cleaned !== md) dt.setData("text/plain", cleaned);
 }
 
 /**

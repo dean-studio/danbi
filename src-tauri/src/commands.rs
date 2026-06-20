@@ -961,6 +961,7 @@ pub fn apply_plan(
         EditOp::InsertAfter { .. } => "insert_after",
         EditOp::ReplaceSection { .. } => "replace_section",
         EditOp::RewriteAll { .. } => "rewrite_all",
+        EditOp::UpsertItem { .. } => "upsert_item",
     };
 
     let commit_msg = format!(

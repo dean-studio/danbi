@@ -7,6 +7,27 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-06-20
+
+### Added
+
+- **`danbi_replace_section` MCP 도구** — 지정한 markdown 헤딩 아래 본문
+  전체를 새 내용으로 교체. 같은 섹션이 자주 갱신되는 문서를 append 로
+  쌓지 않고 깔끔하게 갱신할 수 있어요. 헤딩이 없으면 EOF 에 새 섹션을
+  추가합니다.
+- **`danbi_upsert_item` MCP 도구** — 리스트 섹션 안 한 항목을 in-place
+  교체 (없으면 추가). `[#id]` 마커 또는 항목 첫 줄 텍스트로 매칭. 진행
+  상태가 바뀌는 체크리스트·카드 리스트에 적합. 응답에
+  `mode: "update" | "add"` 가 실려서 어떤 의미였는지 분간 가능.
+- 프로젝트별 SKILL.md 가이드 갱신 — 외부 Claude 세션이 append vs
+  replace_section vs upsert_item 중 어느 도구를 골라야 하는지 표로 명시.
+
+### Fixed
+
+- 에디터에서 텍스트 복사 시 줄끝의 CommonMark hard-break (`\` + 개행) 가
+  다른 메모/문서 앱에 그대로 보이는 문제. 이제 클립보드 text/plain
+  슬롯에서 trailing `\` 가 평범한 줄바꿈으로 정리됩니다.
+
 ## [0.5.0] — 2026-06-09
 
 ### Added
