@@ -21,6 +21,31 @@
   `mode: "update" | "add"` 가 실려서 어떤 의미였는지 분간 가능.
 - 프로젝트별 SKILL.md 가이드 갱신 — 외부 Claude 세션이 append vs
   replace_section vs upsert_item 중 어느 도구를 골라야 하는지 표로 명시.
+- **frontmatter `kind: list` 인지** — 사이드바 도메인 row 에 LIST 배지
+  자동 노출. 외부 LLM 이 replace/upsert 로 갱신하는 문서임을 시각화.
+- **변경 히스토리 popover** — 문서 헤더에 "변경 N건" 버튼. 외부 LLM 의
+  upsert/replace 까지 op 별 색 토큰으로 분간해서 시간순 노출.
+- **메뉴바 popover 빠른 메모** — 가장 active 한 프로젝트의 오늘 daily
+  노트로 한 줄 메모 즉시 append. ⌘↵ 또는 자동 enter.
+- **`danbi_log_quick` IPC** — popover 빠른 메모용 직호출 경로 (외부 LLM
+  트래픽으로 잡히지 않음).
+- **프로젝트 switcher ⌘P** — fuzzy match 로 키보드만으로 프로젝트 전환.
+- **자동 self-healing 알림** — BriefingCard 가 윈도우 focus 시 자동
+  refresh, 새 ghost / healing 제안이 들어오면 알림 toast.
+- **DocView 헤더 그래프 버튼** — 현재 프로젝트를 spotlight 한 채로
+  그래프 뷰 열기 (양방향 인터랙션 완성).
+- **`summarize_weekly` 명령** — 지난 7일 daily 노트를 모아 한 단락 회고
+  생성 → `weekly/YYYY-WW.md` 에 저장. ProjectHome 헤더의 "주간 회고"
+  버튼.
+
+### Changed
+
+- 사이드바 sub-folder 가 프로젝트 펼칠 때마다 자동으로 다 열려있던
+  동작을 모두 닫힌 상태로 시작. 현재 선택된 도메인을 포함한 폴더만
+  자동 expand. (사용자 맞춤 토글은 그 세션 동안 유지.)
+- REST 호출 (`/api/call/danbi_search`) 도 JSON-RPC 와 동일하게 RRF
+  하이브리드 fast-path 사용 — 임베딩 provider 가 cfg 에 있으면 BM25 +
+  벡터 결과를 RRF 로 병합해서 자연어 쿼리 정확도 일관성 확보.
 
 ### Fixed
 
