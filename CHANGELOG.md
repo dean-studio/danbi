@@ -1,10 +1,5 @@
 # Changelog
 
-단비의 모든 의미 있는 변경은 여기에 기록합니다.
-
-형식은 [Keep a Changelog](https://keepachangelog.com/) 를 따르고, 버전 체계는
-[Semantic Versioning](https://semver.org/) 입니다.
-
 ## [Unreleased]
 
 ## [0.6.0] — 2026-06-20
