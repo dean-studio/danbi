@@ -1,0 +1,212 @@
+→ building signed release v0.6.0 (target=aarch64-apple-darwin)
+  using cargo: /Users/hazbola/.cargo/bin/cargo
+  host triple: aarch64-apple-darwin
+        Info Looking up installed tauri packages to check mismatched versions...
+        Warn The bundle identifier "com.danbi.app" set in `"tauri.conf.json" identifier` ends with `.app`. This is not recommended because it conflicts with the application bundle extension on macOS.
+     Running beforeBuildCommand `pnpm build`
+
+> danbi@0.6.0 build /Users/hazbola/works/agent/danbi
+> tsc && vite build
+
+vite v7.3.3 building client environment for production...
+transforming...
+✓ 4053 modules transformed.
+Generated an empty chunk: "react".
+rendering chunks...
+[plugin vite:reporter] 
+(!) /Users/hazbola/works/agent/danbi/node_modules/.pnpm/@tauri-apps+api@2.11.0/node_modules/@tauri-apps/api/event.js is dynamically imported by /Users/hazbola/works/agent/danbi/src/main/Sidebar.tsx but also statically imported by /Users/hazbola/works/agent/danbi/src/lib/ipc.ts, /Users/hazbola/works/agent/danbi/src/main/Workspace.tsx, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) /Users/hazbola/works/agent/danbi/src/lib/ipc.ts is dynamically imported by /Users/hazbola/works/agent/danbi/src/main/ProjectHome.tsx, /Users/hazbola/works/agent/danbi/src/main/Settings.tsx but also statically imported by /Users/hazbola/works/agent/danbi/src/App.tsx, /Users/hazbola/works/agent/danbi/src/capture/CaptureApp.tsx, /Users/hazbola/works/agent/danbi/src/main/CommandBar.tsx, /Users/hazbola/works/agent/danbi/src/main/CompoundDialog.tsx, /Users/hazbola/works/agent/danbi/src/main/DocView.tsx, /Users/hazbola/works/agent/danbi/src/main/GraphView.tsx, /Users/hazbola/works/agent/danbi/src/main/Home.tsx, /Users/hazbola/works/agent/danbi/src/main/McpInboundCard.tsx, /Users/hazbola/works/agent/danbi/src/main/McpInboundProjectMini.tsx, /Users/hazbola/works/agent/danbi/src/main/ProjectHome.tsx, /Users/hazbola/works/agent/danbi/src/main/ReviewPanel.tsx, /Users/hazbola/works/agent/danbi/src/main/SearchPalette.tsx, /Users/hazbola/works/agent/danbi/src/main/Settings.tsx, /Users/hazbola/works/agent/danbi/src/main/Sidebar.tsx, /Users/hazbola/works/agent/danbi/src/main/TrashPanel.tsx, /Users/hazbola/works/agent/danbi/src/main/Workspace.tsx, /Users/hazbola/works/agent/danbi/src/popover/PopoverApp.tsx, /Users/hazbola/works/agent/danbi/src/wizard/Onboarding.tsx, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) /Users/hazbola/works/agent/danbi/node_modules/.pnpm/@tauri-apps+plugin-clipboard-manager@2.3.2/node_modules/@tauri-apps/plugin-clipboard-manager/dist-js/index.js is dynamically imported by /Users/hazbola/works/agent/danbi/src/main/DocView.tsx but also statically imported by /Users/hazbola/works/agent/danbi/src/main/DocView.tsx, /Users/hazbola/works/agent/danbi/src/main/ProjectHome.tsx, /Users/hazbola/works/agent/danbi/src/main/Settings.tsx, /Users/hazbola/works/agent/danbi/src/main/Sidebar.tsx, /Users/hazbola/works/agent/danbi/src/main/Workspace.tsx, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) /Users/hazbola/works/agent/danbi/node_modules/.pnpm/@tauri-apps+plugin-dialog@2.7.1/node_modules/@tauri-apps/plugin-dialog/dist-js/index.js is dynamically imported by /Users/hazbola/works/agent/danbi/src/main/DocView.tsx but also statically imported by /Users/hazbola/works/agent/danbi/src/main/McpInboundCard.tsx, /Users/hazbola/works/agent/danbi/src/main/Settings.tsx, dynamic import will not move module into another chunk.
+
+[plugin vite:reporter] 
+(!) /Users/hazbola/works/agent/danbi/node_modules/.pnpm/@tauri-apps+plugin-opener@2.5.4/node_modules/@tauri-apps/plugin-opener/dist-js/index.js is dynamically imported by /Users/hazbola/works/agent/danbi/src/main/Settings.tsx, /Users/hazbola/works/agent/danbi/src/main/Settings.tsx, /Users/hazbola/works/agent/danbi/src/main/Sidebar.tsx, /Users/hazbola/works/agent/danbi/src/main/Sidebar.tsx but also statically imported by /Users/hazbola/works/agent/danbi/src/main/Settings.tsx, dynamic import will not move module into another chunk.
+
+computing gzip size...
+dist/index.html                                    0.67 kB │ gzip:   0.39 kB
+dist/assets/danbi-wordmark-dark-DKeqyYqh.png      47.80 kB
+dist/assets/danbi-wordmark-light-DG1tPe0Q.png     65.53 kB
+dist/assets/danbi-app-icon-YXtczG9o.png        1,019.73 kB
+dist/assets/index-D5PBVGdB.css                   274.19 kB │ gzip:  44.05 kB
+dist/assets/react-l0sNRNKZ.js                      0.00 kB │ gzip:   0.02 kB
+dist/assets/index-CZc7khJM.js                      2.34 kB │ gzip:   0.87 kB
+dist/assets/module-RjUF93sV.js                    77.27 kB │ gzip:  27.77 kB
+dist/assets/native-48B9X9Wg.js                   432.75 kB │ gzip:  82.80 kB
+dist/assets/index-BLnEvO6g.js                    612.37 kB │ gzip: 181.14 kB
+dist/assets/blocknote-DybrGGal.js              1,530.79 kB │ gzip: 466.29 kB
+
+(!) Some chunks are larger than 1400 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 6.18s
+   Compiling danbi v0.6.0 (/Users/hazbola/works/agent/danbi/src-tauri)
+warning: unused variable: `now_s`
+   --> src/dashboard.rs:260:9
+    |
+260 |     let now_s = now_ms / 1000;
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_now_s`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `fail` is never used
+  --> src/crash_queue.rs:73:8
+   |
+73 | pub fn fail(vault: &Path, kind: &str, err: String) -> DanbiResult<()> {
+   |        ^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `total` is never used
+  --> src/journal_view.rs:59:12
+   |
+58 | impl DayCounts {
+   | -------------- method in this implementation
+59 |     pub fn total(&self) -> u32 {
+   |            ^^^^^
+
+warning: method `is_running` is never used
+   --> src/mcp.rs:157:12
+    |
+ 57 | impl McpServer {
+    | -------------- method in this implementation
+...
+157 |     pub fn is_running(&self) -> bool {
+    |            ^^^^^^^^^^
+
+warning: function `pending_count` is never used
+   --> src/reviews.rs:152:8
+    |
+152 | pub fn pending_count(store: &ReviewStore) -> usize {
+    |        ^^^^^^^^^^^^^
+
+warning: function `catalog` is never used
+   --> src/providers/ollama.rs:235:8
+    |
+235 | pub fn catalog() -> Vec<ModelInfo> {
+    |        ^^^^^^^
+
+warning: constant `DEFAULT_BASE_URL` is never used
+  --> src/providers/openai.rs:13:7
+   |
+13 | const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+   |       ^^^^^^^^^^^^^^^^
+
+warning: function `create_project` is never used
+   --> src/vault.rs:394:8
+    |
+394 | pub fn create_project(vault: &Path, name: &str, default_domains: &[String]) -> DanbiResult<()> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `delete_project` is never used
+   --> src/vault.rs:449:8
+    |
+449 | pub fn delete_project(vault: &Path, name: &str) -> DanbiResult<()> {
+    |        ^^^^^^^^^^^^^^
+
+warning: function `delete_domain` is never used
+   --> src/vault.rs:497:8
+    |
+497 | pub fn delete_domain(vault: &Path, project: &str, domain: &str) -> DanbiResult<()> {
+    |        ^^^^^^^^^^^^^
+
+warning: function `delete_folder` is never used
+   --> src/vault.rs:590:8
+    |
+590 | pub fn delete_folder(vault: &Path, project: &str, folder: &str) -> DanbiResult<()> {
+    |        ^^^^^^^^^^^^^
+
+warning: `danbi` (lib) generated 11 warnings (run `cargo fix --lib -p danbi` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 47.31s
+       Built application at: /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/danbi
+    Bundling 단비.app (/Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app)
+     Signing with identity "Developer ID Application: Dean Works inc. (663S56834K)"
+Signing with identity "Developer ID Application: Dean Works inc. (663S56834K)"
+Signing /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app/Contents/MacOS/danbi
+/Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app/Contents/MacOS/danbi: replacing existing signature
+Signing with identity "Developer ID Application: Dean Works inc. (663S56834K)"
+Signing /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app
+/Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app: replacing existing signature
+        Warn skipping app notarization, no APPLE_ID & APPLE_PASSWORD & APPLE_TEAM_ID or APPLE_API_KEY & APPLE_API_ISSUER & APPLE_API_KEY_PATH environment variables found
+    Bundling 단비_0.6.0_aarch64.dmg (/Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/단비_0.6.0_aarch64.dmg)
+     Running bundle_dmg.sh
+     Signing with identity "Developer ID Application: Dean Works inc. (663S56834K)"
+Signing with identity "Developer ID Application: Dean Works inc. (663S56834K)"
+Signing /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/단비_0.6.0_aarch64.dmg
+    Bundling /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app.tar.gz (/Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app.tar.gz)
+    Finished 2 bundles at:
+        /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app
+        /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/단비_0.6.0_aarch64.dmg
+        /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app.tar.gz (updater)
+
+    Finished 1 updater signature at:
+        /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app.tar.gz.sig
+
+  ✓ verified arm64: danbi
+→ notarizing .app (Apple servers, may take 1-5 min)
+Conducting pre-submission checks for 단비.app.zip and initiating connection to the Apple notary service...
+Submission ID received
+  id: 4bcb2d4b-dc65-4c73-ae34-0cd28fbf9f12
+Successfully uploaded file
+  id: 4bcb2d4b-dc65-4c73-ae34-0cd28fbf9f12
+  path: /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app.zip
+Waiting for processing to complete.
+Current status: In Progress...Current status: In Progress....Current status: In Progress.....Current status: In Progress......Current status: Accepted.......Processing complete
+  id: 4bcb2d4b-dc65-4c73-ae34-0cd28fbf9f12
+  status: Accepted
+
+→ stapling .app
+Processing: /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app
+Processing: /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app
+The staple and validate action worked!
+→ re-creating .app.tar.gz from stapled .app + re-signing
+
+Your file was signed successfully, You can find the signature here:
+/Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app.tar.gz.sig
+
+Public signature:
+dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUenBRcFJFWWIydm14SHJ6dmVyNHdNQjJGK2FYbTFoMGJHditMcURVNlBzaE5mQ0RxWlpTMTBkVmhHSW1iRHZQcDBDYlBOVjRCRy9qa0tNRlN3em0rUDA0MHZMS05vQkFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgxOTYyNzI5CWZpbGU664uo67mELmFwcC50YXIuZ3oKaGlNUUNvTjluRks3LzF0a2RyK3ZHTFZ5VGRlWjdOYkhPRGNocEZsbVl1SVVhRFpCV093enhuNmF3WTh1WEVkd2w2eUFLaGdaMC9ESHgyRVN0WlFOREE9PQo=
+
+Make sure to include this into the signature field of your update server.
+→ notarizing .dmg
+Conducting pre-submission checks for 단비_0.6.0_aarch64.dmg and initiating connection to the Apple notary service...
+Submission ID received
+  id: a3cb376b-0ad0-4cd2-88fa-ec3c86e9ea95
+Successfully uploaded file
+  id: a3cb376b-0ad0-4cd2-88fa-ec3c86e9ea95
+  path: /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/단비_0.6.0_aarch64.dmg
+Waiting for processing to complete.
+Current status: In Progress...Current status: In Progress....Current status: In Progress.....Current status: In Progress......Current status: Accepted.......Processing complete
+  id: a3cb376b-0ad0-4cd2-88fa-ec3c86e9ea95
+  status: Accepted
+
+→ stapling .dmg
+Processing: /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/단비_0.6.0_aarch64.dmg
+Processing: /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/단비_0.6.0_aarch64.dmg
+The staple and validate action worked!
+→ verifying Gatekeeper acceptance
+    /Users/hazbola/works/agent/danbi/src-tauri/target/aarch64-apple-darwin/release/bundle/macos/단비.app: accepted
+    source=Notarized Developer ID
+    origin=Developer ID Application: Dean Works inc. (663S56834K)
+→ ASCII rename → /Users/hazbola/works/agent/danbi/release/v0.6.0
+
+✓ release artifacts ready under /Users/hazbola/works/agent/danbi/release/v0.6.0
+total 79088
+drwxr-xr-x@ 6 hazbola  staff       192 Jun 20 22:39 .
+drwxr-xr-x@ 7 hazbola  staff       224 Jun 20 22:39 ..
+-rw-r--r--@ 1 hazbola  staff  20463208 Jun 20 22:39 Danbi_0.6.0_aarch64.dmg
+-rw-r--r--@ 1 hazbola  staff  20020963 Jun 20 22:39 Danbi.app.tar.gz
+-rw-r--r--@ 1 hazbola  staff       404 Jun 20 22:39 Danbi.app.tar.gz.sig
+-rw-r--r--@ 1 hazbola  staff      1218 Jun 20 22:39 latest.json
+
+next:
+  git tag -a v0.6.0 -m "v0.6.0" && git push origin v0.6.0
+  gh release create v0.6.0 \
+    "/Users/hazbola/works/agent/danbi/release/v0.6.0/Danbi_0.6.0_aarch64.dmg" "/Users/hazbola/works/agent/danbi/release/v0.6.0/Danbi.app.tar.gz" "/Users/hazbola/works/agent/danbi/release/v0.6.0/Danbi.app.tar.gz.sig" "/Users/hazbola/works/agent/danbi/release/v0.6.0/latest.json" \
+    --title "v0.6.0" --notes-file CHANGELOG.md
