@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { ArrowRight, ChevronRight, Power } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArrowRight, ChevronRight, Power, Send } from "lucide-react";
 import {
   ipc,
   type ActivityOverview,
@@ -17,6 +17,14 @@ import { projectIconOf } from "@/components/ProjectIconPicker";
 export function PopoverApp() {
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [activity, setActivity] = useState<ActivityOverview | null>(null);
+  // Quick log — popover 만으로 한 줄 메모를 가장 최근 활동 프로젝트의
+  // 오늘 daily 노트에 append. 키보드만으로 메뉴바 → 입력 → 닫힘 루프가
+  // 끝나는 게 핵심.
+  const [quickInput, setQuickInput] = useState("");
+  const [quickStatus, setQuickStatus] = useState<
+    null | "saving" | "ok" | "err"
+  >(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     // 첫 paint 가 끝난 다음 tick 에 IPC 시작 — webview 가 즉시 화면을
@@ -77,6 +85,33 @@ export function PopoverApp() {
     ipc.quitApp().catch(() => {});
   }
 
+  /** 활동 점수 가장 높은 프로젝트. 사용자가 "이게 뭘 의미하는지" 명확히
+   *  알도록 입력란 placeholder 에 프로젝트명을 노출. */
+  const quickTarget: string | null = (activity?.by_project ?? [])
+    .filter((p) => p.activity_score > 0)
+    .map((p) => p.project)[0] ?? null;
+
+  async function submitQuick() {
+    const text = quickInput.trim();
+    if (!text || !quickTarget || quickStatus === "saving") return;
+    setQuickStatus("saving");
+    try {
+      await ipc.danbiLogQuick(quickTarget, text);
+      setQuickInput("");
+      setQuickStatus("ok");
+      // 짧게 visual feedback 후 popover 자동 닫힘 → 사용자가 "메모 저장됐다"
+      // 확인 후 흐름 끊기지 않게.
+      setTimeout(() => {
+        setQuickStatus(null);
+        ipc.hidePopover().catch(() => {});
+      }, 600);
+    } catch (e) {
+      console.error("[danbi] quick log failed", e);
+      setQuickStatus("err");
+      setTimeout(() => setQuickStatus(null), 1800);
+    }
+  }
+
   const top: ProjectActivity[] = (activity?.by_project ?? [])
     .filter((p) => p.activity_score > 0)
     .slice(0, 4);
@@ -113,6 +148,66 @@ export function PopoverApp() {
               />
             ))}
           </ul>
+        )}
+
+        {quickTarget && (
+          <div className="flex flex-col gap-1.5 pt-2">
+            <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.4px] text-stone">
+              <span>빠른 메모</span>
+              <span className="font-mono normal-case tracking-normal">
+                → {quickTarget}/오늘
+              </span>
+            </div>
+            <div
+              className={cn(
+                "flex items-end gap-1.5 rounded-md border bg-surface-elevated p-1.5 transition-colors",
+                quickStatus === "err"
+                  ? "border-accent-red/60"
+                  : quickStatus === "ok"
+                    ? "border-accent-green/60"
+                    : "border-hairline focus-within:border-hairline-strong",
+              )}
+            >
+              <textarea
+                ref={inputRef}
+                value={quickInput}
+                onChange={(e) => setQuickInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (
+                    (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ||
+                    (e.key === "Enter" && !e.shiftKey && quickInput.trim().length < 80)
+                  ) {
+                    // Cmd+Enter 는 항상 제출, 짧은 한 줄 입력이면 그냥
+                    // Enter 로도 제출 (TODO 메모용).
+                    e.preventDefault();
+                    submitQuick();
+                  }
+                }}
+                placeholder="한 줄 메모 → daily 노트에 append (⌘↵)"
+                rows={2}
+                className="flex-1 resize-none bg-transparent px-1 text-[12px] text-body placeholder:text-stone/70 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={submitQuick}
+                disabled={!quickInput.trim() || quickStatus === "saving"}
+                className={cn(
+                  "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm transition-colors",
+                  quickInput.trim() && quickStatus !== "saving"
+                    ? "bg-primary text-on-primary hover:bg-primary-pressed"
+                    : "bg-surface text-stone",
+                )}
+                title="저장 (⌘↵)"
+              >
+                <Send size={11} />
+              </button>
+            </div>
+            {quickStatus === "err" && (
+              <span className="text-[10px] text-accent-red">
+                저장 실패 — 본체 열어 확인해주세요
+              </span>
+            )}
+          </div>
         )}
       </div>
 

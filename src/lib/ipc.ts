@@ -1125,6 +1125,12 @@ export const ipc = {
   docChangeHistory: (project: string, domain: string, limit = 20) =>
     invoke<DocChangeEntry[]>("doc_change_history", { project, domain, limit }),
 
+  danbiLogQuick: (project: string, content: string) =>
+    invoke<{ project: string; domain: string; commit: string | null }>(
+      "danbi_log_quick",
+      { project, content },
+    ),
+
   projectActivityOverview: (days = 30) =>
     invoke<ActivityOverview>("project_activity_overview", { days }),
   openProjectInMain: (project: string) =>

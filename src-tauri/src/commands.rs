@@ -3741,6 +3741,53 @@ pub fn goals_delete(project: String, id: String) -> DanbiResult<()> {
     crate::goals::delete(&vault_path, &project, &id)
 }
 
+/// 메뉴바 popover 의 빠른 메모용 — 지정 project 의 오늘 daily 노트에
+/// content 를 append 하고 git snapshot. mcp 의 `danbi_log` 와 같은 의미인데
+/// IPC 직호출 경로라 외부 LLM 트래픽으로 잡히지 않는다.
+#[tauri::command]
+pub fn danbi_log_quick(
+    project: String,
+    content: String,
+) -> DanbiResult<serde_json::Value> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err(DanbiError::Other("content is empty".into()));
+    }
+    let tree = crate::vault::list_tree(&vault_path)?;
+    if !tree.projects.iter().any(|p| p.name == project) {
+        return Err(DanbiError::Config(format!("unknown project: {project}")));
+    }
+
+    let domain = crate::daily::ensure_today_note(&vault_path, &project)?;
+    let current = crate::vault::read_doc(&vault_path, &project, &domain)?;
+    let op = crate::edit_ops::EditOp::Append {
+        content: trimmed.to_string(),
+    };
+    crate::edit_ops::validate(&op)?;
+    let next = crate::edit_ops::apply(&current, &op)?;
+
+    crate::vcs::ensure_repo(&vault_path)?;
+    let _ = crate::vcs::snapshot(
+        &vault_path,
+        &format!("danbi: popover quick · {project}/{domain} (pre)"),
+    );
+    crate::vault::write_doc(&vault_path, &project, &domain, &next)?;
+    let commit = crate::vcs::snapshot(
+        &vault_path,
+        &format!("danbi: popover quick · {project}/{domain}"),
+    )?;
+    Ok(serde_json::json!({
+        "project": project,
+        "domain": domain,
+        "commit": commit,
+    }))
+}
+
 /// 문서 변경 히스토리 — 현재 열린 doc 우측 패널에 노출되는 list.
 /// git 커밋 메시지에서 op (upsert_item / replace_section / append / …)
 /// 을 분류하고, upsert_item 의 경우 update vs add 모드까지 함께.
