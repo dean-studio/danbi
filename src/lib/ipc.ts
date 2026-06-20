@@ -1131,6 +1131,18 @@ export const ipc = {
       { project, content },
     ),
 
+  summarizeWeekly: (project: string) =>
+    invoke<{
+      project: string;
+      domain: string;
+      iso_year: number;
+      iso_week: number;
+      model: string;
+      provider: string;
+      commit: string | null;
+      days_used: number;
+    }>("summarize_weekly", { project }),
+
   projectActivityOverview: (days = 30) =>
     invoke<ActivityOverview>("project_activity_overview", { days }),
   openProjectInMain: (project: string) =>

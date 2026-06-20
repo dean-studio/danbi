@@ -2191,6 +2191,103 @@ pub async fn summarize_daily(
     })
 }
 
+/// 지난 7일 daily 노트를 모아 한 단락 회고를 만들고 `weekly/YYYY-WW.md`
+/// 에 저장. AI 연동 provider 의 가벼운 모델로. 외부 LLM 의 자동 trigger
+/// (홈 첫 진입 시 일주일 한 번) 를 frontend 가 결정하고 이 명령은
+/// "지금 요약" 만 책임진다 — idempotent (같은 주차 호출 시 덮어쓰기).
+#[tauri::command]
+pub async fn summarize_weekly(
+    project: String,
+) -> DanbiResult<serde_json::Value> {
+    use chrono::{Datelike, Local};
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let tree = crate::vault::list_tree(&vault_path)?;
+    if !tree.projects.iter().any(|p| p.name == project) {
+        return Err(DanbiError::Config(format!("unknown project: {project}")));
+    }
+
+    // 지난 7일 daily 노트 본문 수집. 빠진 날은 그냥 skip.
+    let today = Local::now().date_naive();
+    let mut bodies: Vec<(String, String)> = Vec::new();
+    for back in (1..=7).rev() {
+        let d = today - chrono::Duration::days(back);
+        let domain = format!("daily/{}.md", d.format("%Y-%m-%d"));
+        if let Ok(body) = crate::vault::read_doc(&vault_path, &project, &domain) {
+            let trimmed = body.trim();
+            if !trimmed.is_empty() {
+                bodies.push((d.format("%Y-%m-%d").to_string(), trimmed.to_string()));
+            }
+        }
+    }
+    if bodies.is_empty() {
+        return Err(DanbiError::Config(
+            "지난 7일 daily 노트가 없어요 — 요약할 게 없습니다.".into(),
+        ));
+    }
+
+    let (model, kind) = resolve_summarize_model(&cfg).ok_or_else(|| {
+        DanbiError::Config(
+            "AI 연동이 꺼져있어요. Settings 에서 임베딩 provider 를 먼저 연결하세요."
+                .into(),
+        )
+    })?;
+    let provider = resolve_embed_provider(&cfg)?;
+
+    let system = "당신은 한국어 마크다운 작성기입니다. 한 주치 daily 노트를 받아 사용자가 다음 주 첫 출근 때 흐름을 다시 잡을 수 있는 회고를 작성합니다.\n\n원칙:\n- 일자별 단순 나열 X — 한 주의 흐름·결정·전환을 한 단락 + bullet 으로 압축.\n- 다음 H2 섹션 구조 (없으면 생략):\n  - '## 한 주 한 줄' — 한 문장으로 이번 주를 요약.\n  - '## 굵직한 결정/전환' — 의사결정과 그 이유.\n  - '## 진행된 일' — 코드/UI/문서 단위 변화 bullet.\n  - '## 다음 주 후보' — 노트에 등장한 예고된 작업만.\n- 각 bullet 1~2줄. 동일 내용 중복 금지.\n- 출력은 markdown 만.";
+    let mut user = String::from("다음은 한 주의 daily 노트입니다.\n\n");
+    for (date, body) in &bodies {
+        user.push_str(&format!("=== {date} ===\n"));
+        let trimmed: String = body.chars().take(8_000).collect();
+        user.push_str(&trimmed);
+        user.push_str("\n\n");
+    }
+    user.push_str("위 내용을 정리해 주세요.");
+
+    let summary_md = crate::usage::with_role(
+        "summarize",
+        provider.converse_text(&model, Some(system), &user, 2400, 0.5),
+    )
+    .await?;
+
+    // weekly/YYYY-WW.md — 같은 ISO 주차에 다시 호출되면 덮어쓰기.
+    let iso = today.iso_week();
+    let domain = format!("weekly/{}-W{:02}.md", iso.year(), iso.week());
+    crate::vault::create_folder(&vault_path, &project, "weekly")?;
+    let _ = crate::vault::create_domain(&vault_path, &project, &domain);
+
+    crate::vcs::ensure_repo(&vault_path)?;
+    let _ = crate::vcs::snapshot(
+        &vault_path,
+        &format!("danbi: weekly summary · {project}/{domain} (pre)"),
+    );
+    let header = format!(
+        "# 주간 회고 — {} W{:02}\n\n_{}_\n\n",
+        iso.year(),
+        iso.week(),
+        kind,
+    );
+    let final_body = format!("{header}{summary_md}\n");
+    crate::vault::write_doc(&vault_path, &project, &domain, &final_body)?;
+    let commit = crate::vcs::snapshot(
+        &vault_path,
+        &format!("danbi: weekly summary · {project}/{domain}"),
+    )?;
+
+    Ok(serde_json::json!({
+        "project": project,
+        "domain": domain,
+        "iso_year": iso.year(),
+        "iso_week": iso.week(),
+        "model": model,
+        "provider": kind,
+        "commit": commit,
+        "days_used": bodies.len(),
+    }))
+}
+
 /// 사용자가 daily 노트의 export history 를 볼 때 호출. 같은 노트의
 /// 이전 요약 list 를 newest-first 로 반환.
 #[tauri::command]

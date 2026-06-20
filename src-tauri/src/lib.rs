@@ -619,6 +619,7 @@ pub fn run() {
             commands::goals_delete,
             commands::doc_change_history,
             commands::danbi_log_quick,
+            commands::summarize_weekly,
             commands::project_activity_overview,
             commands::open_project_in_main,
             commands::quit_app,

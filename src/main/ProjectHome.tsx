@@ -388,6 +388,7 @@ function ProjectHero({
               <Edit3 size={12} /> Skill 수정
             </button>
           )}
+          <WeeklySummaryButton project={project} />
           {/* CLAUDE.md 버튼 보존 (필요시 다시 노출):
           <button
             type="button"
@@ -2392,3 +2393,69 @@ function GoalsCard({ project }: { project: string }) {
     </section>
   );
 }
+
+/** "주간 회고" 버튼 — 지난 7일 daily 노트를 모아 LLM 한 번 호출로
+ *  요약해서 weekly/YYYY-WWXX.md 에 저장. AI 미연동 / 노트 없음 등
+ *  에러는 상태 메시지로 노출, 성공 시 사이드바 새로고침 + 자동
+ *  결과 도메인 select. */
+function WeeklySummaryButton({ project }: { project: string }) {
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<{
+    tone: "ok" | "err";
+    msg: string;
+  } | null>(null);
+  const selectDomain = useApp((s) => s.selectDomain);
+
+  async function run() {
+    if (busy) return;
+    setBusy(true);
+    setStatus(null);
+    try {
+      const result = await ipc.summarizeWeekly(project);
+      setStatus({
+        tone: "ok",
+        msg: `${result.days_used}일치 요약 → ${result.domain}`,
+      });
+      selectDomain(project, result.domain);
+      setTimeout(() => setStatus(null), 3000);
+    } catch (e) {
+      setStatus({
+        tone: "err",
+        msg: typeof e === "string" ? e : (e as Error)?.message ?? "실패",
+      });
+      setTimeout(() => setStatus(null), 4000);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={run}
+        disabled={busy}
+        title="지난 7일 daily 노트를 한 단락 회고로 정리해서 weekly/ 에 저장"
+        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark disabled:cursor-not-allowed disabled:opacity-60"
+      >
+        {busy ? (
+          <Loader2 size={12} className="animate-spin" />
+        ) : (
+          <Sparkles size={12} />
+        )}
+        주간 회고
+      </button>
+      {status && (
+        <span
+          className={cn(
+            "text-[11px]",
+            status.tone === "ok" ? "text-accent-green" : "text-accent-red",
+          )}
+        >
+          {status.tone === "ok" ? "✓" : "✕"} {status.msg}
+        </span>
+      )}
+    </div>
+  );
+}
+
