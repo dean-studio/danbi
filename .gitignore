@@ -36,3 +36,4 @@ HANDOFF.md
 .env.local
 .env.*.local
 release/
+.release-*.log
