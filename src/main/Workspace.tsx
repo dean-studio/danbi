@@ -928,7 +928,15 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
             {selection.project && selection.domain ? (
               <>
                 <div className="flex-1 min-h-0">
-                  <DocView refreshKey={refreshKey} />
+                  <DocView
+                    refreshKey={refreshKey}
+                    onOpenGraph={() => {
+                      // 현재 도메인을 spotlight 한 채로 그래프 뷰 열기.
+                      // GraphView 가 initialProject 를 받아 자동 zoom 한다.
+                      setGraphProject(useApp.getState().selection.project);
+                      setGraphOpen(true);
+                    }}
+                  />
                 </div>
                 <Backlinks />
               </>

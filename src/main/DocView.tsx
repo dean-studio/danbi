@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, ChevronDown, ChevronUp, Copy, FileText, Loader2, Save, Sparkles, Undo2, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronUp, Copy, FileText, Link2, Loader2, Save, Sparkles, Undo2, X } from "lucide-react";
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { BlockNoteEditor, type PartialBlock } from "@blocknote/core";
@@ -33,7 +33,15 @@ function useResolvedTheme(): "dark" | "light" {
   return resolved;
 }
 
-export function DocView({ refreshKey }: { refreshKey: number }) {
+export function DocView({
+  refreshKey,
+  onOpenGraph,
+}: {
+  refreshKey: number;
+  /** 도메인 헤더의 "그래프" 버튼이 호출. 그래프 뷰가 현재 프로젝트로
+   *  spotlight 된 상태로 열림. */
+  onOpenGraph?: () => void;
+}) {
   const cfg = useApp((s) => s.cfg);
   const selection = useApp((s) => s.selection);
   const selectProject = useApp((s) => s.selectProject);
@@ -785,6 +793,16 @@ export function DocView({ refreshKey }: { refreshKey: number }) {
                 </>
               )}
             </div>
+          )}
+          {onOpenGraph && (
+            <button
+              onClick={onOpenGraph}
+              title="이 문서의 연결을 그래프로 보기"
+              className="inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark"
+            >
+              <Link2 size={11} />
+              그래프
+            </button>
           )}
           {/* 변경 히스토리 — 외부 LLM 의 replace_section / upsert_item 까지
               모두 포함. 0개면 (= git history 없는 신규 문서) 버튼 자체 숨김. */}
