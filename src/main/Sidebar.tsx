@@ -43,7 +43,7 @@ type CtxState =
  *  so the renderer doesn't have to special-case the inner level. */
 type SubfolderShape = {
   name: string;
-  domains: { name: string; bytes: number; title?: string | null }[];
+  domains: { name: string; bytes: number; title?: string | null; kind?: string | null }[];
   subfolders: SubfolderShape[];
 };
 
@@ -1134,7 +1134,7 @@ function ProjectNode({
 }: {
   project: {
     name: string;
-    domains: { name: string; bytes: number; title?: string | null }[];
+    domains: { name: string; bytes: number; title?: string | null; kind?: string | null }[];
     subfolders: SubfolderShape[];
   };
   expanded: boolean;
@@ -1314,6 +1314,7 @@ function ProjectNode({
                 projectName={project.name}
                 domain={d.name}
                 title={d.title}
+                kind={d.kind}
                 active={active}
                 onSelect={() => onSelectDomain(d.name)}
                 onContextMenu={(e) => {
@@ -1400,7 +1401,7 @@ function GroupSection({
   tree: {
     projects: {
       name: string;
-      domains: { name: string; bytes: number; title?: string | null }[];
+      domains: { name: string; bytes: number; title?: string | null; kind?: string | null }[];
       subfolders: SubfolderShape[];
     }[];
   };
@@ -1880,6 +1881,7 @@ function SubfolderRow({
                 domain={d.name}
                 displayName={display}
                 title={d.title}
+                kind={d.kind}
                 active={active}
                 onSelect={() => onSelect(d.name)}
                 onContextMenu={(e) => onDomainContext(e, d.name)}
@@ -1901,6 +1903,7 @@ function DomainRow({
   domain,
   displayName,
   title,
+  kind,
   active,
   onSelect,
   onContextMenu,
@@ -1913,6 +1916,10 @@ function DomainRow({
    *  can scan project files by topic without opening each one. Backend
    *  omits this for daily-style append-only folders. */
   title?: string | null;
+  /** YAML frontmatter `kind:` value. `"list"` flips on a tiny LIST badge so
+   *  the user knows this doc is meant to be replaced/upserted, not appended
+   *  to. */
+  kind?: string | null;
   active: boolean;
   onSelect: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
@@ -2022,6 +2029,14 @@ function DomainRow({
           </span>
         )}
       </span>
+      {kind === "list" && (
+        <span
+          className="rounded-xs bg-surface-elevated px-1 py-px text-[9px] font-medium uppercase leading-none tracking-[0.2px] text-stone"
+          title="kind: list — 외부 LLM 이 replace/upsert 로 갱신하는 문서"
+        >
+          LIST
+        </span>
+      )}
       {fileKinds && fileKinds.length > 0 && (
         <DomainKindChips kinds={fileKinds} />
       )}

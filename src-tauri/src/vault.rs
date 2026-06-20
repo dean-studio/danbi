@@ -104,6 +104,14 @@ pub struct DomainNode {
     /// large `daily/` tree doesn't cost extra IO on every list_tree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// `kind:` declared in the document's YAML frontmatter, lowercased and
+    /// trimmed. Recognised values include `list` — used by the UI to mark
+    /// "this doc updates by replacement, not append" and by external LLMs to
+    /// pick `danbi_replace_section` / `danbi_upsert_item` over plain append.
+    /// Skipped on the daily/-style high-volume folders for the same IO
+    /// reason as `title`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -183,52 +191,84 @@ fn read_md_domains(dir: &Path, prefix: Option<&str>) -> DanbiResult<Vec<DomainNo
             Some(p) => format!("{p}/{fname}"),
             None => fname.to_string(),
         };
-        let title = if want_title {
-            sniff_first_heading(&path)
+        let (title, kind) = if want_title {
+            sniff_heading_and_kind(&path)
         } else {
-            None
+            (None, None)
         };
         out.push(DomainNode {
             name,
             bytes: meta.len(),
             modified_ms: mtime_ms(&meta),
             title,
+            kind,
         });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
 }
 
-/// Read just the start of `path` and return the first non-empty markdown
-/// heading line ("# Title", "## Title"). Returns `None` if no heading is in
-/// the head-buffer or on any IO error — the sidebar treats absence as "no
-/// preview". We cap the read at a few KB so very large notes don't pay a
-/// big IO cost during list_tree.
-fn sniff_first_heading(path: &Path) -> Option<String> {
+/// Read just the start of `path` and return both the first markdown heading
+/// (used for sidebar preview) and the `kind:` declared in YAML front-matter
+/// (drives the UI badge that marks "this is a list-shaped doc"). We share
+/// one head-buffer read so list_tree pays a single IO per file.
+fn sniff_heading_and_kind(path: &Path) -> (Option<String>, Option<String>) {
     use std::io::Read;
     const HEAD_BYTES: usize = 4096;
-    let mut f = std::fs::File::open(path).ok()?;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return (None, None);
+    };
     let mut buf = vec![0u8; HEAD_BYTES];
-    let n = f.read(&mut buf).ok()?;
+    let Ok(n) = f.read(&mut buf) else {
+        return (None, None);
+    };
     buf.truncate(n);
-    let head = std::str::from_utf8(&buf).ok()?;
-    // Skip a YAML front-matter block ("---\n…\n---") if present so titles
-    // declared inside the body still surface.
+    let Ok(head) = std::str::from_utf8(&buf) else {
+        return (None, None);
+    };
+
+    let kind = parse_front_matter_kind(head);
     let body = strip_front_matter(head);
+
+    let mut title: Option<String> = None;
     for line in body.lines() {
         let trimmed = line.trim_start();
         if trimmed.is_empty() {
             continue;
         }
         if let Some(rest) = trimmed.strip_prefix('#') {
-            // Pop additional `#` chars (ATX h1..h6) then a single space.
             let after_hashes = rest.trim_start_matches('#');
-            let title = after_hashes.trim();
-            if title.is_empty() {
+            let t = after_hashes.trim();
+            if t.is_empty() {
                 continue;
             }
-            return Some(truncate_title(title));
+            title = Some(truncate_title(t));
+            break;
         }
+    }
+    (title, kind)
+}
+
+/// Pick the `kind:` value out of a YAML front-matter block. Accepts both
+/// quoted (`kind: "list"`) and bare (`kind: list`) values. Returns the
+/// lowercase trimmed string — empty values become None.
+fn parse_front_matter_kind(head: &str) -> Option<String> {
+    if !head.starts_with("---") {
+        return None;
+    }
+    let after = &head[3..];
+    let close = after.find("\n---")?;
+    let block = &after[..close];
+    for line in block.lines() {
+        let line = line.trim();
+        if !line.starts_with("kind:") {
+            continue;
+        }
+        let value = line[5..].trim().trim_matches(|c| c == '"' || c == '\'');
+        if value.is_empty() {
+            return None;
+        }
+        return Some(value.to_lowercase());
     }
     None
 }

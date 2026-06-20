@@ -236,6 +236,10 @@ export type DomainNode = {
    *  capped). `daily/**` files skip this server-side to keep large
    *  journals cheap. Renderer shows it dim next to the filename. */
   title?: string | null;
+  /** YAML frontmatter `kind:` value (lowercase). `"list"` flags this doc as
+   *  list-shaped — the UI shows a small badge so the reader knows external
+   *  Claude updates by replace/upsert rather than append. */
+  kind?: string | null;
 };
 
 export type SubfolderNode = {
