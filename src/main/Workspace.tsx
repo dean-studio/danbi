@@ -25,6 +25,7 @@ import { Home } from "@/main/Home";
 import { ReviewPanel } from "@/main/ReviewPanel";
 import { ProjectHome } from "@/main/ProjectHome";
 import { SearchPalette } from "@/main/SearchPalette";
+import { ProjectSwitcher } from "@/main/ProjectSwitcher";
 import { Settings } from "@/main/Settings";
 import { TrashPanel } from "@/main/TrashPanel";
 import { Sidebar } from "@/main/Sidebar";
@@ -71,6 +72,7 @@ export function Workspace() {
   >(undefined);
   const [searchOpen, setSearchOpen] = useState(false);
   const [graphOpen, setGraphOpen] = useState(false);
+  const [projectSwitcherOpen, setProjectSwitcherOpen] = useState(false);
   const [graphProject, setGraphProject] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [reviewOpen, setReviewOpen] = useState(false);
@@ -399,6 +401,13 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
         setSearchOpen((v) => !v);
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key === "p") {
+        // 프로젝트 빠른 전환 — 사이드바 클릭 없이 키보드만으로 프로젝트
+        // 전환. recent + fuzzy. 입력 / textarea 안에선 브라우저 기본
+        // (인쇄 다이얼로그) 도 막아서 사용자 흐름 끊기지 않게.
+        e.preventDefault();
+        setProjectSwitcherOpen((v) => !v);
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "g") {
         e.preventDefault();
@@ -1244,6 +1253,11 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
       <SearchPalette
         open={searchOpen}
         onClose={() => setSearchOpen(false)}
+      />
+
+      <ProjectSwitcher
+        open={projectSwitcherOpen}
+        onClose={() => setProjectSwitcherOpen(false)}
       />
 
       <TrashPanel
