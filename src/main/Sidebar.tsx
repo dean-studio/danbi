@@ -1658,14 +1658,14 @@ function SubfolderRow({
    *  dataTransfer; the parent decides if/how to dispatch a move. */
   onDropDomain: (folder: string, payload: string) => void;
 }) {
-  // 'notes' 폴더는 보통 잡다한 메모가 길게 누적돼있어서 프로젝트 펼칠
-  // 때마다 사이드바 절반을 차지함. 처음엔 닫힌 상태로 시작 — 사용자가
-  // 한 번 펼치면 그 세션 동안 유지. 프로젝트 접었다 다시 열면 또 닫혀
-  // 시작 (의도된 동작 — 시각적 노이즈 줄이기).
-  const segmentsForOpen = subfolder.name.split("/");
-  const lastSeg = segmentsForOpen[segmentsForOpen.length - 1];
-  const startClosed = lastSeg === "notes";
-  const [open, setOpen] = useState(!startClosed);
+  // 모든 sub-folder 는 기본적으로 닫힌 상태로 시작. 프로젝트 처음 펼치면
+  // 트리가 한꺼번에 펴져서 사이드바 절반을 차지하던 문제를 해결.
+  // 예외: 현재 선택된 도메인이 이 폴더(또는 nested) 안에 있으면 자동
+  // expand — 사용자가 어디 있는지 잃지 않도록.
+  // 사용자가 한 번 토글하면 그 선택이 우선 (자동 expand override).
+  const initiallyContainsActive = !!activeDomain &&
+    activeDomain.startsWith(`${subfolder.name}/`);
+  const [open, setOpen] = useState(initiallyContainsActive);
   const [dragOver, setDragOver] = useState(false);
   // Show the latest few daily notes first — user cares about "today" most.
   const sorted =
