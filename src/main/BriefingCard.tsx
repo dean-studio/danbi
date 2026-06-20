@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Activity,
   Clock4,
@@ -15,6 +15,7 @@ import {
   type VaultSuggestion,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
+import { useApp } from "@/state/store";
 
 /**
  * "오늘의 단비" briefing card — renders the aggregate DashboardSnapshot from
@@ -37,6 +38,12 @@ export function BriefingCard({
   const [data, setData] = useState<DashboardSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
+  const pushNotification = useApp((s) => s.pushNotification);
+  // 자동 self-healing 스캔: 한 번이라도 본 제안 키 집합. 새 제안이
+  // 들어오면 (= seen 에 없는 키) 알림으로 띄움. 같은 세션 중 중복 알림
+  // 방지. ghost 와 healing 둘 다 비교.
+  const seenSuggestionKeys = useRef<Set<string>>(new Set());
+  const seenInitialised = useRef(false);
 
   const load = async () => {
     setLoading(true);
@@ -44,6 +51,33 @@ export function BriefingCard({
       const snap = await ipc.dashboardSnapshot();
       setData(snap);
       setLastLoadedAt(Date.now());
+
+      // 첫 마운트는 baseline 만 잡고 알림 안 띄움 — "이전부터 있던
+      // 제안" 으로 사용자를 놀라게 하지 않게.
+      const keys = new Set<string>();
+      for (const g of snap.ghost_suggestions) {
+        keys.add(`ghost:${g.id}`);
+      }
+      for (const h of snap.healing) {
+        keys.add(`heal:${JSON.stringify(h)}`);
+      }
+      if (!seenInitialised.current) {
+        seenSuggestionKeys.current = keys;
+        seenInitialised.current = true;
+      } else {
+        const fresh: string[] = [];
+        for (const k of keys) {
+          if (!seenSuggestionKeys.current.has(k)) fresh.push(k);
+        }
+        if (fresh.length > 0) {
+          pushNotification({
+            tone: "info",
+            title: `단비 새 제안 ${fresh.length}건`,
+            body: "홈 브리핑 카드에서 확인할 수 있어요.",
+          });
+          seenSuggestionKeys.current = keys;
+        }
+      }
     } catch {
       /* ignore — card just doesn't render */
     } finally {
@@ -53,6 +87,15 @@ export function BriefingCard({
 
   useEffect(() => {
     load();
+    // 윈도우 focus 받을 때마다 (다른 앱 갔다 돌아옴) 가벼운 refresh —
+    // 외부 LLM 의 vault 변경이 dashboard 까지 닿을 시간 줌. dashboard 자체
+    // 가 빠르게 동기 응답이라 cost 부담 없음.
+    function onFocus() {
+      load();
+    }
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   if (!data) {
