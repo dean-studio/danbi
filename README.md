@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.5.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.5.0" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.6.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.6.0" />
   </a>
 </p>
 
@@ -29,20 +29,27 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.5.0-success" alt="version 0.5.0" />
+  <img src="https://img.shields.io/badge/version-0.6.0-success" alt="version 0.6.0" />
 </p>
 
 ---
 
-## What's new in v0.5.0 — *Goal · 활동 분포 · popover 정리*
+## What's new in v0.6.0 — *replace · upsert · 변경 히스토리 · 주간 회고*
 
-이번 릴리즈는 "지금 뭘 하려는지" 를 단비가 외부 AI 세션에 자연스럽게 흘려주고, 홈 대시보드를 한눈에 더 가볍게 만드는 데 집중했습니다.
+이번 릴리즈는 "외부 LLM 이 같은 문서를 깔끔하게 갱신할 수 있게" 만드는 두 도구와, 단비 본체의 작은 사용성 개선이 함께 들어갔습니다.
 
-- 🎯 **프로젝트별 Goal** — 각 프로젝트 대시보드에서 "지금 뭘 하려는지" 한 줄로 등록·archive. 외부 Claude · Codex 세션이 단비 도구를 부를 때 응답 본문에 `_active_goals` 가 자동으로 끼어들어서, 사용자가 따로 리마인드 안 해도 AI 가 컨텍스트를 잃지 않습니다.
-- 📊 **프로젝트 활동 분포 카드 (홈)** — git commit + MCP 외부 호출을 합산한 활동량을 도넛 + 랭킹 바로 시각화. 7일 / 30일 / 90일 토글. 행 클릭하면 그 프로젝트 대시보드로 바로 이동.
-- 🪟 **메뉴바 popover 정리** — "단비 열기" + 최근 활동 프로젝트 4개 퀵셔트 (클릭 → 본체로 이동) + MCP 상태 / 종료 버튼. 이전의 daily · recent · reviews · settings 탭은 본체에서 더 잘 보여 제거.
-- 🪞 **첫 진입 splash** — 사이드바 노출 전 단비 로고만 보이는 가벼운 로딩 화면. 큰 vault 도 webview 가 멈춰 보이는 시간 없이 매끄럽게 들어옵니다.
-- 🚪 **Cmd+Q 가 종료하지 않음** — 메인 창만 숨기고 tray + MCP 서버는 계속 떠 있어서 외부 세션 연결이 끊기지 않습니다. 진짜 종료는 popover 의 종료 버튼 / tray 의 Quit 으로만.
+- ✏️ **`danbi_replace_section` MCP 도구** — 헤딩 아래 본문 전체를 새 내용으로 교체. 같은 섹션이 자주 갱신되는 문서를 append 로 쌓지 않고 깔끔하게 갱신. 헤딩이 없으면 EOF 에 새 섹션을 만들어줍니다.
+- 🪪 **`danbi_upsert_item` MCP 도구** — 리스트 섹션 안 한 항목을 in-place 교체 (없으면 추가). `[#id]` 마커 또는 첫 줄 텍스트 매칭. 알림톡 리스트·체크리스트처럼 항목 단위로 진행 상태가 바뀌는 문서에 적합. 응답에 `mode: "update" | "add"` 가 실려 어떤 의미였는지 분간.
+- 🏷️ **frontmatter `kind: list` 인지 + 사이드바 LIST 배지** — 문서가 "외부 LLM 이 replace/upsert 로 갱신하는 종류" 임을 시각화.
+- 🕒 **변경 히스토리 popover** — 문서 헤더에 "변경 N건" 버튼. 외부 LLM 의 upsert/replace 까지 op 별 색 토큰으로 분간해서 시간순 노출.
+- ⚡ **메뉴바 popover 빠른 메모** — 가장 active 한 프로젝트의 오늘 daily 노트로 한 줄 메모 즉시 append (⌘↵).
+- 🎹 **프로젝트 switcher ⌘P** — fuzzy match 로 키보드만으로 프로젝트 전환.
+- 🔔 **자동 self-healing 알림** — 윈도우 focus 시 BriefingCard 자동 refresh, 새 ghost / healing 제안이 들어오면 알림 toast.
+- 🕸️ **DocView 헤더 그래프 버튼** — 현재 프로젝트를 spotlight 한 채로 그래프 뷰 열기 (양방향 인터랙션 완성).
+- 🗒️ **주간 회고 (`summarize_weekly`)** — 지난 7일 daily 노트를 모아 한 단락 회고로 정리해서 `weekly/YYYY-WW.md` 에 저장. ProjectHome 헤더의 "주간 회고" 버튼.
+- 📂 **사이드바 sub-folder 자동 expand 제거** — 프로젝트 펼칠 때마다 다 열려있던 동작을, 활성 도메인을 포함한 폴더만 펼치도록 변경. 시각적 노이즈 절감.
+- 🔎 **REST 검색도 RRF 하이브리드 일관성** — `/api/call/danbi_search` 도 JSON-RPC 와 동일하게 BM25 + 벡터 RRF 병합. 자연어 쿼리 정확도 일관.
+- ✂️ **에디터 복사 시 줄끝 `\` 제거** — BlockNote 가 클립보드 text/plain 에 넣던 CommonMark hard-break (`\` + 개행) 가 다른 메모/문서 앱에서 그대로 보이는 문제 해결.
 
 이전 릴리즈 노트는 [Releases 페이지](https://github.com/dean-studio/danbi/releases) 에서 확인할 수 있어요.
 
