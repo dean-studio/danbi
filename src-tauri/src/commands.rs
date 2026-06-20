@@ -3740,3 +3740,19 @@ pub fn goals_delete(project: String, id: String) -> DanbiResult<()> {
     let vault_path = require_vault(&cfg)?;
     crate::goals::delete(&vault_path, &project, &id)
 }
+
+/// 문서 변경 히스토리 — 현재 열린 doc 우측 패널에 노출되는 list.
+/// git 커밋 메시지에서 op (upsert_item / replace_section / append / …)
+/// 을 분류하고, upsert_item 의 경우 update vs add 모드까지 함께.
+#[tauri::command]
+pub fn doc_change_history(
+    project: String,
+    domain: String,
+    limit: Option<usize>,
+) -> DanbiResult<Vec<crate::vcs::DocChangeEntry>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::vcs::doc_history(&vault_path, &project, &domain, limit.unwrap_or(40))
+}

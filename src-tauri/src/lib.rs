@@ -617,6 +617,7 @@ pub fn run() {
             commands::goals_archive,
             commands::goals_unarchive,
             commands::goals_delete,
+            commands::doc_change_history,
             commands::project_activity_overview,
             commands::open_project_in_main,
             commands::quit_app,

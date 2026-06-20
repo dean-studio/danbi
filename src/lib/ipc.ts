@@ -227,6 +227,20 @@ export type AuthInput =
   | { kind: "manual"; label: string }
   | { kind: "env" };
 
+export type DocChangeEntry = {
+  commit: string;
+  ts: number;
+  /** Best-effort op classification: `upsert_item`, `replace_section`,
+   *  `append`, `insert_after`, `rewrite_all`, `apply`, `undo`, `quick_capture`,
+   *  `compound`, … or `edit` when the message wasn't a known pattern. */
+  op: string;
+  summary: string;
+  /** `update` / `add` for upsert_item. Otherwise undefined. */
+  mode?: string | null;
+  /** Item key (upsert_item) or section heading (replace_section). */
+  target?: string | null;
+};
+
 export type DomainNode = {
   /** "ui.md" or "daily/2026-05-11.md" — path relative to project folder. */
   name: string;
@@ -1107,6 +1121,9 @@ export const ipc = {
     invoke<Goal>("goals_unarchive", { project, id }),
   goalsDelete: (project: string, id: string) =>
     invoke<void>("goals_delete", { project, id }),
+
+  docChangeHistory: (project: string, domain: string, limit = 20) =>
+    invoke<DocChangeEntry[]>("doc_change_history", { project, domain, limit }),
 
   projectActivityOverview: (days = 30) =>
     invoke<ActivityOverview>("project_activity_overview", { days }),

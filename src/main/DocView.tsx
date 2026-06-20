@@ -294,6 +294,13 @@ export function DocView({ refreshKey }: { refreshKey: number }) {
     import("@/lib/ipc").ExportRecord[]
   >([]);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // 문서별 git 변경 히스토리 — replace_section / upsert_item 등 외부
+  // LLM 의 쓰기까지 모두 포착. 섹션·항목 단위로 어떤 것이 언제 갱신됐는지
+  // 보여주는 사이드 카드의 데이터 소스.
+  const [changeHistory, setChangeHistory] = useState<
+    import("@/lib/ipc").DocChangeEntry[]
+  >([]);
+  const [changeHistoryOpen, setChangeHistoryOpen] = useState(false);
   const isDailyNote = (() => {
     const d = selection.domain ?? "";
     // daily/YYYY-MM-DD.md 형식
@@ -326,6 +333,29 @@ export function DocView({ refreshKey }: { refreshKey: number }) {
     selection.domain,
     summaryResult,
   ]);
+
+  // 변경 히스토리 자동 로드 — 문서가 바뀌거나 저장이 끝나면 다시 받음.
+  // refreshKey 도 의존성에 넣어서 외부 LLM 의 mcp upsert/replace 직후에도
+  // 바로 반영. 실패는 silent (히스토리 없음).
+  useEffect(() => {
+    if (!selection.project || !selection.domain) {
+      setChangeHistory([]);
+      return;
+    }
+    let alive = true;
+    ipc
+      .docChangeHistory(selection.project, selection.domain, 30)
+      .then((rs) => {
+        if (alive) setChangeHistory(rs);
+      })
+      .catch(() => {
+        if (alive) setChangeHistory([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selection.project, selection.domain, refreshKey, dirty]);
+
   const [findIndex, setFindIndex] = useState(0);
   const [findCount, setFindCount] = useState(0);
 
@@ -756,6 +786,77 @@ export function DocView({ refreshKey }: { refreshKey: number }) {
               )}
             </div>
           )}
+          {/* 변경 히스토리 — 외부 LLM 의 replace_section / upsert_item 까지
+              모두 포함. 0개면 (= git history 없는 신규 문서) 버튼 자체 숨김. */}
+          {selection.project && selection.domain && changeHistory.length > 0 && (
+            <div className="relative">
+              <button
+                onClick={() => setChangeHistoryOpen((v) => !v)}
+                title={`최근 변경 ${changeHistory.length}건`}
+                className={cn(
+                  "inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark",
+                  changeHistoryOpen && "border-hairline-strong text-on-dark",
+                )}
+              >
+                <Sparkles size={11} />
+                변경 {changeHistory.length}
+                <ChevronDown size={10} />
+              </button>
+              {changeHistoryOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-30"
+                    onClick={() => setChangeHistoryOpen(false)}
+                  />
+                  <div className="absolute right-0 top-9 z-40 max-h-[60vh] w-[380px] overflow-y-auto rounded-md border border-hairline bg-surface shadow-xl shadow-black/40">
+                    <div className="border-b border-hairline px-3 py-2 text-[11px] uppercase tracking-[0.4px] text-stone">
+                      이 문서의 최근 변경 — 최신순
+                    </div>
+                    <ul className="flex flex-col">
+                      {changeHistory.map((c) => {
+                        const dt = new Date(c.ts * 1000);
+                        const dateLabel = `${dt.getFullYear()}-${String(
+                          dt.getMonth() + 1,
+                        ).padStart(2, "0")}-${String(dt.getDate()).padStart(
+                          2,
+                          "0",
+                        )} ${String(dt.getHours()).padStart(2, "0")}:${String(
+                          dt.getMinutes(),
+                        ).padStart(2, "0")}`;
+                        const opLabel = changeOpLabel(c.op, c.mode);
+                        const opTone = changeOpTone(c.op);
+                        return (
+                          <li
+                            key={c.commit}
+                            className="border-b border-hairline px-3 py-2"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span
+                                className={cn(
+                                  "rounded-xs px-1.5 py-px text-[10px] font-medium uppercase leading-none tracking-[0.2px]",
+                                  opTone,
+                                )}
+                              >
+                                {opLabel}
+                              </span>
+                              <span className="font-mono text-[11px] text-stone">
+                                {dateLabel}
+                              </span>
+                            </div>
+                            {c.target && (
+                              <div className="mt-1 truncate text-[12px] text-body">
+                                {c.target}
+                              </div>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           {dirty && (
             <>
               <div className="mx-1.5 h-4 w-px bg-hairline" />
@@ -1010,6 +1111,49 @@ export function DocView({ refreshKey }: { refreshKey: number }) {
       </div>
     </div>
   );
+}
+
+/**
+ * 변경 히스토리 row 의 op label. backend 가 분류한 키(`upsert_item`,
+ * `replace_section`, `append`, `apply`, …) 를 사람이 읽을 한국어로.
+ * `upsert_item` 은 mode (update/add) 까지 합쳐 분간.
+ */
+function changeOpLabel(op: string, mode?: string | null): string {
+  if (op === "upsert_item") {
+    if (mode === "update") return "항목 갱신";
+    if (mode === "add") return "항목 추가";
+    return "upsert";
+  }
+  if (op === "replace_section") return "섹션 교체";
+  if (op === "append") return "추가";
+  if (op === "insert_after") return "삽입";
+  if (op === "rewrite_all") return "전체 재작성";
+  if (op === "apply") return "AI 편집";
+  if (op === "undo") return "되돌리기";
+  if (op === "quick_capture") return "Quick Capture";
+  if (op === "compound") return "Compound";
+  return op;
+}
+
+/**
+ * op 별로 어울리는 색 토큰 매핑. 외부 LLM 의 비파괴적 갱신은 차분한
+ * blue/green, 파괴적/대규모는 yellow/red.
+ */
+function changeOpTone(op: string): string {
+  switch (op) {
+    case "upsert_item":
+      return "bg-accent-green-soft text-accent-green";
+    case "replace_section":
+      return "bg-accent-blue-soft text-accent-blue";
+    case "append":
+    case "insert_after":
+      return "bg-surface-elevated text-stone";
+    case "rewrite_all":
+    case "undo":
+      return "bg-accent-yellow-soft text-accent-yellow";
+    default:
+      return "bg-surface-elevated text-stone";
+  }
 }
 
 /**

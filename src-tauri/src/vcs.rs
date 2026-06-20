@@ -209,6 +209,158 @@ pub fn commits_per_project_since(
     Ok(out)
 }
 
+/// One row of a per-doc change history. `op` is best-effort classification
+/// of what kind of write produced the commit — derived from the message
+/// prefix that `mcp.rs` and `commands.rs` already emit (e.g. "danbi: mcp
+/// upsert_item · …"). When the prefix isn't recognised we fall back to
+/// `"edit"`.
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct DocChangeEntry {
+    pub commit: String,
+    pub ts: i64,
+    pub op: String,
+    pub summary: String,
+    /// `"update"` / `"add"` for upsert_item; otherwise None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Item key for upsert_item, or section heading for replace_section.
+    /// Lets the UI render "이 항목" 라벨 없이도 어떤 부분이 바뀌었는지
+    /// 보여줄 수 있다.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// Recent changes touching exactly `Projects/<project>/<domain>` — most
+/// recent first. Skipped (`pre`) snapshots filtered out so the UI only
+/// shows committed states. Limited to the most recent `max` entries.
+pub fn doc_history(
+    vault: &Path,
+    project: &str,
+    domain: &str,
+    max: usize,
+) -> DanbiResult<Vec<DocChangeEntry>> {
+    let mut out: Vec<DocChangeEntry> = Vec::new();
+    let repo = match Repository::open(vault) {
+        Ok(r) => r,
+        Err(_) => return Ok(out),
+    };
+    let mut revwalk = match repo.revwalk() {
+        Ok(r) => r,
+        Err(_) => return Ok(out),
+    };
+    if revwalk.push_head().is_err() {
+        return Ok(out);
+    }
+
+    let want_path = format!("Projects/{project}/{domain}");
+
+    for oid in revwalk.flatten() {
+        if out.len() >= max {
+            break;
+        }
+        let Ok(commit) = repo.find_commit(oid) else { continue; };
+        let summary = commit.summary().unwrap_or("").to_string();
+        // Skip the pre-edit snapshots — they only exist so undo can
+        // recover, never as a user-visible state.
+        if summary.contains("(pre)") {
+            continue;
+        }
+        // Quick path check via diff name-only against first parent. Fall
+        // through if the commit didn't touch our doc.
+        let tree = match commit.tree() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+        let diff = match repo.diff_tree_to_tree(
+            parent_tree.as_ref(),
+            Some(&tree),
+            None,
+        ) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let mut touched = false;
+        let _ = diff.foreach(
+            &mut |delta, _| {
+                if touched {
+                    return true;
+                }
+                let path = delta
+                    .new_file()
+                    .path()
+                    .or_else(|| delta.old_file().path());
+                if let Some(p) = path {
+                    if p.to_string_lossy() == want_path {
+                        touched = true;
+                    }
+                }
+                true
+            },
+            None,
+            None,
+            None,
+        );
+        if !touched {
+            continue;
+        }
+
+        let (op, mode, target) = classify_commit_summary(&summary);
+        out.push(DocChangeEntry {
+            commit: commit.id().to_string(),
+            ts: commit.time().seconds(),
+            op,
+            summary,
+            mode,
+            target,
+        });
+    }
+
+    Ok(out)
+}
+
+/// Recognise the summary patterns that `mcp.rs` / `commands.rs` emit and
+/// peel off the operation kind plus any inline metadata. Pattern shapes:
+///   `danbi: mcp upsert_item · <project>/<domain> · <mode> · <key>`
+///   `danbi: mcp replace_section · <project>/<domain> · <heading>`
+///   `danbi: mcp append · <project>/<domain>`
+///   `danbi: <op_label> · <project>/<domain> · <summary>`  (UI edits)
+fn classify_commit_summary(s: &str) -> (String, Option<String>, Option<String>) {
+    // Tokens after "danbi:" prefix.
+    let body = s
+        .trim()
+        .strip_prefix("danbi:")
+        .map(|x| x.trim())
+        .unwrap_or(s);
+    let parts: Vec<&str> = body.split('·').map(|p| p.trim()).collect();
+    if parts.is_empty() {
+        return ("edit".into(), None, None);
+    }
+    // First segment looks like "mcp upsert_item" or "mcp replace_section"
+    // or "append" / "replace_section" / "upsert_item" / "rewrite_all" /
+    // "insert_after" / "apply" / "undo" / "rest …" depending on origin.
+    let head = parts[0];
+    let (kind, _origin) = if let Some(rest) = head.strip_prefix("mcp ") {
+        (rest.trim(), "mcp")
+    } else if let Some(rest) = head.strip_prefix("rest ") {
+        (rest.trim(), "rest")
+    } else {
+        (head, "ui")
+    };
+
+    // upsert_item picks up `mode` from parts[2] and `key` from parts[3].
+    if kind == "upsert_item" {
+        let mode = parts.get(2).map(|s| s.to_string());
+        let target = parts.get(3).map(|s| s.to_string());
+        return ("upsert_item".into(), mode, target);
+    }
+    if kind == "replace_section" {
+        let target = parts.get(2).map(|s| s.to_string());
+        return ("replace_section".into(), None, target);
+    }
+    (kind.to_string(), None, None)
+}
+
 /// Pull the top-level project folder out of a repo-relative path, e.g.
 /// `Projects/Bonny/ui.md` → `Bonny`. Returns None for paths outside
 /// `Projects/…`.
