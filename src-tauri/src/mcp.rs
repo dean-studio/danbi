@@ -498,14 +498,27 @@ fn run_api_call(
         .map(|s| s.to_string());
     let args_for_banner = args.clone();
 
-    match dispatch(&tool, args) {
+    // danbi_search 는 RRF 하이브리드 fast-path 로. 임베딩 provider 가
+    // cfg 에 있으면 BM25 + 벡터 결과를 RRF 로 병합 (JSON-RPC 경로와 일관).
+    // dispatch() 직호출 (BM25 only) 보다 자연어 쿼리 정확도가 훨씬 높아서
+    // REST 호출자도 같은 품질을 받게.
+    let tool_owned = tool.clone();
+    let dispatch_result: Result<String, DanbiError> = if tool == "danbi_search" {
+        // 같은 tokio runtime context 안에서 비동기 호출 — REST handler
+        // 는 이미 axum tokio task 안이라 안전하다.
+        tauri::async_runtime::block_on(search_hybrid_dispatch(args))
+    } else {
+        dispatch(&tool, args)
+    };
+    match dispatch_result {
         Ok(text) => {
+            let tool = &tool_owned;
             if let Some(meta) = inbound_meta.as_ref() {
-                record_inbound_after_success(&tool, meta, &text, user_agent.as_deref());
+                record_inbound_after_success(tool, meta, &text, user_agent.as_deref());
             }
             let text = inject_active_goals_into_text(
                 text,
-                &tool,
+                tool,
                 &args_for_banner,
                 scoped_project.as_deref(),
             );
