@@ -3275,6 +3275,184 @@ pub fn usage_set_mcp_retention(days: i64) -> DanbiResult<usize> {
     Ok(n)
 }
 
+// ---------- Claude Code 사용량 (v0.7.0) ---------------------------------
+//
+// `~/.claude/projects/**/*.jsonl` transcript 를 읽어 일별/모델별/프로젝트별
+// 토큰 + 비용을 보여준다. agentcat connectors 와 달리 OAuth endpoint 호출
+// 없이 transcript 만으로 동작 — 자기 디스크의 자기 파일 read-only.
+
+#[derive(serde::Serialize)]
+pub struct CcSummaryWithMode {
+    /// 정규화된 모드 — UI 가 카드 모양을 결정할 때 쓴다.
+    /// `"subscription"` | `"api_key"` | `"bedrock"` | `"mixed"` | `"unknown"`
+    pub effective_mode: String,
+    /// `config.usage.claude_code_mode` 그대로 (auto / subscription / api_key / bedrock).
+    pub configured_mode: String,
+    /// 추적 ON/OFF.
+    pub enabled: bool,
+    pub summary: crate::claude_code_usage::CcSummary,
+}
+
+fn cc_effective_mode(
+    configured: &str,
+    summary: &crate::claude_code_usage::CcSummary,
+) -> String {
+    if configured != "auto" {
+        return configured.to_string();
+    }
+    let has_bedrock = summary.by_backend.contains_key("bedrock");
+    let has_api = summary.by_backend.contains_key("anthropic_api");
+    match (has_bedrock, has_api) {
+        (true, true) => "mixed".into(),
+        (true, false) => "bedrock".into(),
+        // anthropic_api transcript 만으로는 구독 vs API key 구분 불가 — 사용자가
+        // 명시 안 하면 "api_key" 로 기본 가정 (= 비용 표시). 잘못된 가정이면
+        // Settings 에서 subscription 으로 바꾸면 비용이 숨겨짐.
+        (false, true) => "api_key".into(),
+        (false, false) => "unknown".into(),
+    }
+}
+
+#[tauri::command]
+pub fn dashboard_claude_code(range: String) -> DanbiResult<CcSummaryWithMode> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let krw = cfg.usage.krw_per_usd;
+    let r = crate::claude_code_usage::Range::parse(&range);
+    let summary = if cfg.usage.claude_code_tracking {
+        crate::claude_code_usage::summarize(r, krw)
+    } else {
+        // 추적 OFF — 빈 요약. UI 가 자체적으로 안내 배너.
+        crate::claude_code_usage::CcSummary {
+            from_ms: 0,
+            to_ms: 0,
+            range: range.clone(),
+            krw_per_usd: krw,
+            totals: Default::default(),
+            by_model: Vec::new(),
+            by_project: Vec::new(),
+            by_backend: std::collections::HashMap::new(),
+            daily: Vec::new(),
+            hourly: Vec::new(),
+            year_ago_today: None,
+            top_days: Vec::new(),
+            disclaimer: "추적이 꺼져 있습니다. Settings → LLM 사용량 에서 켤 수 있어요.".into(),
+        }
+    };
+    let effective = cc_effective_mode(&cfg.usage.claude_code_mode, &summary);
+    Ok(CcSummaryWithMode {
+        effective_mode: effective,
+        configured_mode: cfg.usage.claude_code_mode.clone(),
+        enabled: cfg.usage.claude_code_tracking,
+        summary,
+    })
+}
+
+/// 90일 sparkline + 달력 잔디 + 1년 전 오늘 비교용 일별 시리즈.
+#[tauri::command]
+pub fn dashboard_claude_code_daily(
+    days: Option<u32>,
+) -> DanbiResult<Vec<crate::claude_code_usage::DailyPoint>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    Ok(crate::claude_code_usage::daily_series(
+        days.unwrap_or(90),
+        cfg.usage.krw_per_usd,
+    ))
+}
+
+#[tauri::command]
+pub fn dashboard_claude_code_monthly() -> DanbiResult<Vec<crate::claude_code_usage::DailyPoint>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    Ok(crate::claude_code_usage::monthly_series(cfg.usage.krw_per_usd))
+}
+
+/// transcript 캐시 강제 무효화 — Settings "다시 인덱싱" 버튼.
+#[tauri::command]
+pub fn dashboard_claude_code_reindex() -> DanbiResult<()> {
+    crate::claude_code_usage::invalidate_cache();
+    Ok(())
+}
+
+#[tauri::command]
+pub fn usage_set_claude_code_tracking(enabled: bool) -> DanbiResult<()> {
+    let vault = default_vault_path()?;
+    let mut cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    cfg.usage.claude_code_tracking = enabled;
+    config::save_config(&vault, &cfg)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn usage_set_claude_code_mode(mode: String) -> DanbiResult<()> {
+    let normalized = match mode.as_str() {
+        "auto" | "subscription" | "api_key" | "bedrock" => mode,
+        _ => {
+            return Err(DanbiError::Config(format!(
+                "invalid claude_code_mode: {mode}"
+            )))
+        }
+    };
+    let vault = default_vault_path()?;
+    let mut cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    cfg.usage.claude_code_mode = normalized;
+    config::save_config(&vault, &cfg)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn usage_set_krw_rate(krw_per_usd: f64) -> DanbiResult<()> {
+    if !(krw_per_usd.is_finite() && krw_per_usd > 0.0) {
+        return Err(DanbiError::Config(format!(
+            "invalid krw_per_usd: {krw_per_usd}"
+        )));
+    }
+    let vault = default_vault_path()?;
+    let mut cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    cfg.usage.krw_per_usd = krw_per_usd;
+    config::save_config(&vault, &cfg)?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn usage_set_tray_options(tray_usage: bool, tray_label: bool) -> DanbiResult<()> {
+    let vault = default_vault_path()?;
+    let mut cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    cfg.usage.tray_usage = tray_usage;
+    cfg.usage.tray_label = tray_label;
+    config::save_config(&vault, &cfg)?;
+    Ok(())
+}
+
+// ---------- 단비 자체 Bedrock/LLM 사용량 (Phase 5) ----------
+
+#[tauri::command]
+pub fn dashboard_danbi_llm(range: String) -> DanbiResult<crate::pricing::UsageSummary> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let krw = cfg.usage.krw_per_usd;
+
+    let r = crate::claude_code_usage::Range::parse(&range);
+    let (from_ms, to_ms) = r.window();
+
+    let events: Vec<crate::usage::UsageEvent> = crate::usage::load_all()
+        .unwrap_or_default()
+        .into_iter()
+        // MCP 인바운드 카드는 별도라 제외 (역할 = mcp_inbound).
+        .filter(|e| e.role != crate::usage::MCP_ROLE)
+        .collect();
+    Ok(crate::pricing::summarize(&events, from_ms, to_ms, krw))
+}
+
 // ---------- Backup (mirror vault to external folder) ----------
 
 #[tauri::command]

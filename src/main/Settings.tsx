@@ -1138,6 +1138,8 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
       )}
 
       <McpInboundTracking />
+      <ClaudeCodeTracking />
+      <TrayUsagePanel />
 
       {err && (
         <div className="mt-3 rounded-md border border-hairline bg-surface-elevated p-2 font-mono text-[11px] text-accent-red">
@@ -1150,6 +1152,246 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
         </div>
       )}
     </>
+  );
+}
+
+// ---------- v0.7.0 Claude Code 사용량 추적 ----------
+
+function ClaudeCodeTracking() {
+  const cfg = useApp((s) => s.cfg);
+  const setCfg = useApp((s) => s.setCfg);
+  const [tracking, setTracking] = useState<boolean>(
+    cfg?.usage?.claude_code_tracking ?? true,
+  );
+  const [mode, setMode] = useState<string>(
+    cfg?.usage?.claude_code_mode ?? "auto",
+  );
+  const [krw, setKrw] = useState<number>(
+    cfg?.usage?.krw_per_usd ?? 1380,
+  );
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (cfg?.usage) {
+      setTracking(cfg.usage.claude_code_tracking ?? true);
+      setMode(cfg.usage.claude_code_mode ?? "auto");
+      setKrw(cfg.usage.krw_per_usd);
+    }
+  }, [
+    cfg?.usage?.claude_code_tracking,
+    cfg?.usage?.claude_code_mode,
+    cfg?.usage?.krw_per_usd,
+  ]);
+
+  async function reloadCfg() {
+    try {
+      const next = await ipc.loadConfig();
+      if (next) setCfg(next);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function applyTracking(next: boolean) {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await ipc.usageSetClaudeCodeTracking(next);
+      setTracking(next);
+      await reloadCfg();
+    } catch (e) {
+      setMsg(`설정 저장 실패: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyMode(next: string) {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await ipc.usageSetClaudeCodeMode(next as "auto");
+      setMode(next);
+      await reloadCfg();
+    } catch (e) {
+      setMsg(`설정 저장 실패: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyKrw(next: number) {
+    if (!Number.isFinite(next) || next <= 0) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      await ipc.usageSetKrwRate(next);
+      setKrw(next);
+      await reloadCfg();
+    } catch (e) {
+      setMsg(`설정 저장 실패: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reindex() {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await ipc.dashboardClaudeCodeReindex();
+      setMsg("transcript 캐시 무효화 완료. 다음 카드 갱신 시 다시 읽어요.");
+    } catch (e) {
+      setMsg(`실패: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-6 border-t border-hairline pt-5">
+      <SectionTitle
+        title="Claude Code 사용량"
+        hint="~/.claude/projects/**/*.jsonl 을 직접 읽어 토큰·비용을 계산합니다. OAuth 호출 없이 자기 디스크의 자기 파일만 사용 — 권한 이슈 없음."
+      />
+      <Row
+        label="추적 활성화"
+        hint="끄면 홈의 Claude Code 카드가 비활성화됩니다."
+      >
+        <Toggle
+          value={tracking}
+          onChange={(v) => {
+            if (!busy) applyTracking(v);
+          }}
+        />
+      </Row>
+      <Row
+        label="결제 모드"
+        hint="자동 = transcript 의 message.id 가 msg_bdrk_ 로 시작하면 Bedrock, 아니면 Anthropic API. 구독(Pro/Max) 사용자는 명시 선택 — 비용 표시가 숨겨집니다."
+      >
+        <select
+          value={mode}
+          onChange={(e) => applyMode(e.target.value)}
+          disabled={busy}
+          className="h-7 rounded-md border border-hairline bg-surface-elevated px-2 text-[12px] text-on-dark focus:border-hairline-strong focus:outline-none"
+        >
+          <option value="auto">자동 감지</option>
+          <option value="bedrock">Bedrock (종량)</option>
+          <option value="api_key">Anthropic API key (종량)</option>
+          <option value="subscription">Pro/Max 구독 (정액 — 비용 숨김)</option>
+        </select>
+      </Row>
+      <Row
+        label="USD → KRW 환율"
+        hint="단가표는 USD 기준. KRW 추정에 곱해지는 환율입니다. 분기마다 수동 갱신."
+      >
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-[11px] text-stone">1 USD =</span>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={krw}
+            onChange={(e) => setKrw(parseFloat(e.target.value) || 0)}
+            onBlur={() => applyKrw(krw)}
+            disabled={busy}
+            className="h-7 w-24 rounded-md border border-hairline bg-surface-elevated px-2 text-right font-mono text-[12px] text-on-dark focus:border-hairline-strong focus:outline-none"
+          />
+          <span className="text-caption-sm text-stone">KRW</span>
+        </div>
+      </Row>
+      <Row
+        label="다시 인덱싱"
+        hint="transcript 캐시를 비우고 다음 카드 갱신 시 풀스캔합니다."
+      >
+        <button
+          type="button"
+          onClick={reindex}
+          disabled={busy}
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-hairline bg-surface-elevated px-2.5 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark disabled:opacity-50"
+        >
+          캐시 비우기
+        </button>
+      </Row>
+      {msg && <div className="mt-2 text-caption-sm text-stone">{msg}</div>}
+    </div>
+  );
+}
+
+function TrayUsagePanel() {
+  const cfg = useApp((s) => s.cfg);
+  const setCfg = useApp((s) => s.setCfg);
+  const [trayUsage, setTrayUsage] = useState<boolean>(
+    cfg?.usage?.tray_usage ?? true,
+  );
+  const [trayLabel, setTrayLabel] = useState<boolean>(
+    cfg?.usage?.tray_label ?? false,
+  );
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (cfg?.usage) {
+      setTrayUsage(cfg.usage.tray_usage ?? true);
+      setTrayLabel(cfg.usage.tray_label ?? false);
+    }
+  }, [cfg?.usage?.tray_usage, cfg?.usage?.tray_label]);
+
+  async function reloadCfg() {
+    try {
+      const next = await ipc.loadConfig();
+      if (next) setCfg(next);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function apply(usage: boolean, label: boolean) {
+    setBusy(true);
+    setMsg(null);
+    try {
+      await ipc.usageSetTrayOptions(usage, label);
+      setTrayUsage(usage);
+      setTrayLabel(label);
+      await reloadCfg();
+    } catch (e) {
+      setMsg(`설정 저장 실패: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-6 border-t border-hairline pt-5">
+      <SectionTitle
+        title="메뉴바 (Tray)"
+        hint="메뉴바에서 오늘 토큰·비용을 글랜스. 클릭하면 popover 가 떠요."
+      />
+      <Row
+        label="메뉴바 popover 활성화"
+        hint="끄면 메뉴바 아이콘은 그대로 있고 사용량 popover 만 숨겨집니다."
+      >
+        <Toggle
+          value={trayUsage}
+          onChange={(v) => {
+            if (!busy) apply(v, trayLabel);
+          }}
+        />
+      </Row>
+      <Row
+        label="메뉴바에 토큰 텍스트 표기"
+        hint='활성 시 메뉴바 아이콘 옆에 "1.2M" 같은 압축 텍스트가 노출됩니다. 너비를 차지해서 기본은 OFF.'
+      >
+        <Toggle
+          value={trayLabel}
+          onChange={(v) => {
+            if (!busy) apply(trayUsage, v);
+          }}
+        />
+      </Row>
+      {msg && <div className="mt-2 text-caption-sm text-stone">{msg}</div>}
+    </div>
   );
 }
 

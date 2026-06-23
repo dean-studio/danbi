@@ -7,9 +7,14 @@ pub const POPOVER_LABEL: &str = "popover";
 // v0.5.0+: popover = 컴팩트 CTA + 최근 활동 프로젝트 4개 퀵셔트 + MCP/종료
 // footer. 그 외 패널은 본체에서 보면 됨.
 const POPOVER_WIDTH: f64 = 300.0;
-// 245 → 345: v0.6.0 에 빠른 메모 입력란이 추가되면서 그만큼 세로
-// 영역 필요. 2-line textarea + label + status 슬롯까지 잘리지 않게.
-const POPOVER_HEIGHT: f64 = 345.0;
+// 245: 초기 높이.
+// 345: v0.6.0 에 빠른 메모 입력란이 추가되면서 +100.
+// 415: v0.7.0 에 Claude Code 사용량 mini 카드가 추가되면서 +70.
+// 315: v0.7.0 에 빠른 메모 입력 제거 (popover = 글랜스 + 본체 진입점).
+// 사용량 카드는 유지하되 quickInput textarea 슬롯 100px 가 사라져서
+// 다시 줄임. 사용량이 0 이면 카드 자체를 안 그려서 바닥이 비어있는
+// 형태가 되지만, 한 번 마운트되면 같은 height 라 layout shift 없음.
+const POPOVER_HEIGHT: f64 = 315.0;
 /// Gap between the top of the screen (menu bar) and the top of the popover.
 const MENUBAR_GAP: f64 = 32.0;
 /// Horizontal nudge from the tray icon's x position so the popover's right

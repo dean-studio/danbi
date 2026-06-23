@@ -170,6 +170,10 @@ export type DanbiConfig = {
     krw_per_usd: number;
     mcp_tracking: boolean;
     mcp_retention_days: number;
+    claude_code_tracking?: boolean;
+    claude_code_mode?: string;
+    tray_usage?: boolean;
+    tray_label?: boolean;
   };
   project_groups?: ProjectGroup[];
   project_last_seen_at?: Record<string, number>;
@@ -497,6 +501,65 @@ export type DashboardSnapshot = {
 // cl100k_base — see the disclaimer field on every payload.
 
 export type McpInboundRange = "today" | "7d" | "30d" | "90d" | "all";
+
+// ---------- v0.7.0 Claude Code 사용량 -----------------------------------
+export type CcRange = "today" | "7d" | "30d" | "90d" | "all";
+export type CcConfiguredMode = "auto" | "subscription" | "api_key" | "bedrock";
+export type CcEffectiveMode =
+  | "subscription"
+  | "api_key"
+  | "bedrock"
+  | "mixed"
+  | "unknown";
+
+export type CcTotals = {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  total_tokens: number;
+  usd: number;
+  krw: number;
+  calls: number;
+  sessions: number;
+};
+
+export type CcDailyPoint = { date: string; totals: CcTotals };
+export type CcModelBreakdown = {
+  model: string;
+  backend: string;
+  totals: CcTotals;
+};
+export type CcProjectBreakdown = {
+  cwd: string;
+  label: string;
+  totals: CcTotals;
+};
+export type CcHourlyHeatPoint = { dow: number; hour: number; tokens: number };
+
+export type CcSummary = {
+  from_ms: number;
+  to_ms: number;
+  range: string;
+  krw_per_usd: number;
+  totals: CcTotals;
+  by_model: CcModelBreakdown[];
+  by_project: CcProjectBreakdown[];
+  by_backend: Record<string, CcTotals>;
+  daily: CcDailyPoint[];
+  hourly: CcHourlyHeatPoint[];
+  year_ago_today: CcTotals | null;
+  top_days: CcDailyPoint[];
+  disclaimer: string;
+};
+
+export type CcSummaryWithMode = {
+  effective_mode: CcEffectiveMode;
+  configured_mode: string;
+  enabled: boolean;
+  summary: CcSummary;
+};
+
 
 export type McpClientBreakdown = {
   client: string;
@@ -1179,6 +1242,31 @@ export const ipc = {
     invoke<void>("usage_set_mcp_tracking", { enabled }),
   usageSetMcpRetention: (days: number) =>
     invoke<number>("usage_set_mcp_retention", { days }),
+
+  // ---------- v0.7.0 Claude Code 사용량 + 단비 LLM 사용량 ----------
+  dashboardClaudeCode: (range: CcRange) =>
+    invoke<CcSummaryWithMode>("dashboard_claude_code", { range }),
+  dashboardClaudeCodeDaily: (days?: number) =>
+    invoke<CcDailyPoint[]>("dashboard_claude_code_daily", {
+      days: days ?? null,
+    }),
+  dashboardClaudeCodeMonthly: () =>
+    invoke<CcDailyPoint[]>("dashboard_claude_code_monthly"),
+  dashboardClaudeCodeReindex: () =>
+    invoke<void>("dashboard_claude_code_reindex"),
+  usageSetClaudeCodeTracking: (enabled: boolean) =>
+    invoke<void>("usage_set_claude_code_tracking", { enabled }),
+  usageSetClaudeCodeMode: (mode: CcConfiguredMode) =>
+    invoke<void>("usage_set_claude_code_mode", { mode }),
+  usageSetKrwRate: (krwPerUsd: number) =>
+    invoke<void>("usage_set_krw_rate", { krwPerUsd }),
+  usageSetTrayOptions: (trayUsage: boolean, trayLabel: boolean) =>
+    invoke<void>("usage_set_tray_options", {
+      trayUsage,
+      trayLabel,
+    }),
+  dashboardDanbiLlm: (range: CcRange) =>
+    invoke<UsageSummary>("dashboard_danbi_llm", { range }),
   buildGraph: (project?: string) =>
     invoke<GraphData>("build_graph", { project: project ?? null }),
   backupNow: () => invoke<BackupReport>("backup_now"),

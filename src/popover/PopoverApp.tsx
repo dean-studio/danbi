@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
-import { ArrowRight, ChevronRight, Power, Send } from "lucide-react";
+import { useEffect, useState } from "react";
+import { ArrowRight, ChevronRight, Coins, Power } from "lucide-react";
 import {
   ipc,
   type ActivityOverview,
+  type CcSummaryWithMode,
   type McpStatus,
   type ProjectActivity,
 } from "@/lib/ipc";
@@ -11,20 +12,15 @@ import { installTheme, type ThemeChoice } from "@/lib/theme";
 import { projectIconOf } from "@/components/ProjectIconPicker";
 
 // 메뉴바 popover — 단비 본체로 가는 작은 진입점.
-// 구성: (1) 컴팩트 "단비 열기" CTA, (2) 최근 활동 프로젝트 top 4 퀵셔트,
-// (3) MCP 상태 + 종료 버튼 footer. 그 외 (daily/recent/reviews/settings)
-// 패널은 본체에서 더 잘 보여서 popover 에선 제거.
+// 구성: (1) 컴팩트 "단비 열기" CTA, (2) Claude Code 사용량 mini,
+// (3) 최근 활동 프로젝트 top 4 퀵셔트, (4) MCP 상태 + 종료 footer.
+// 빠른 메모 입력은 v0.7.0 에서 제거 — popover 는 글랜스 + 본체 진입점에
+// 집중. 본격 입력은 본체나 Quick Capture 단축키로.
 export function PopoverApp() {
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [activity, setActivity] = useState<ActivityOverview | null>(null);
-  // Quick log — popover 만으로 한 줄 메모를 가장 최근 활동 프로젝트의
-  // 오늘 daily 노트에 append. 키보드만으로 메뉴바 → 입력 → 닫힘 루프가
-  // 끝나는 게 핵심.
-  const [quickInput, setQuickInput] = useState("");
-  const [quickStatus, setQuickStatus] = useState<
-    null | "saving" | "ok" | "err"
-  >(null);
-  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [usage, setUsage] = useState<CcSummaryWithMode | null>(null);
+  const [usageEnabled, setUsageEnabled] = useState(true);
 
   useEffect(() => {
     // 첫 paint 가 끝난 다음 tick 에 IPC 시작 — webview 가 즉시 화면을
@@ -73,6 +69,19 @@ export function PopoverApp() {
       .projectActivityOverview(30)
       .then(setActivity)
       .catch(() => setActivity(null));
+    // Claude Code 사용량 — Settings 의 tray_usage 가 OFF 면 패널 자체 숨김.
+    ipc
+      .loadConfig()
+      .then((cfg) => {
+        const on = cfg?.usage?.tray_usage ?? true;
+        setUsageEnabled(on);
+        if (!on) {
+          setUsage(null);
+          return;
+        }
+        ipc.dashboardClaudeCode("today").then(setUsage).catch(() => setUsage(null));
+      })
+      .catch(() => setUsageEnabled(true));
   }
 
   function openMain() {
@@ -83,33 +92,6 @@ export function PopoverApp() {
   }
   function quit() {
     ipc.quitApp().catch(() => {});
-  }
-
-  /** 활동 점수 가장 높은 프로젝트. 사용자가 "이게 뭘 의미하는지" 명확히
-   *  알도록 입력란 placeholder 에 프로젝트명을 노출. */
-  const quickTarget: string | null = (activity?.by_project ?? [])
-    .filter((p) => p.activity_score > 0)
-    .map((p) => p.project)[0] ?? null;
-
-  async function submitQuick() {
-    const text = quickInput.trim();
-    if (!text || !quickTarget || quickStatus === "saving") return;
-    setQuickStatus("saving");
-    try {
-      await ipc.danbiLogQuick(quickTarget, text);
-      setQuickInput("");
-      setQuickStatus("ok");
-      // 짧게 visual feedback 후 popover 자동 닫힘 → 사용자가 "메모 저장됐다"
-      // 확인 후 흐름 끊기지 않게.
-      setTimeout(() => {
-        setQuickStatus(null);
-        ipc.hidePopover().catch(() => {});
-      }, 600);
-    } catch (e) {
-      console.error("[danbi] quick log failed", e);
-      setQuickStatus("err");
-      setTimeout(() => setQuickStatus(null), 1800);
-    }
   }
 
   const top: ProjectActivity[] = (activity?.by_project ?? [])
@@ -138,6 +120,10 @@ export function PopoverApp() {
           />
         </button>
 
+        {usageEnabled && usage && usage.summary.totals.total_tokens > 0 && (
+          <UsageMini summary={usage} />
+        )}
+
         {top.length > 0 && (
           <ul className="flex flex-col gap-0.5 pt-1">
             {top.map((p) => (
@@ -150,65 +136,6 @@ export function PopoverApp() {
           </ul>
         )}
 
-        {quickTarget && (
-          <div className="flex flex-col gap-1.5 pt-2">
-            <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.4px] text-stone">
-              <span>빠른 메모</span>
-              <span className="font-mono normal-case tracking-normal">
-                → {quickTarget}/오늘
-              </span>
-            </div>
-            <div
-              className={cn(
-                "flex items-end gap-1.5 rounded-md border bg-surface-elevated p-1.5 transition-colors",
-                quickStatus === "err"
-                  ? "border-accent-red/60"
-                  : quickStatus === "ok"
-                    ? "border-accent-green/60"
-                    : "border-hairline focus-within:border-hairline-strong",
-              )}
-            >
-              <textarea
-                ref={inputRef}
-                value={quickInput}
-                onChange={(e) => setQuickInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (
-                    (e.key === "Enter" && (e.metaKey || e.ctrlKey)) ||
-                    (e.key === "Enter" && !e.shiftKey && quickInput.trim().length < 80)
-                  ) {
-                    // Cmd+Enter 는 항상 제출, 짧은 한 줄 입력이면 그냥
-                    // Enter 로도 제출 (TODO 메모용).
-                    e.preventDefault();
-                    submitQuick();
-                  }
-                }}
-                placeholder="한 줄 메모 → daily 노트에 append (⌘↵)"
-                rows={2}
-                className="flex-1 resize-none bg-transparent px-1 text-[12px] text-body placeholder:text-stone/70 focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={submitQuick}
-                disabled={!quickInput.trim() || quickStatus === "saving"}
-                className={cn(
-                  "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-sm transition-colors",
-                  quickInput.trim() && quickStatus !== "saving"
-                    ? "bg-primary text-on-primary hover:bg-primary-pressed"
-                    : "bg-surface text-stone",
-                )}
-                title="저장 (⌘↵)"
-              >
-                <Send size={11} />
-              </button>
-            </div>
-            {quickStatus === "err" && (
-              <span className="text-[10px] text-accent-red">
-                저장 실패 — 본체 열어 확인해주세요
-              </span>
-            )}
-          </div>
-        )}
       </div>
 
       <div className="flex-1" />
@@ -266,6 +193,102 @@ function ProjectQuickRow({
       </span>
     </button>
   );
+}
+
+function UsageMini({ summary }: { summary: CcSummaryWithMode }) {
+  const t = summary.summary.totals;
+  const showCost =
+    summary.effective_mode === "bedrock" ||
+    summary.effective_mode === "api_key" ||
+    summary.effective_mode === "mixed";
+  return (
+    <div className="rounded-md border border-hairline bg-surface-elevated px-2.5 py-2">
+      <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.4px] text-stone">
+        <span className="flex items-center gap-1">
+          <Coins size={10} />
+          오늘 Claude Code
+        </span>
+        <span className="font-mono normal-case tracking-normal text-stone">
+          {modeLabel(summary.effective_mode)}
+        </span>
+      </div>
+      <div className="mt-1 flex items-baseline justify-between gap-2">
+        <span className="font-mono text-[18px] font-medium tabular-nums text-on-dark">
+          {fmtToks(t.total_tokens)}
+        </span>
+        {showCost && (
+          <span className="font-mono text-[11px] tabular-nums text-stone">
+            ₩{Math.round(t.krw).toLocaleString()}
+          </span>
+        )}
+        {!showCost && (
+          <span className="text-[10px] text-stone">정액 구독</span>
+        )}
+      </div>
+      <div className="mt-1 flex items-center gap-1.5 text-[10px] text-stone">
+        <Bar label="in" value={t.input_tokens} max={t.total_tokens} />
+        <Bar label="out" value={t.output_tokens} max={t.total_tokens} tone="green" />
+        <Bar
+          label="cache"
+          value={t.cache_creation_tokens + t.cache_read_tokens}
+          max={t.total_tokens}
+          tone="yellow"
+        />
+      </div>
+    </div>
+  );
+}
+
+function Bar({
+  label,
+  value,
+  max,
+  tone = "blue",
+}: {
+  label: string;
+  value: number;
+  max: number;
+  tone?: "blue" | "green" | "yellow";
+}) {
+  const ratio = max > 0 ? value / max : 0;
+  const color =
+    tone === "green"
+      ? "bg-accent-green"
+      : tone === "yellow"
+        ? "bg-accent-yellow"
+        : "bg-accent-blue";
+  return (
+    <div className="flex flex-1 items-center gap-1">
+      <span className="w-7 text-[9px]">{label}</span>
+      <div className="relative h-1 flex-1 overflow-hidden rounded-xs bg-surface">
+        <div
+          className={`h-full ${color}`}
+          style={{ width: `${ratio * 100}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function modeLabel(m: CcSummaryWithMode["effective_mode"]): string {
+  switch (m) {
+    case "bedrock":
+      return "Bedrock";
+    case "api_key":
+      return "API";
+    case "subscription":
+      return "Sub";
+    case "mixed":
+      return "Mix";
+    default:
+      return "—";
+  }
+}
+
+function fmtToks(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return n.toLocaleString();
 }
 
 /** Single-color droplet glyph — same path as the menu-bar tray icon. */

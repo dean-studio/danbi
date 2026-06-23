@@ -2,6 +2,7 @@ mod aws_profiles;
 mod backup;
 mod bedrock;
 mod capture;
+mod claude_code_usage;
 mod commands;
 mod compound;
 mod config;
@@ -512,6 +513,15 @@ pub fn run() {
             commands::usage_retention_sweep,
             commands::usage_set_mcp_tracking,
             commands::usage_set_mcp_retention,
+            commands::dashboard_claude_code,
+            commands::dashboard_claude_code_daily,
+            commands::dashboard_claude_code_monthly,
+            commands::dashboard_claude_code_reindex,
+            commands::usage_set_claude_code_tracking,
+            commands::usage_set_claude_code_mode,
+            commands::usage_set_krw_rate,
+            commands::usage_set_tray_options,
+            commands::dashboard_danbi_llm,
             commands::build_graph,
             commands::backup_now,
             commands::backup_validate_path,

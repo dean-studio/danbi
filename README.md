@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.6.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.6.0" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.7.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.7.0" />
   </a>
 </p>
 
@@ -29,30 +29,29 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.6.0-success" alt="version 0.6.0" />
+  <img src="https://img.shields.io/badge/version-0.7.0-success" alt="version 0.7.0" />
 </p>
 
 ---
 
-## What's new in v0.6.0
+## What's new in v0.7.0
 
-**추가된 기능**
+**Claude Code 사용량 + 단비 자체 LLM 비용 — 이제 한 화면에서 보여요.**
 
-- ✏️ **`danbi_replace_section`** — 헤딩 아래 본문 통째로 교체 (append 누적 X)
-- 🪪 **`danbi_upsert_item`** — 리스트 항목 in-place 갱신 (`[#id]` 또는 첫 줄 매칭)
-- 🏷️ **frontmatter `kind: list`** — 사이드바 LIST 배지 자동 노출
-- 🕒 **변경 히스토리 popover** — 문서별 op 분류 (replace / upsert / append …)
-- ⚡ **메뉴바 빠른 메모** — 한 줄 입력 → 오늘 daily 노트로 즉시 append (⌘↵)
-- 🎹 **프로젝트 switcher ⌘P** — fuzzy match 키보드 전환
-- 🔔 **자동 self-healing 알림** — 새 ghost / healing 제안 toast
-- 🕸️ **DocView 그래프 버튼** — 현재 프로젝트 spotlight 한 채로 그래프 열기
-- 🗒️ **주간 회고** — 지난 7일 daily → `weekly/YYYY-WW.md` 한 단락 요약
-- 🔎 **REST 검색 RRF 일관성** — `/api/call/danbi_search` 도 BM25 + 벡터 병합
+- 💰 **Claude Code 사용량 카드 (홈)** — `~/.claude/projects/**/*.jsonl` 직독 → 일별 토큰 · 비용 · 세션 · 모델/프로젝트별 분포 · 시간대 히트맵. OAuth 호출 없이 자기 디스크의 자기 파일만 사용 (권한 이슈 0).
+- 🔀 **결제 모드별 UI 분기** — Bedrock / Anthropic API key 는 토큰 + USD/KRW 풀 노출. Pro/Max 구독은 비용 숨기고 토큰만. `message.id` 의 `msg_bdrk_` prefix 로 자동 감지.
+- 📅 **히스토리 탭** — 90일 sparkline · 1년 GitHub-잔디 · 12개월 추이 · 1년 전 오늘 비교 · 가장 비쌌던 날 Top 5.
+- 🛠 **단비 자체 LLM 사용량 카드** — 단비 본 앱이 라우팅/writer/embed 로 쏜 호출의 토큰. Claude Code 카드와 데이터 소스가 정확히 다름 (jsonl vs usage.jsonl).
+- 🍡 **메뉴바 popover 사용량 mini** — 메뉴바 클릭 시 오늘 토큰 + KRW + input/output/cache 3-bar 한 줄 글랜스.
+- 💱 **USD → KRW 환율 편집 + transcript 캐시 비우기** — Settings → "LLM 사용량".
+
+**제거**
+
+- ✏️ **메뉴바 popover 의 빠른 메모 입력** — popover 는 글랜스 + 본체 진입점에 집중. 메모는 본체 / Quick Capture 단축키로.
 
 **수정**
 
-- 📂 사이드바 sub-folder 가 항상 펼쳐져있던 동작 제거 — 활성 도메인 포함 폴더만
-- ✂️ 에디터 복사 시 줄끝 `\` (CommonMark hard-break) 가 다른 앱에 보이던 문제
+- 🧮 `pricing.rs` 에 캐시 토큰 보정 단가 (cache_creation = input × 1.25, cache_read = input × 0.10) 적용 — Anthropic 공식 단가.
 
 이전 릴리즈 노트는 [Releases 페이지](https://github.com/dean-studio/danbi/releases) 에서 확인할 수 있어요.
 

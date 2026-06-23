@@ -242,6 +242,33 @@ pub struct UsageConfig {
     /// 삭제한다. 0 또는 음수면 retention 비활성 (영구 보존).
     #[serde(default = "default_retention_days")]
     pub mcp_retention_days: i64,
+
+    // ---------- v0.7.0 Claude Code 사용량 ----------
+    /// Claude Code transcript 추적 ON/OFF. 기본 ON.
+    /// (transcript 는 사용자 자기 디스크의 자기 파일이라 권한 이슈 없음)
+    #[serde(default = "default_true")]
+    pub claude_code_tracking: bool,
+    /// Claude Code 결제 모드 — UI 에서 어떤 카드를 보일지 결정.
+    /// `"auto"` (transcript 의 backend prefix 로 자동 감지) |
+    /// `"subscription"` (Pro/Max 정액 — 토큰만 표시, 비용 ❌) |
+    /// `"api_key"` (Anthropic API 종량 — 토큰 + 비용) |
+    /// `"bedrock"` (AWS Bedrock 종량 — 토큰 + 비용)
+    #[serde(default = "default_cc_mode")]
+    pub claude_code_mode: String,
+
+    // ---------- v0.7.0 Tray ----------
+    /// 메뉴바 tray 아이콘에 "오늘 토큰 / 비용" mini 노출.
+    /// 끄면 tray 자체는 그대로 (단비 본 앱 toggle), 사용량 popover 만 비활성.
+    #[serde(default = "default_true")]
+    pub tray_usage: bool,
+    /// 메뉴바 텍스트로 오늘 토큰 압축 표기 (예: `1.2M`).
+    /// 너비 차지 — 기본 OFF.
+    #[serde(default)]
+    pub tray_label: bool,
+}
+
+fn default_cc_mode() -> String {
+    "auto".to_string()
 }
 
 fn default_retention_days() -> i64 {
@@ -255,6 +282,10 @@ impl Default for UsageConfig {
             krw_per_usd: 1_380.0,
             mcp_tracking: true,
             mcp_retention_days: 365,
+            claude_code_tracking: true,
+            claude_code_mode: "auto".to_string(),
+            tray_usage: true,
+            tray_label: false,
         }
     }
 }

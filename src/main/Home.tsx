@@ -19,6 +19,8 @@ import {
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 import { McpInboundCard } from "./McpInboundCard";
+import { ClaudeCodeUsageCard } from "./ClaudeCodeUsageCard";
+import { DanbiLlmUsageCard } from "./DanbiLlmUsageCard";
 import {
   PROJECT_COLOR_KEYS,
   projectColorVars,
@@ -80,8 +82,13 @@ export function Home() {
             좌측에서 도메인을 고르거나 바로 명령해도 돼요.
           </p>
 
-          {/* MCP inbound — Claude Code / Codex 가 단비에 저장한 콘텐츠 추정량.
-              0.4.0 부터 홈 최상단으로 노출 (활동 신호가 가장 먼저 보이도록). */}
+          {/* Claude Code 사용량 — transcript 기반 정확값. v0.7.0 신규. */}
+          <ClaudeCodeUsageCard />
+
+          {/* 단비 자체 LLM 사용량 — 라우팅/writer/embed. v0.7.0 신규. */}
+          <DanbiLlmUsageCard />
+
+          {/* MCP inbound — Claude Code / Codex 가 단비에 저장한 콘텐츠 추정량. */}
           <McpInboundCard onOpenProject={selectProject} />
 
           {/* 프로젝트별 활동 분포 — MCP 인바운드 바로 아래에 둬서 "외부에서

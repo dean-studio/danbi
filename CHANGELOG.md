@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-06-23
+
+### Added
+
+- **Claude Code 사용량 카드 (홈)** — `~/.claude/projects/**/*.jsonl`
+  transcript 를 직접 읽어 일별 토큰·비용·세션·모델/프로젝트별
+  분포·시간대 히트맵을 보여줘요. OAuth endpoint 호출 없이 자기 디스크의
+  자기 파일만 사용 (권한 이슈 0). transcript 의 `message.id` 가
+  `msg_bdrk_` 로 시작하면 Bedrock, 아니면 Anthropic API 로 자동 감지.
+- **결제 모드별 UI 분기** — Bedrock / Anthropic API key (종량) 사용자는
+  토큰 + USD/KRW 비용. Pro/Max 구독 사용자는 비용을 숨기고 토큰만 표시.
+  Settings → "Claude Code 사용량 → 결제 모드" 에서 명시 선택 가능.
+- **히스토리 탭** — 90일 sparkline, 1년 GitHub-잔디, 월별 추이 (12개월),
+  1년 전 오늘 비교, 가장 비쌌던 날 Top 5. transcript 가 1년치 모이면
+  자동으로 비교가 채워집니다.
+- **단비 자체 LLM 사용량 카드** — 단비 본 앱이 라우팅/writer/embed 등으로
+  Bedrock·기타 provider 에 쏜 호출의 토큰. 응답 헤더 → 단가표 → KRW.
+  Claude Code 카드와 데이터 소스가 정확히 다름 (jsonl vs usage.jsonl).
+- **메뉴바 popover 사용량 mini** — 메뉴바 아이콘 클릭 시 popover 에 오늘
+  Claude Code 사용량 (큰 숫자 + KRW + input/output/cache 3-bar) 한 줄.
+  Settings → "메뉴바 → popover 활성화" 로 OFF 가능.
+- **transcript 캐시 강제 무효화** — Settings 에 "다시 인덱싱" 버튼.
+  파일 mtime 비교 캐시는 보통 자동이지만, 외부에서 jsonl 을 손댄 경우
+  강제로 풀스캔하고 싶을 때 사용.
+- **USD → KRW 환율 편집** — Settings 에서 환율 직접 수정. 분기 갱신.
+
+### Changed
+
+- `pricing.rs` 가격표에 캐시 토큰 보정 단가 적용 — `cache_creation` 은
+  input × 1.25, `cache_read` 는 input × 0.10. (Anthropic 공식 단가)
+- 메뉴바 popover 높이 345 → 415 (사용량 mini 카드 공간).
+
 ## [0.6.0] — 2026-06-20
 
 ### Added
