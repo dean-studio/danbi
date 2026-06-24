@@ -15,12 +15,56 @@ use crate::usage::{self, UsageEvent};
 use chrono::{DateTime, Datelike, Utc};
 use serde::Serialize;
 
-/// USD per 1M input / output tokens. Embedding models set `output` to 0
-/// since they don't charge for output.
+/// USD per 1M tokens, by token kind. Embedding models set everything but
+/// `input` to 0. Cache fields are absolute prices — NOT a multiplier of
+/// input — because Anthropic / Bedrock publish them that way and the
+/// ratio doesn't always match (e.g. Bedrock's cross-region inference
+/// has the same input price as Anthropic API for some models but
+/// different cache prices).
+///
+/// `cache_5m` / `cache_1h` apply to `cache_creation_input_tokens` (the
+/// transcript field). `cache_read` applies to `cache_read_input_tokens`.
+/// When `cache_1h` is `None` the model doesn't support 1h caching —
+/// fall back to `cache_5m`.
 #[derive(Debug, Clone, Copy)]
 pub struct PriceUsdPerMTok {
     pub input: f64,
     pub output: f64,
+    pub cache_5m: f64,
+    pub cache_1h: Option<f64>,
+    pub cache_read: f64,
+}
+
+impl PriceUsdPerMTok {
+    /// Convenience: a non-cache-aware entry (embedding / OpenAI / etc.)
+    /// where we don't track cache breakdown. Cache fields default to a
+    /// reasonable multiplier of input so legacy paths still produce
+    /// non-zero estimates if cache tokens leak in.
+    const fn flat(input: f64, output: f64) -> Self {
+        Self {
+            input,
+            output,
+            cache_5m: input * 1.25,
+            cache_1h: None,
+            cache_read: input * 0.10,
+        }
+    }
+    /// Anthropic/Bedrock entry with explicit cache prices.
+    const fn cached(
+        input: f64,
+        output: f64,
+        cache_5m: f64,
+        cache_1h: f64,
+        cache_read: f64,
+    ) -> Self {
+        Self {
+            input,
+            output,
+            cache_5m,
+            cache_1h: Some(cache_1h),
+            cache_read,
+        }
+    }
 }
 
 /// Hand-maintained price map. USD / 1M tokens. Sources checked 2026-05-21:
@@ -34,39 +78,50 @@ pub struct PriceUsdPerMTok {
 /// We list model stems (the distinctive middle) so both Anthropic-native
 /// ("claude-sonnet-4-6") and Bedrock-prefixed ("us.anthropic.claude-sonnet-4-6-…")
 /// ids collapse to the same entry.
+// 가격 출처: AWS Bedrock Global Cross-region Inference (us-east-2 기준).
+// 단비 사용자 (hckim) 가 Bedrock 으로 호출하므로 Bedrock 단가가 정답.
+// Anthropic 직접 API 단가는 일부 모델에서 다름 — Anthropic-native
+// 호출이 들어오면 따로 분기. 분기 시그널 = transcript 의 message.id
+// (`msg_bdrk_` prefix 있으면 Bedrock).
+//
+// 분기마다 https://aws.amazon.com/bedrock/pricing 와 대조 갱신.
+// CLAUDE.md "분기 가격 갱신" 노트 참고.
 const TABLE: &[(&str, PriceUsdPerMTok)] = &[
-    // Claude 4.x family (Anthropic + Bedrock)
-    ("claude-haiku-4-5", PriceUsdPerMTok { input: 1.00, output: 5.00 }),
-    ("claude-sonnet-4-6", PriceUsdPerMTok { input: 3.00, output: 15.00 }),
-    ("claude-opus-4-7", PriceUsdPerMTok { input: 15.00, output: 75.00 }),
-    ("claude-opus-4-6", PriceUsdPerMTok { input: 15.00, output: 75.00 }),
-    ("claude-sonnet-4-5", PriceUsdPerMTok { input: 3.00, output: 15.00 }),
-    ("claude-haiku-3-5", PriceUsdPerMTok { input: 0.80, output: 4.00 }),
+    // ----- Claude 4.x (AWS Bedrock Global Cross-region, 2026-06-24 확인) -----
+    ("claude-fable-5", PriceUsdPerMTok::cached(10.00, 50.00, 12.50, 20.00, 1.00)),
+    ("claude-opus-4-8", PriceUsdPerMTok::cached(5.00, 25.00, 6.25, 10.00, 0.50)),
+    ("claude-opus-4-7", PriceUsdPerMTok::cached(5.00, 25.00, 6.25, 10.00, 0.50)),
+    ("claude-opus-4-6", PriceUsdPerMTok::cached(5.00, 25.00, 6.25, 10.00, 0.50)),
+    ("claude-opus-4-5", PriceUsdPerMTok::cached(5.00, 25.00, 6.25, 10.00, 0.50)),
+    ("claude-sonnet-4-6", PriceUsdPerMTok::cached(3.00, 15.00, 3.75, 6.00, 0.30)),
+    ("claude-sonnet-4-5", PriceUsdPerMTok::cached(3.00, 15.00, 3.75, 6.00, 0.30)),
+    ("claude-haiku-4-5", PriceUsdPerMTok::cached(1.00, 5.00, 1.25, 2.00, 0.10)),
+    ("claude-haiku-3-5", PriceUsdPerMTok::flat(0.80, 4.00)),
     // OpenAI GPT-4.x / o-series (rough reference; users may override later)
-    ("gpt-4o-mini", PriceUsdPerMTok { input: 0.15, output: 0.60 }),
-    ("gpt-4o", PriceUsdPerMTok { input: 2.50, output: 10.00 }),
-    ("gpt-4.1-mini", PriceUsdPerMTok { input: 0.40, output: 1.60 }),
-    ("gpt-4.1", PriceUsdPerMTok { input: 2.00, output: 8.00 }),
-    ("o4-mini", PriceUsdPerMTok { input: 1.10, output: 4.40 }),
+    ("gpt-4o-mini", PriceUsdPerMTok::flat(0.15, 0.60)),
+    ("gpt-4o", PriceUsdPerMTok::flat(2.50, 10.00)),
+    ("gpt-4.1-mini", PriceUsdPerMTok::flat(0.40, 1.60)),
+    ("gpt-4.1", PriceUsdPerMTok::flat(2.00, 8.00)),
+    ("o4-mini", PriceUsdPerMTok::flat(1.10, 4.40)),
     // Embedding models
-    ("titan-embed-text-v2", PriceUsdPerMTok { input: 0.02, output: 0.0 }),
-    ("titan-embed-text-v1", PriceUsdPerMTok { input: 0.10, output: 0.0 }),
-    ("text-embedding-3-small", PriceUsdPerMTok { input: 0.02, output: 0.0 }),
-    ("text-embedding-3-large", PriceUsdPerMTok { input: 0.13, output: 0.0 }),
+    ("titan-embed-text-v2", PriceUsdPerMTok::flat(0.02, 0.0)),
+    ("titan-embed-text-v1", PriceUsdPerMTok::flat(0.10, 0.0)),
+    ("text-embedding-3-small", PriceUsdPerMTok::flat(0.02, 0.0)),
+    ("text-embedding-3-large", PriceUsdPerMTok::flat(0.13, 0.0)),
     // Gemini — 2.5 family (current as of 2026-05). flash 가 무료 티어에서
     // 충분해 단비 기본 권장. embedding-001 은 무료 티어 한도 내 최대 1500/min.
-    ("gemini-2.5-flash", PriceUsdPerMTok { input: 0.30, output: 2.50 }),
-    ("gemini-2.5-pro", PriceUsdPerMTok { input: 1.25, output: 10.00 }),
-    ("gemini-2.0-flash", PriceUsdPerMTok { input: 0.10, output: 0.40 }),
-    ("gemini-1.5-pro", PriceUsdPerMTok { input: 1.25, output: 5.00 }),
-    ("gemini-embedding-001", PriceUsdPerMTok { input: 0.0, output: 0.0 }),
+    ("gemini-2.5-flash", PriceUsdPerMTok::flat(0.30, 2.50)),
+    ("gemini-2.5-pro", PriceUsdPerMTok::flat(1.25, 10.00)),
+    ("gemini-2.0-flash", PriceUsdPerMTok::flat(0.10, 0.40)),
+    ("gemini-1.5-pro", PriceUsdPerMTok::flat(1.25, 5.00)),
+    ("gemini-embedding-001", PriceUsdPerMTok::flat(0.0, 0.0)),
     // Voyage — 200M tokens/month free, 그 이후 유료. 단비는 거의 무료
     // 티어 안에 들어가지만 표에 0 으로 두면 사용량 트래킹 자체를 못 해서
     // 명목 가격만 등록.
-    ("voyage-multilingual-2", PriceUsdPerMTok { input: 0.12, output: 0.0 }),
-    ("voyage-3", PriceUsdPerMTok { input: 0.06, output: 0.0 }),
-    ("voyage-3-lite", PriceUsdPerMTok { input: 0.02, output: 0.0 }),
-    ("voyage-code-3", PriceUsdPerMTok { input: 0.18, output: 0.0 }),
+    ("voyage-multilingual-2", PriceUsdPerMTok::flat(0.12, 0.0)),
+    ("voyage-3", PriceUsdPerMTok::flat(0.06, 0.0)),
+    ("voyage-3-lite", PriceUsdPerMTok::flat(0.02, 0.0)),
+    ("voyage-code-3", PriceUsdPerMTok::flat(0.18, 0.0)),
 ];
 
 /// Look up the price for a given model id. Returns zero-price when no stem
@@ -82,10 +137,7 @@ pub fn lookup(model_id: &str) -> PriceUsdPerMTok {
             }
         }
     }
-    best.map(|(_, p)| p).unwrap_or(PriceUsdPerMTok {
-        input: 0.0,
-        output: 0.0,
-    })
+    best.map(|(_, p)| p).unwrap_or(PriceUsdPerMTok::flat(0.0, 0.0))
 }
 
 /// One usage bucket in the dashboard summary. `role` is the same tag the

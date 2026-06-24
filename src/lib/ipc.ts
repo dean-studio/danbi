@@ -1254,6 +1254,8 @@ export const ipc = {
     invoke<CcDailyPoint[]>("dashboard_claude_code_monthly"),
   dashboardClaudeCodeReindex: () =>
     invoke<void>("dashboard_claude_code_reindex"),
+  dashboardClaudeCodeResetHistory: () =>
+    invoke<void>("dashboard_claude_code_reset_history"),
   usageSetClaudeCodeTracking: (enabled: boolean) =>
     invoke<void>("usage_set_claude_code_tracking", { enabled }),
   usageSetClaudeCodeMode: (mode: CcConfiguredMode) =>

@@ -71,20 +71,35 @@ pub struct CcEvent {
     pub backend: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// `cache_creation_input_tokens` 합계. 5m + 1h 가 합쳐진 값.
     pub cache_creation_tokens: u64,
+    /// `cache_creation.ephemeral_5m_input_tokens` (있으면).
+    pub cache_5m_tokens: u64,
+    /// `cache_creation.ephemeral_1h_input_tokens` (있으면).
+    /// 1h 캐시는 5m 보다 단가가 ~1.6× 비싸서 분리.
+    pub cache_1h_tokens: u64,
     pub cache_read_tokens: u64,
 }
 
 impl CcEvent {
-    /// Anthropic 가격표 기반 USD 추정. 캐시 토큰은 별도 단가:
-    ///   - cache_creation = input × 1.25
-    ///   - cache_read     = input × 0.10
+    /// 절대 단가 (Bedrock cross-region) 기반 USD 추정. cache_5m / cache_1h /
+    /// cache_read 모두 가격표 절대값을 사용 — input × 비율 가정 폐기.
+    /// transcript 가 1h 분리를 안 주면 (구버전 Claude Code) 모두 5m 으로 처리.
     fn usd(&self, p: PriceUsdPerMTok) -> f64 {
         let m = 1_000_000.0;
+        let cc_5m = if self.cache_5m_tokens > 0 || self.cache_1h_tokens > 0 {
+            self.cache_5m_tokens
+        } else {
+            // 분리 정보 없으면 전부 5m 로 가정 (보수적 — 5m 이 더 쌈).
+            self.cache_creation_tokens
+        };
+        let cc_1h = self.cache_1h_tokens;
+        let price_1h = p.cache_1h.unwrap_or(p.cache_5m);
         (self.input_tokens as f64 / m) * p.input
             + (self.output_tokens as f64 / m) * p.output
-            + (self.cache_creation_tokens as f64 / m) * p.input * 1.25
-            + (self.cache_read_tokens as f64 / m) * p.input * 0.10
+            + (cc_5m as f64 / m) * p.cache_5m
+            + (cc_1h as f64 / m) * price_1h
+            + (self.cache_read_tokens as f64 / m) * p.cache_read
     }
 }
 
@@ -120,6 +135,18 @@ struct RawUsage {
     cache_creation_input_tokens: i64,
     #[serde(default)]
     cache_read_input_tokens: i64,
+    /// v0.7.x Claude Code: 5m / 1h 캐시 분리 breakdown.
+    /// 없거나 한쪽만 0 인 케이스 정상.
+    #[serde(default)]
+    cache_creation: Option<RawCacheBreakdown>,
+}
+
+#[derive(Deserialize, Default)]
+struct RawCacheBreakdown {
+    #[serde(default)]
+    ephemeral_5m_input_tokens: i64,
+    #[serde(default)]
+    ephemeral_1h_input_tokens: i64,
 }
 
 fn parse_line(line: &str) -> Option<CcEvent> {
@@ -141,6 +168,7 @@ fn parse_line(line: &str) -> Option<CcEvent> {
         .ok()?
         .with_timezone(&Utc)
         .timestamp_millis();
+    let bd = usage.cache_creation.unwrap_or_default();
     Some(CcEvent {
         ts_ms,
         session_id: raw.session_id.unwrap_or_default(),
@@ -151,6 +179,8 @@ fn parse_line(line: &str) -> Option<CcEvent> {
         input_tokens: usage.input_tokens.max(0) as u64,
         output_tokens: usage.output_tokens.max(0) as u64,
         cache_creation_tokens: usage.cache_creation_input_tokens.max(0) as u64,
+        cache_5m_tokens: bd.ephemeral_5m_input_tokens.max(0) as u64,
+        cache_1h_tokens: bd.ephemeral_1h_input_tokens.max(0) as u64,
         cache_read_tokens: usage.cache_read_input_tokens.max(0) as u64,
     })
 }
@@ -351,7 +381,7 @@ fn day_label(ts_ms: i64) -> String {
     dt.format("%Y-%m-%d").to_string()
 }
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Totals {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -365,6 +395,19 @@ pub struct Totals {
 }
 
 impl Totals {
+    /// 다른 Totals 합치기 (월별 fold 등).
+    fn merge(&mut self, other: &Totals) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_creation_tokens += other.cache_creation_tokens;
+        self.cache_read_tokens += other.cache_read_tokens;
+        self.total_tokens += other.total_tokens;
+        self.usd += other.usd;
+        self.krw += other.krw;
+        self.calls += other.calls;
+        self.sessions += other.sessions;
+    }
+
     fn add(&mut self, ev: &CcEvent, krw_per_usd: f64) {
         let p = pricing::lookup(&ev.model);
         let usd = ev.usd(p);
@@ -432,7 +475,7 @@ pub struct CcSummary {
 }
 
 const DISCLAIMER_BEDROCK_ONLY: &str =
-    "이 숫자는 ~/.claude/projects 의 transcript 를 직접 읽어 계산한 값입니다. Bedrock 사용량은 실제 청구액과 거의 일치합니다. (캐시 단가 = input × 1.25 / × 0.10 적용)";
+    "이 숫자는 ~/.claude/projects 의 transcript 를 직접 읽어 계산한 값입니다. AWS Bedrock Global Cross-region 단가표 (5m / 1h / cache_read 절대 단가) 적용 — 실제 청구액과 거의 일치합니다.";
 const DISCLAIMER_API: &str =
     "이 숫자는 ~/.claude/projects 의 transcript 를 직접 읽어 계산한 값입니다. Anthropic API key 모드는 실제 청구액에 가깝고, Pro/Max 구독 모드는 토큰만 의미가 있습니다 (구독료는 정액).";
 
@@ -565,46 +608,195 @@ fn compute_year_ago_today(events: &[CcEvent], krw_per_usd: f64) -> Option<Totals
     hit.then_some(totals)
 }
 
+// ---------- 영속 히스토리 (v0.7.1) ----------
+//
+// 매번 transcript 풀스캔하면 1년치면 50MB+ 이 되어 카드 갱신 100ms+
+// 들어감. 이를 피하려고 "어제까지" 의 일별 합계를 디스크에 영속.
+//
+// 전략:
+//   1. 오늘만 transcript 실시간 집계
+//   2. 어제 이전은 history.jsonl 에서 읽어옴 (이미 finalize 됨)
+//   3. 캐시 miss 인 과거 날짜 = transcript 에서 한 번 계산 후 history.jsonl 에 append
+//   4. 단가가 바뀌어도 finalize 된 과거는 그대로 (그게 사용자가 그 시점에 본 청구액)
+//
+// 파일 위치: ~/.danbi/cc_billing_history.jsonl (vault 아님 — git 노이즈 회피)
+
+const PRICING_VERSION: &str = "v0.7.1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HistoryRow {
+    date: String,
+    totals: Totals,
+    /// 단가표 버전. 향후 단가 정정으로 재계산하고 싶을 때 필터 가능.
+    pricing_version: String,
+    /// finalize 된 시각 (디버그용).
+    finalized_at_ms: i64,
+}
+
+fn history_path() -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join("danbi").join("cc_billing_history.jsonl"))
+}
+
+fn load_history() -> HashMap<String, HistoryRow> {
+    let mut out = HashMap::new();
+    let Some(path) = history_path() else {
+        return out;
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return out;
+    };
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(row) = serde_json::from_str::<HistoryRow>(line) {
+            // 같은 날짜가 여러 번 append 됐으면 마지막 것 (최신 finalize) 유지.
+            out.insert(row.date.clone(), row);
+        }
+    }
+    out
+}
+
+fn append_history(row: &HistoryRow) {
+    let Some(path) = history_path() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let line = serde_json::to_string(row).unwrap_or_default();
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// 어제까지의 (날짜, Totals) 를 history 우선, 없으면 transcript 에서 한 번
+/// 계산 후 history 에 finalize. 오늘은 호출자가 따로 transcript 실시간 집계.
+fn finalized_daily(events: &[CcEvent], krw_per_usd: f64) -> BTreeMap<String, Totals> {
+    let today = day_label(Utc::now().timestamp_millis());
+    let mut history = load_history();
+
+    // transcript 에서 어제까지의 날짜만 집계 (오늘 제외)
+    let mut by_day: BTreeMap<String, Totals> = BTreeMap::new();
+    for ev in events {
+        let day = day_label(ev.ts_ms);
+        if day == today {
+            continue;
+        }
+        if history.contains_key(&day) {
+            // 이미 finalize 된 날짜 — transcript 재집계 스킵.
+            continue;
+        }
+        by_day.entry(day).or_default().add(ev, krw_per_usd);
+    }
+
+    // 새로 계산된 날짜는 history 에 finalize (한 번만).
+    let now_ms = Utc::now().timestamp_millis();
+    for (date, totals) in &by_day {
+        let row = HistoryRow {
+            date: date.clone(),
+            totals: totals.clone(),
+            pricing_version: PRICING_VERSION.to_string(),
+            finalized_at_ms: now_ms,
+        };
+        append_history(&row);
+        history.insert(date.clone(), row);
+    }
+
+    // history 의 모든 날짜 (오늘 제외) 를 결과에 합침.
+    let mut out = BTreeMap::new();
+    for (date, row) in history {
+        if date == today {
+            continue;
+        }
+        out.insert(date, row.totals);
+    }
+    out
+}
+
 /// 일별 히스토리 (90일 sparkline / 달력 잔디용 — 빈 날짜 0 으로 채움).
+///
+/// v0.7.1+: 어제까지 = history.jsonl 에서, 오늘 = transcript 실시간.
 pub fn daily_series(days: u32, krw_per_usd: f64) -> Vec<DailyPoint> {
     let now = Utc::now().timestamp_millis();
     let from = now - (days as i64) * DAY_MS;
+    let today = day_label(now);
     let events = load_all();
-    let mut by_day: BTreeMap<String, Totals> = BTreeMap::new();
-    // 빈 날짜 미리 채움.
+
+    let mut by_day = finalized_daily(&events, krw_per_usd);
+
+    // 오늘은 transcript 에서 실시간 집계.
+    let mut today_totals = Totals::default();
+    for ev in &events {
+        if day_label(ev.ts_ms) == today {
+            today_totals.add(ev, krw_per_usd);
+        }
+    }
+    by_day.insert(today.clone(), today_totals);
+
+    // 빈 날짜 0 으로 채움 (sparkline / 잔디 길이 보장).
+    let mut filled: BTreeMap<String, Totals> = BTreeMap::new();
     for d in 0..=days as i64 {
         let ts = now - (days as i64 - d) * DAY_MS;
-        by_day.insert(day_label(ts), Totals::default());
-    }
-    for ev in &events {
-        if ev.ts_ms < from {
+        let day = day_label(ts);
+        if ts < from {
             continue;
         }
-        let day = day_label(ev.ts_ms);
-        by_day.entry(day).or_default().add(ev, krw_per_usd);
+        filled.insert(day.clone(), by_day.remove(&day).unwrap_or_default());
     }
-    by_day
+
+    filled
         .into_iter()
         .map(|(date, totals)| DailyPoint { date, totals })
         .collect()
 }
 
 /// 월별 히스토리 (전체 — 청구 추이).
+///
+/// v0.7.1+: 어제까지 = history.jsonl 에서 월 단위 fold, 오늘 = transcript.
 pub fn monthly_series(krw_per_usd: f64) -> Vec<DailyPoint> {
     let events = load_all();
+    let today = day_label(Utc::now().timestamp_millis());
+
+    let by_day = finalized_daily(&events, krw_per_usd);
+
+    // history 의 모든 어제까지 + 오늘 transcript.
     let mut by_month: BTreeMap<String, Totals> = BTreeMap::new();
-    for ev in &events {
-        let dt = Local
-            .timestamp_millis_opt(ev.ts_ms)
-            .single()
-            .unwrap_or_else(|| Local::now());
-        let key = format!("{:04}-{:02}", dt.year(), dt.month());
-        by_month.entry(key).or_default().add(ev, krw_per_usd);
+    for (date, totals) in &by_day {
+        let key = date[..7].to_string(); // "YYYY-MM"
+        by_month.entry(key).or_default().merge(totals);
     }
+    // 오늘
+    let mut today_totals = Totals::default();
+    for ev in &events {
+        if day_label(ev.ts_ms) == today {
+            today_totals.add(ev, krw_per_usd);
+        }
+    }
+    let key_today = today[..7].to_string();
+    by_month.entry(key_today).or_default().merge(&today_totals);
+
     by_month
         .into_iter()
         .map(|(date, totals)| DailyPoint { date, totals })
         .collect()
+}
+
+/// 영속 히스토리 강제 재빌드 — 단가 보정 후 사용자가 "처음부터 다시" 원할
+/// 때 호출. cc_billing_history.jsonl 을 비우고 다음 호출 때 finalize 다시.
+pub fn reset_history() -> std::io::Result<()> {
+    let Some(path) = history_path() else {
+        return Ok(());
+    };
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -630,6 +822,8 @@ mod tests {
             input_tokens: in_t,
             output_tokens: out_t,
             cache_creation_tokens: cc,
+            cache_5m_tokens: cc,
+            cache_1h_tokens: 0,
             cache_read_tokens: cr,
         }
     }
@@ -657,21 +851,42 @@ mod tests {
     }
 
     #[test]
-    fn cache_tokens_priced_correctly() {
+    fn cache_5m_priced_at_absolute_bedrock_rate() {
         let e = ev(0, "claude-opus-4-7", "bedrock", 0, 0, 1_000_000, 0);
         let p = pricing::lookup("claude-opus-4-7");
-        // cache_creation = input × 1.25 = $15 × 1.25 = $18.75 per 1M
+        // Bedrock Opus 4.7 5m cache write = $6.25 / 1M
         let usd = e.usd(p);
-        assert!((usd - 18.75).abs() < 0.01, "got {usd}");
+        assert!((usd - 6.25).abs() < 0.01, "got {usd}");
     }
 
     #[test]
-    fn cache_read_at_one_tenth() {
+    fn cache_read_priced_at_absolute_bedrock_rate() {
         let e = ev(0, "claude-opus-4-7", "bedrock", 0, 0, 0, 1_000_000);
         let p = pricing::lookup("claude-opus-4-7");
-        // cache_read = input × 0.10 = $15 × 0.10 = $1.50 per 1M
+        // Bedrock Opus 4.7 cache read = $0.50 / 1M
         let usd = e.usd(p);
-        assert!((usd - 1.5).abs() < 0.01, "got {usd}");
+        assert!((usd - 0.5).abs() < 0.01, "got {usd}");
+    }
+
+    #[test]
+    fn cache_1h_priced_higher_than_5m() {
+        // 1h breakdown 이 들어오면 더 비싼 단가 적용.
+        let mut e = ev(0, "claude-opus-4-7", "bedrock", 0, 0, 1_000_000, 0);
+        e.cache_5m_tokens = 0;
+        e.cache_1h_tokens = 1_000_000;
+        let p = pricing::lookup("claude-opus-4-7");
+        // Bedrock Opus 4.7 1h cache write = $10.00 / 1M
+        let usd = e.usd(p);
+        assert!((usd - 10.0).abs() < 0.01, "got {usd}");
+    }
+
+    #[test]
+    fn input_output_priced_at_bedrock_rate_not_anthropic() {
+        // Bedrock cross-region: input $5 / output $25 (not Anthropic API $15/$75).
+        let e = ev(0, "claude-opus-4-7", "bedrock", 1_000_000, 1_000_000, 0, 0);
+        let p = pricing::lookup("claude-opus-4-7");
+        let usd = e.usd(p);
+        assert!((usd - 30.0).abs() < 0.01, "got {usd}");
     }
 
     #[test]

@@ -3378,6 +3378,17 @@ pub fn dashboard_claude_code_reindex() -> DanbiResult<()> {
     Ok(())
 }
 
+/// 영속 비용 히스토리 (cc_billing_history.jsonl) 삭제 후 다음 카드 갱신 시
+/// 현재 단가표로 다시 finalize. 단가 보정 후 사용자가 과거 비용도 새 단가로
+/// 재계산하길 원할 때.
+#[tauri::command]
+pub fn dashboard_claude_code_reset_history() -> DanbiResult<()> {
+    crate::claude_code_usage::reset_history()
+        .map_err(|e| DanbiError::Config(format!("history 삭제 실패: {e}")))?;
+    crate::claude_code_usage::invalidate_cache();
+    Ok(())
+}
+
 #[tauri::command]
 pub fn usage_set_claude_code_tracking(enabled: bool) -> DanbiResult<()> {
     let vault = default_vault_path()?;

@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-06-24
+
+### Fixed
+
+- **단가표 전면 보정 (Bedrock cross-region 기준)** — v0.7.0 은 Anthropic
+  API 단가 ($15/$75) 를 그대로 썼지만 사용자 환경은 AWS Bedrock cross-region
+  inference 이고 단가가 정확히 1/3 ($5/$25) 입니다. 이로 인해 v0.7.0 의
+  Opus 4.x 비용 추정이 약 **3× 과대 계산**되고 있었습니다. AWS 공식 가격표로
+  교체:
+  - Opus 4.x: input $5 / output $25 / 5m cache $6.25 / **1h cache $10** /
+    cache_read $0.50 (모두 per 1M)
+  - Sonnet 4.6/4.5: $3 / $15 / $3.75 / $6 / $0.30
+  - Haiku 4.5: $1 / $5 / $1.25 / $2 / $0.10
+  - Fable 5: $10 / $50 / $12.50 / $20 / $1.00
+- **`claude-opus-4-8` 가격표 누락 수정** — v0.7.0 에서 Opus 4.8 모델이
+  단가표에 없어 무료(0원) 로 계산되던 버그. 단비 카드가 ₩12만으로 표시
+  됐던 06-22 의 진짜 청구액은 ₩75만 수준이었습니다.
+- **5m vs 1h 캐시 분리 단가 적용** — `cache_creation` 의 breakdown
+  (`ephemeral_5m_input_tokens` / `ephemeral_1h_input_tokens`) 을 읽어
+  단가 다르게 적용. 1h 캐시는 5m 보다 ~1.6× 비싸요.
+- **cache 단가를 절대값으로 정의** — 기존엔 `input × 1.25` / `input × 0.10`
+  배수로 계산했는데, AWS 공식은 절대 USD/1M 값. 우연히 비율이 같아 결과
+  같았지만 코드 표현은 정공법으로 교체.
+
+### Added
+
+- **영속 비용 히스토리** (`~/.danbi/cc_billing_history.jsonl`) — 어제까지
+  의 일별 합계를 한 번 계산한 후 디스크에 finalize. 다음 카드 갱신 부터는
+  과거 날짜는 transcript 재집계 없이 history 에서 즉시 로딩, 오늘만 실시간.
+  v0.7.0 까지는 매번 1년치 transcript (수십 MB) 를 풀스캔했지만 v0.7.1 부터
+  카드 갱신은 "오늘 분량만" 스캔합니다.
+- **`pricing_version` 필드 박힘** — finalize 된 row 가 어떤 단가표로
+  계산됐는지 기록. 향후 단가 정정으로 과거 재계산 vs 그대로 둘지 선택 가능.
+- **Settings → "히스토리 초기화" 버튼** — 단가표가 바뀌었을 때 사용자가
+  한 번 눌러 모든 과거 비용을 새 단가로 재 finalize 가능.
+
+### Changed
+
+- `pricing.rs` `PriceUsdPerMTok` struct 에 `cache_5m` / `cache_1h` /
+  `cache_read` 필드 추가. 기존 모델 (OpenAI/Gemini/Voyage/Embeddings) 은
+  `flat()` 헬퍼로 동일 동작 유지.
+- 카드 disclaimer 문구를 절대 단가 적용 사실로 갱신.
+
 ## [0.7.0] — 2026-06-23
 
 ### Added

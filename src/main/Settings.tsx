@@ -1303,7 +1303,7 @@ function ClaudeCodeTracking() {
       </Row>
       <Row
         label="다시 인덱싱"
-        hint="transcript 캐시를 비우고 다음 카드 갱신 시 풀스캔합니다."
+        hint="transcript 캐시를 비우고 다음 카드 갱신 시 풀스캔합니다. 영속 히스토리(어제까지) 는 유지."
       >
         <button
           type="button"
@@ -1312,6 +1312,31 @@ function ClaudeCodeTracking() {
           className="inline-flex h-7 items-center gap-1 rounded-md border border-hairline bg-surface-elevated px-2.5 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark disabled:opacity-50"
         >
           캐시 비우기
+        </button>
+      </Row>
+      <Row
+        label="히스토리 다시 계산"
+        hint="cc_billing_history.jsonl 삭제 후 현재 단가표로 모든 과거 비용을 다시 finalize. 단가 보정 직후 한 번만 누르세요 — transcript 가 1년치면 첫 계산은 수 초 걸립니다."
+      >
+        <button
+          type="button"
+          onClick={async () => {
+            if (busy) return;
+            setBusy(true);
+            setMsg(null);
+            try {
+              await ipc.dashboardClaudeCodeResetHistory();
+              setMsg("히스토리 초기화 완료. 카드 새로고침 시 새 단가로 재계산됩니다.");
+            } catch (e) {
+              setMsg(`실패: ${e}`);
+            } finally {
+              setBusy(false);
+            }
+          }}
+          disabled={busy}
+          className="inline-flex h-7 items-center gap-1 rounded-md border border-hairline bg-surface-elevated px-2.5 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark disabled:opacity-50"
+        >
+          히스토리 초기화
         </button>
       </Row>
       {msg && <div className="mt-2 text-caption-sm text-stone">{msg}</div>}

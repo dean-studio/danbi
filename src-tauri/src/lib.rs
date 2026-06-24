@@ -517,6 +517,7 @@ pub fn run() {
             commands::dashboard_claude_code_daily,
             commands::dashboard_claude_code_monthly,
             commands::dashboard_claude_code_reindex,
+            commands::dashboard_claude_code_reset_history,
             commands::usage_set_claude_code_tracking,
             commands::usage_set_claude_code_mode,
             commands::usage_set_krw_rate,

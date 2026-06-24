@@ -819,6 +819,7 @@ function fmtTokens(n: number): string {
 function prettyModel(id: string): string {
   // Bedrock prefix 정리. 예: "us.anthropic.claude-opus-4-7-20250201-v1:0" → "claude-opus-4-7"
   const stems = [
+    "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-sonnet-4-6",

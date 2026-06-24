@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.7.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.7.0" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.7.1-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.7.1" />
   </a>
 </p>
 
@@ -29,10 +29,20 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.7.0-success" alt="version 0.7.0" />
+  <img src="https://img.shields.io/badge/version-0.7.1-success" alt="version 0.7.1" />
 </p>
 
 ---
+
+## What's new in v0.7.1
+
+**비용 정확도 ↑ + 카드 속도 ↑.**
+
+- 🩹 **단가표 전면 보정 (Bedrock cross-region 기준)** — v0.7.0 은 Anthropic API 단가($15/$75) 였지만 사용자 환경은 AWS Bedrock cross-region 이고 단가가 정확히 1/3 ($5/$25). Opus 4.x 비용이 약 3× 과대 계산되던 문제 해결. AWS 공식 가격표로 교체.
+- 🆕 **`claude-opus-4-8` 가격표 누락 수정** — v0.7.0 에서 4.8 호출이 무료(0원) 처리되던 버그.
+- ⏱ **5m vs 1h 캐시 분리 단가** — `cache_creation` breakdown 의 `ephemeral_5m` / `ephemeral_1h` 를 읽어 단가 다르게 적용. 1h 는 5m 보다 ~1.6× 비싸요.
+- 💾 **영속 비용 히스토리** — `~/.danbi/cc_billing_history.jsonl` 에 어제까지의 일별 합계를 한 번만 finalize. 다음부터 카드 갱신은 "오늘 분량만" 스캔 → 1년치 transcript 풀스캔 50MB+ 걷어냄.
+- 🔄 **Settings → "히스토리 초기화"** — 단가 바뀌었을 때 한 번 눌러 모든 과거 비용 재계산.
 
 ## What's new in v0.7.0
 
