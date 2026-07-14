@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { CaptureApp } from "./capture/CaptureApp";
 import { PopoverApp } from "./popover/PopoverApp";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./index.css";
 
 const hash =
@@ -21,8 +22,11 @@ if ((isCapture || isPopover) && typeof document !== "undefined") {
   if (rootEl) rootEl.style.background = "transparent";
 }
 
+const scope = isCapture ? "capture" : isPopover ? "popover" : "main";
 const Root = isCapture ? <CaptureApp /> : isPopover ? <PopoverApp /> : <App />;
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
-  <React.StrictMode>{Root}</React.StrictMode>,
+  <React.StrictMode>
+    <ErrorBoundary scope={scope}>{Root}</ErrorBoundary>
+  </React.StrictMode>,
 );

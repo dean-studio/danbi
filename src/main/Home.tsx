@@ -21,6 +21,7 @@ import { useApp } from "@/state/store";
 import { McpInboundCard } from "./McpInboundCard";
 import { ClaudeCodeUsageCard } from "./ClaudeCodeUsageCard";
 import { DanbiLlmUsageCard } from "./DanbiLlmUsageCard";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import {
   PROJECT_COLOR_KEYS,
   projectColorVars,
@@ -82,14 +83,25 @@ export function Home() {
             좌측에서 도메인을 고르거나 바로 명령해도 돼요.
           </p>
 
+          {/* 사용량/집계 카드들은 신규 데이터 소스(transcript·usage.jsonl·
+              MCP 로그) 를 파싱하므로, 한 카드가 예기치 못한 데이터에 터져도
+              홈 전체(사이드바·에디터)가 검은 화면이 되지 않도록 각각 개별
+              ErrorBoundary 로 격리한다. */}
+
           {/* Claude Code 사용량 — transcript 기반 정확값. v0.7.0 신규. */}
-          <ClaudeCodeUsageCard />
+          <ErrorBoundary scope="ClaudeCodeUsageCard" fallback={cardFallback}>
+            <ClaudeCodeUsageCard />
+          </ErrorBoundary>
 
           {/* 단비 자체 LLM 사용량 — 라우팅/writer/embed. v0.7.0 신규. */}
-          <DanbiLlmUsageCard />
+          <ErrorBoundary scope="DanbiLlmUsageCard" fallback={cardFallback}>
+            <DanbiLlmUsageCard />
+          </ErrorBoundary>
 
           {/* MCP inbound — Claude Code / Codex 가 단비에 저장한 콘텐츠 추정량. */}
-          <McpInboundCard onOpenProject={selectProject} />
+          <ErrorBoundary scope="McpInboundCard" fallback={cardFallback}>
+            <McpInboundCard onOpenProject={selectProject} />
+          </ErrorBoundary>
 
           {/* 프로젝트별 활동 분포 — MCP 인바운드 바로 아래에 둬서 "외부에서
               들어온 토큰" → "전체 활동량" 흐름이 위에서 아래로 자연스럽게
@@ -187,6 +199,28 @@ export function Home() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Home 의 사용량 카드가 렌더 중 터졌을 때 그 자리에만 그리는 작은
+ *  안내. 앱 전체는 살아있고, "다시 시도" 로 그 카드만 재마운트한다. */
+function cardFallback(error: Error, reset: () => void) {
+  return (
+    <section className="mt-7 rounded-lg border border-hairline bg-surface px-4 py-4">
+      <div className="text-[13px] text-on-dark">
+        이 카드를 표시하는 중 문제가 생겼어요.
+      </div>
+      <div className="mt-1 truncate text-[11px] text-stone" title={error.message}>
+        {error.message}
+      </div>
+      <button
+        type="button"
+        onClick={reset}
+        className="mt-2 inline-flex h-7 items-center rounded-md border border-hairline bg-surface-elevated px-2.5 text-[11px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark"
+      >
+        다시 시도
+      </button>
+    </section>
   );
 }
 
