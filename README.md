@@ -21,7 +21,7 @@
   <sub>
     <a href="https://github.com/dean-studio/danbi/releases/latest">최신 릴리즈</a> ·
     <a href="https://github.com/dean-studio/danbi/releases">전체 버전</a> ·
-    Apple Silicon · Intel · macOS 11+ 지원
+    Apple Silicon · macOS 11+ 지원
   </sub>
 </p>
 
