@@ -225,14 +225,10 @@ fn default_backup_excludes() -> Vec<String> {
     vec![".git".into(), ".danbi".into(), ".DS_Store".into()]
 }
 
-/// LLM 사용량 대시보드 설정. USD→KRW 환율은 사용자가 Settings에서
-/// 바꿀 수 있도록 값만 들고 있는다. 은행 API 를 호출하지 않는 이유:
-/// 오프라인 동작을 보장하고 싶고, ±50원 수준 오차는 "예상 금액" 용도에
-/// 충분하다. 기본값은 분기마다 CLAUDE.md 체크 시 함께 갱신.
+/// LLM 사용량 대시보드 설정. v0.8.0 부터 비용/환율 계산은 제거되고
+/// 토큰량만 집계·표시한다.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UsageConfig {
-    /// 1 USD = N KRW. UI 에서 정수로 보여주되 내부적으로는 float.
-    pub krw_per_usd: f64,
     /// MCP inbound 이벤트 추적 ON/OFF. v0.4.0 기준 기본 ON.
     /// 끄면 MCP 핸들러는 record_mcp_inbound 자체를 스킵해 디스크 쓰기 0.
     #[serde(default = "default_true")]
@@ -248,13 +244,6 @@ pub struct UsageConfig {
     /// (transcript 는 사용자 자기 디스크의 자기 파일이라 권한 이슈 없음)
     #[serde(default = "default_true")]
     pub claude_code_tracking: bool,
-    /// Claude Code 결제 모드 — UI 에서 어떤 카드를 보일지 결정.
-    /// `"auto"` (transcript 의 backend prefix 로 자동 감지) |
-    /// `"subscription"` (Pro/Max 정액 — 토큰만 표시, 비용 ❌) |
-    /// `"api_key"` (Anthropic API 종량 — 토큰 + 비용) |
-    /// `"bedrock"` (AWS Bedrock 종량 — 토큰 + 비용)
-    #[serde(default = "default_cc_mode")]
-    pub claude_code_mode: String,
 
     // ---------- v0.7.0 Tray ----------
     /// 메뉴바 tray 아이콘에 "오늘 토큰 / 비용" mini 노출.
@@ -267,23 +256,16 @@ pub struct UsageConfig {
     pub tray_label: bool,
 }
 
-fn default_cc_mode() -> String {
-    "auto".to_string()
-}
-
 fn default_retention_days() -> i64 {
     365
 }
 
 impl Default for UsageConfig {
     fn default() -> Self {
-        // 2026-05 기준 ~1,380 KRW/USD. 분기 업데이트.
         Self {
-            krw_per_usd: 1_380.0,
             mcp_tracking: true,
             mcp_retention_days: 365,
             claude_code_tracking: true,
-            claude_code_mode: "auto".to_string(),
             tray_usage: true,
             tray_label: false,
         }

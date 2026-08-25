@@ -1163,26 +1163,14 @@ function ClaudeCodeTracking() {
   const [tracking, setTracking] = useState<boolean>(
     cfg?.usage?.claude_code_tracking ?? true,
   );
-  const [mode, setMode] = useState<string>(
-    cfg?.usage?.claude_code_mode ?? "auto",
-  );
-  const [krw, setKrw] = useState<number>(
-    cfg?.usage?.krw_per_usd ?? 1380,
-  );
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (cfg?.usage) {
       setTracking(cfg.usage.claude_code_tracking ?? true);
-      setMode(cfg.usage.claude_code_mode ?? "auto");
-      setKrw(cfg.usage.krw_per_usd);
     }
-  }, [
-    cfg?.usage?.claude_code_tracking,
-    cfg?.usage?.claude_code_mode,
-    cfg?.usage?.krw_per_usd,
-  ]);
+  }, [cfg?.usage?.claude_code_tracking]);
 
   async function reloadCfg() {
     try {
@@ -1199,35 +1187,6 @@ function ClaudeCodeTracking() {
     try {
       await ipc.usageSetClaudeCodeTracking(next);
       setTracking(next);
-      await reloadCfg();
-    } catch (e) {
-      setMsg(`설정 저장 실패: ${e}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function applyMode(next: string) {
-    setBusy(true);
-    setMsg(null);
-    try {
-      await ipc.usageSetClaudeCodeMode(next as "auto");
-      setMode(next);
-      await reloadCfg();
-    } catch (e) {
-      setMsg(`설정 저장 실패: ${e}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function applyKrw(next: number) {
-    if (!Number.isFinite(next) || next <= 0) return;
-    setBusy(true);
-    setMsg(null);
-    try {
-      await ipc.usageSetKrwRate(next);
-      setKrw(next);
       await reloadCfg();
     } catch (e) {
       setMsg(`설정 저장 실패: ${e}`);
@@ -1253,7 +1212,7 @@ function ClaudeCodeTracking() {
     <div className="mt-6 border-t border-hairline pt-5">
       <SectionTitle
         title="Claude Code 사용량"
-        hint="~/.claude/projects/**/*.jsonl 을 직접 읽어 토큰·비용을 계산합니다. OAuth 호출 없이 자기 디스크의 자기 파일만 사용 — 권한 이슈 없음."
+        hint="~/.claude/projects/**/*.jsonl 을 직접 읽어 토큰량을 집계합니다. OAuth 호출 없이 자기 디스크의 자기 파일만 사용 — 권한 이슈 없음."
       />
       <Row
         label="추적 활성화"
@@ -1265,41 +1224,6 @@ function ClaudeCodeTracking() {
             if (!busy) applyTracking(v);
           }}
         />
-      </Row>
-      <Row
-        label="결제 모드"
-        hint="자동 = transcript 의 message.id 가 msg_bdrk_ 로 시작하면 Bedrock, 아니면 Anthropic API. 구독(Pro/Max) 사용자는 명시 선택 — 비용 표시가 숨겨집니다."
-      >
-        <select
-          value={mode}
-          onChange={(e) => applyMode(e.target.value)}
-          disabled={busy}
-          className="h-7 rounded-md border border-hairline bg-surface-elevated px-2 text-[12px] text-on-dark focus:border-hairline-strong focus:outline-none"
-        >
-          <option value="auto">자동 감지</option>
-          <option value="bedrock">Bedrock (종량)</option>
-          <option value="api_key">Anthropic API key (종량)</option>
-          <option value="subscription">Pro/Max 구독 (정액 — 비용 숨김)</option>
-        </select>
-      </Row>
-      <Row
-        label="USD → KRW 환율"
-        hint="단가표는 USD 기준. KRW 추정에 곱해지는 환율입니다. 분기마다 수동 갱신."
-      >
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-[11px] text-stone">1 USD =</span>
-          <input
-            type="number"
-            min={1}
-            step={1}
-            value={krw}
-            onChange={(e) => setKrw(parseFloat(e.target.value) || 0)}
-            onBlur={() => applyKrw(krw)}
-            disabled={busy}
-            className="h-7 w-24 rounded-md border border-hairline bg-surface-elevated px-2 text-right font-mono text-[12px] text-on-dark focus:border-hairline-strong focus:outline-none"
-          />
-          <span className="text-caption-sm text-stone">KRW</span>
-        </div>
       </Row>
       <Row
         label="다시 인덱싱"
@@ -1316,7 +1240,7 @@ function ClaudeCodeTracking() {
       </Row>
       <Row
         label="히스토리 다시 계산"
-        hint="cc_billing_history.jsonl 삭제 후 현재 단가표로 모든 과거 비용을 다시 finalize. 단가 보정 직후 한 번만 누르세요 — transcript 가 1년치면 첫 계산은 수 초 걸립니다."
+        hint="cc_billing_history.jsonl 삭제 후 모든 과거 토큰량을 다시 finalize. transcript 가 1년치면 첫 계산은 수 초 걸립니다."
       >
         <button
           type="button"
@@ -1326,7 +1250,7 @@ function ClaudeCodeTracking() {
             setMsg(null);
             try {
               await ipc.dashboardClaudeCodeResetHistory();
-              setMsg("히스토리 초기화 완료. 카드 새로고침 시 새 단가로 재계산됩니다.");
+              setMsg("히스토리 초기화 완료. 카드 새로고침 시 다시 집계됩니다.");
             } catch (e) {
               setMsg(`실패: ${e}`);
             } finally {
@@ -1391,7 +1315,7 @@ function TrayUsagePanel() {
     <div className="mt-6 border-t border-hairline pt-5">
       <SectionTitle
         title="메뉴바 (Tray)"
-        hint="메뉴바에서 오늘 토큰·비용을 글랜스. 클릭하면 popover 가 떠요."
+        hint="메뉴바에서 오늘 토큰량을 글랜스. 클릭하면 popover 가 떠요."
       />
       <Row
         label="메뉴바 popover 활성화"
@@ -2278,8 +2202,8 @@ function VectorPanel() {
           </Row>
           {embedMode !== "voyage" && embedMode !== "ollama" && (
             <Row
-              label="예상 비용"
-              hint="지금 재인덱싱을 돌리면 드는 대략적인 비용 — vault 전체를 걸어보지 않고 글자수 기반으로 미리 계산합니다."
+              label="예상 처리량"
+              hint="지금 재인덱싱을 돌리면 처리될 대략적인 토큰량 — vault 전체를 걸어보지 않고 글자수 기반으로 미리 계산합니다."
               stack
             >
               <EstimateBox
@@ -2309,8 +2233,8 @@ function VectorPanel() {
                 Bedrock · OpenAI · NVIDIA · Ollama 지원, Anthropic · Google 은 미지원.
               </li>
               <li>
-                재인덱싱은 문서 수 × embedding 호출 비용이 들어요. 첫 실행 전 예상
-                비용을 확인해 주세요.
+                재인덱싱은 문서 수 × embedding 호출이 필요해요. 첫 실행 전 예상
+                처리량을 확인해 주세요.
               </li>
               <li>
                 벡터 스토어는 <code className="text-on-dark">.danbi/vectors.json</code>{" "}
@@ -2325,9 +2249,9 @@ function VectorPanel() {
   );
 }
 
-/** Compact pre-flight cost summary for an embedding reindex. Breaks the
+/** Compact pre-flight summary for an embedding reindex. Breaks the
  *  total file count into "캐시됨 / 변경됨" so users can see how much of
- *  the estimate is actually going to trigger paid calls. */
+ *  the estimate is actually going to trigger embedding calls. */
 function EstimateBox({
   estimate,
   estimating,
@@ -2340,7 +2264,7 @@ function EstimateBox({
   if (!estimate) {
     return (
       <div className="flex items-center gap-2 text-caption-sm text-stone">
-        {estimating ? "계산 중…" : "예상 비용 정보가 없습니다."}
+        {estimating ? "계산 중…" : "예상 정보가 없습니다."}
         <button
           onClick={onRefresh}
           disabled={estimating}
@@ -2355,17 +2279,16 @@ function EstimateBox({
       </div>
     );
   }
-  const { estimate: e, krw, krw_per_usd } = estimate;
+  const { estimate: e } = estimate;
   const hasPending = e.pending_files > 0;
   return (
     <div className="flex flex-col gap-2 rounded-md border border-hairline bg-surface-elevated p-3">
       <div className="flex items-baseline gap-1.5">
-        <span className="text-stone">₩</span>
         <span className="text-[22px] font-medium leading-none text-ink">
-          {Math.round(krw).toLocaleString("ko-KR")}
+          {e.pending_tokens.toLocaleString()}
         </span>
         <span className="ml-2 text-caption-sm text-stone">
-          예상 비용 · 1 USD = ₩{Math.round(krw_per_usd)}
+          변경분 예상 토큰
         </span>
       </div>
       <div className="grid grid-cols-3 gap-2 text-caption-sm">
@@ -2377,7 +2300,7 @@ function EstimateBox({
         <Fact
           label="캐시됨"
           value={`${e.fresh_files.toLocaleString()}개`}
-          hint="비용 없음"
+          hint="재계산 안 함"
           accent="green"
         />
         <Fact

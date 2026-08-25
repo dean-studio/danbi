@@ -280,6 +280,10 @@ export type BgJob =
       finishedAt: number;
     };
 
+/** Max chat turns kept in memory. Older turns are dropped to bound RAM —
+ *  each turn can carry full extracted attachment text + plan/diff payloads. */
+const MAX_TURNS = 100;
+
 export const useApp = create<AppStore>((set) => ({
   cfg: null,
   setCfg: (cfg) => set({ cfg }),
@@ -291,7 +295,12 @@ export const useApp = create<AppStore>((set) => ({
   clearSelection: () => set({ selection: { project: null, domain: null } }),
 
   turns: [],
-  addTurn: (t) => set((s) => ({ turns: [...s.turns, t] })),
+  // v0.8.0: cap the chat log. Each turn can pin heavy payloads —
+  // extracted attachment text, routing results, plan/diff previews — so an
+  // unbounded array was the main frontend RAM climb over a long session.
+  // Keep the most recent MAX_TURNS (matches the `notifications` cap pattern).
+  addTurn: (t) =>
+    set((s) => ({ turns: [...s.turns, t].slice(-MAX_TURNS) })),
   patchTurn: (id, patch) =>
     set((s) => ({
       turns: s.turns.map((t) => (t.id === id ? { ...t, ...patch } : t)),

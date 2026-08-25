@@ -3281,54 +3281,21 @@ pub fn usage_set_mcp_retention(days: i64) -> DanbiResult<usize> {
 // 토큰 + 비용을 보여준다. agentcat connectors 와 달리 OAuth endpoint 호출
 // 없이 transcript 만으로 동작 — 자기 디스크의 자기 파일 read-only.
 
-#[derive(serde::Serialize)]
-pub struct CcSummaryWithMode {
-    /// 정규화된 모드 — UI 가 카드 모양을 결정할 때 쓴다.
-    /// `"subscription"` | `"api_key"` | `"bedrock"` | `"mixed"` | `"unknown"`
-    pub effective_mode: String,
-    /// `config.usage.claude_code_mode` 그대로 (auto / subscription / api_key / bedrock).
-    pub configured_mode: String,
-    /// 추적 ON/OFF.
-    pub enabled: bool,
-    pub summary: crate::claude_code_usage::CcSummary,
-}
-
-fn cc_effective_mode(
-    configured: &str,
-    summary: &crate::claude_code_usage::CcSummary,
-) -> String {
-    if configured != "auto" {
-        return configured.to_string();
-    }
-    let has_bedrock = summary.by_backend.contains_key("bedrock");
-    let has_api = summary.by_backend.contains_key("anthropic_api");
-    match (has_bedrock, has_api) {
-        (true, true) => "mixed".into(),
-        (true, false) => "bedrock".into(),
-        // anthropic_api transcript 만으로는 구독 vs API key 구분 불가 — 사용자가
-        // 명시 안 하면 "api_key" 로 기본 가정 (= 비용 표시). 잘못된 가정이면
-        // Settings 에서 subscription 으로 바꾸면 비용이 숨겨짐.
-        (false, true) => "api_key".into(),
-        (false, false) => "unknown".into(),
-    }
-}
-
 #[tauri::command]
-pub fn dashboard_claude_code(range: String) -> DanbiResult<CcSummaryWithMode> {
+pub fn dashboard_claude_code(range: String) -> DanbiResult<crate::claude_code_usage::CcSummary> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
-    let krw = cfg.usage.krw_per_usd;
     let r = crate::claude_code_usage::Range::parse(&range);
-    let summary = if cfg.usage.claude_code_tracking {
-        crate::claude_code_usage::summarize(r, krw)
+    if cfg.usage.claude_code_tracking {
+        Ok(crate::claude_code_usage::summarize(r))
     } else {
         // 추적 OFF — 빈 요약. UI 가 자체적으로 안내 배너.
-        crate::claude_code_usage::CcSummary {
+        Ok(crate::claude_code_usage::CcSummary {
             from_ms: 0,
             to_ms: 0,
             range: range.clone(),
-            krw_per_usd: krw,
+            enabled: false,
             totals: Default::default(),
             by_model: Vec::new(),
             by_project: Vec::new(),
@@ -3338,15 +3305,8 @@ pub fn dashboard_claude_code(range: String) -> DanbiResult<CcSummaryWithMode> {
             year_ago_today: None,
             top_days: Vec::new(),
             disclaimer: "추적이 꺼져 있습니다. Settings → LLM 사용량 에서 켤 수 있어요.".into(),
-        }
-    };
-    let effective = cc_effective_mode(&cfg.usage.claude_code_mode, &summary);
-    Ok(CcSummaryWithMode {
-        effective_mode: effective,
-        configured_mode: cfg.usage.claude_code_mode.clone(),
-        enabled: cfg.usage.claude_code_tracking,
-        summary,
-    })
+        })
+    }
 }
 
 /// 90일 sparkline + 달력 잔디 + 1년 전 오늘 비교용 일별 시리즈.
@@ -3354,21 +3314,12 @@ pub fn dashboard_claude_code(range: String) -> DanbiResult<CcSummaryWithMode> {
 pub fn dashboard_claude_code_daily(
     days: Option<u32>,
 ) -> DanbiResult<Vec<crate::claude_code_usage::DailyPoint>> {
-    let vault = default_vault_path()?;
-    let cfg = config::load_config(&vault)?
-        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
-    Ok(crate::claude_code_usage::daily_series(
-        days.unwrap_or(90),
-        cfg.usage.krw_per_usd,
-    ))
+    Ok(crate::claude_code_usage::daily_series(days.unwrap_or(90)))
 }
 
 #[tauri::command]
 pub fn dashboard_claude_code_monthly() -> DanbiResult<Vec<crate::claude_code_usage::DailyPoint>> {
-    let vault = default_vault_path()?;
-    let cfg = config::load_config(&vault)?
-        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
-    Ok(crate::claude_code_usage::monthly_series(cfg.usage.krw_per_usd))
+    Ok(crate::claude_code_usage::monthly_series())
 }
 
 /// transcript 캐시 강제 무효화 — Settings "다시 인덱싱" 버튼.
@@ -3400,39 +3351,6 @@ pub fn usage_set_claude_code_tracking(enabled: bool) -> DanbiResult<()> {
 }
 
 #[tauri::command]
-pub fn usage_set_claude_code_mode(mode: String) -> DanbiResult<()> {
-    let normalized = match mode.as_str() {
-        "auto" | "subscription" | "api_key" | "bedrock" => mode,
-        _ => {
-            return Err(DanbiError::Config(format!(
-                "invalid claude_code_mode: {mode}"
-            )))
-        }
-    };
-    let vault = default_vault_path()?;
-    let mut cfg = config::load_config(&vault)?
-        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
-    cfg.usage.claude_code_mode = normalized;
-    config::save_config(&vault, &cfg)?;
-    Ok(())
-}
-
-#[tauri::command]
-pub fn usage_set_krw_rate(krw_per_usd: f64) -> DanbiResult<()> {
-    if !(krw_per_usd.is_finite() && krw_per_usd > 0.0) {
-        return Err(DanbiError::Config(format!(
-            "invalid krw_per_usd: {krw_per_usd}"
-        )));
-    }
-    let vault = default_vault_path()?;
-    let mut cfg = config::load_config(&vault)?
-        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
-    cfg.usage.krw_per_usd = krw_per_usd;
-    config::save_config(&vault, &cfg)?;
-    Ok(())
-}
-
-#[tauri::command]
 pub fn usage_set_tray_options(tray_usage: bool, tray_label: bool) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -3447,11 +3365,6 @@ pub fn usage_set_tray_options(tray_usage: bool, tray_label: bool) -> DanbiResult
 
 #[tauri::command]
 pub fn dashboard_danbi_llm(range: String) -> DanbiResult<crate::pricing::UsageSummary> {
-    let vault = default_vault_path()?;
-    let cfg = config::load_config(&vault)?
-        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
-    let krw = cfg.usage.krw_per_usd;
-
     let r = crate::claude_code_usage::Range::parse(&range);
     let (from_ms, to_ms) = r.window();
 
@@ -3461,7 +3374,7 @@ pub fn dashboard_danbi_llm(range: String) -> DanbiResult<crate::pricing::UsageSu
         // MCP 인바운드 카드는 별도라 제외 (역할 = mcp_inbound).
         .filter(|e| e.role != crate::usage::MCP_ROLE)
         .collect();
-    Ok(crate::pricing::summarize(&events, from_ms, to_ms, krw))
+    Ok(crate::pricing::summarize(&events, from_ms, to_ms))
 }
 
 // ---------- Backup (mirror vault to external folder) ----------
@@ -3504,50 +3417,10 @@ pub fn backup_validate_path(path: String) -> DanbiResult<()> {
     crate::backup::validate_destination(&vault_path, &PathBuf::from(path))
 }
 
-// ---------- Usage (token cost tracking) ----------
+// ---------- Usage ----------
 
-/// Returns the running month-to-date usage summary in KRW, computed from
-/// the append-only usage log against the user's configured exchange rate.
-/// Never errors for "no data yet" — we return an empty summary so the UI
-/// can show zeros without special-casing.
-#[tauri::command]
-pub fn usage_month_to_date() -> DanbiResult<crate::pricing::UsageSummary> {
-    let vault = default_vault_path()?;
-    let krw = match config::load_config(&vault)? {
-        Some(cfg) => cfg.usage.krw_per_usd,
-        None => 1_400.0,
-    };
-    Ok(
-        crate::pricing::month_to_date(krw)
-            .unwrap_or_else(|_| crate::pricing::UsageSummary {
-                from_ms: crate::pricing::current_month_start_ms(),
-                to_ms: chrono::Utc::now().timestamp_millis() + 1,
-                total_krw: 0.0,
-                krw_per_usd: krw,
-                by_role: Vec::new(),
-                calls: 0,
-            }),
-    )
-}
-
-/// Update the USD → KRW conversion rate used for all price estimates.
-/// Persisted to `config.json` so every subsequent summary uses the new
-/// number.
-#[tauri::command]
-pub fn usage_set_rate(krw_per_usd: f64) -> DanbiResult<()> {
-    if !(krw_per_usd.is_finite() && krw_per_usd > 0.0) {
-        return Err(DanbiError::Config("환율은 0보다 큰 숫자여야 해요.".into()));
-    }
-    let vault = default_vault_path()?;
-    let mut cfg = config::load_config(&vault)?
-        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
-    cfg.usage.krw_per_usd = krw_per_usd;
-    config::save_config(&vault, &cfg)?;
-    Ok(())
-}
-
-/// Estimate the cost of a full reindex without actually running it. The
-/// frontend uses this to show "약 ₩N" before the user confirms.
+/// Estimate the scope of a full reindex without actually running it. The
+/// frontend uses this to show "약 N 토큰" before the user confirms.
 #[tauri::command]
 pub fn vector_estimate_reindex(
     model_id: Option<String>,
@@ -3570,25 +3443,12 @@ pub fn vector_estimate_reindex(
     } else {
         crate::vector::estimate_reindex(&vault_path, &model)?
     };
-    let krw_per_usd = cfg.usage.krw_per_usd;
-    let krw = crate::pricing::estimate_call_krw(
-        &estimate.model,
-        estimate.pending_tokens,
-        0,
-        krw_per_usd,
-    );
-    Ok(VectorEstimateResponse {
-        estimate,
-        krw,
-        krw_per_usd,
-    })
+    Ok(VectorEstimateResponse { estimate })
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VectorEstimateResponse {
     pub estimate: crate::vector::ReindexEstimate,
-    pub krw: f64,
-    pub krw_per_usd: f64,
 }
 
 #[tauri::command]

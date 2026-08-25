@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Bot, Code2, Coins, FileText, Info, Sparkles } from "lucide-react";
+import { Bot, Code2, FileText, Info, Sparkles } from "lucide-react";
 import {
   ipc,
   type McpInboundRange,
@@ -84,21 +84,6 @@ export function McpInboundProjectMini({
               {(data?.total_calls ?? 0).toLocaleString()} calls
             </span>
           </div>
-
-          {data?.cost_estimate && (
-            <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-stone">
-              <Coins size={11} className="text-stone" />
-              <span>
-                재투입 시 약{" "}
-                <strong className="font-mono font-medium text-on-dark">
-                  ₩{Math.round(data.cost_estimate.krw).toLocaleString()}
-                </strong>
-              </span>
-              <span className="rounded-xs border border-hairline bg-surface-elevated px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-stone">
-                참고용
-              </span>
-            </div>
-          )}
 
           <div className="mt-4 grid grid-cols-2 gap-3">
             <Mini

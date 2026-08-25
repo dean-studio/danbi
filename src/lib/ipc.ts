@@ -167,11 +167,9 @@ export type DanbiConfig = {
   mcp: McpConfig;
   backup: BackupConfig;
   usage?: {
-    krw_per_usd: number;
     mcp_tracking: boolean;
     mcp_retention_days: number;
     claude_code_tracking?: boolean;
-    claude_code_mode?: string;
     tray_usage?: boolean;
     tray_label?: boolean;
   };
@@ -504,13 +502,6 @@ export type McpInboundRange = "today" | "7d" | "30d" | "90d" | "all";
 
 // ---------- v0.7.0 Claude Code 사용량 -----------------------------------
 export type CcRange = "today" | "7d" | "30d" | "90d" | "all";
-export type CcConfiguredMode = "auto" | "subscription" | "api_key" | "bedrock";
-export type CcEffectiveMode =
-  | "subscription"
-  | "api_key"
-  | "bedrock"
-  | "mixed"
-  | "unknown";
 
 export type CcTotals = {
   input_tokens: number;
@@ -518,8 +509,6 @@ export type CcTotals = {
   cache_creation_tokens: number;
   cache_read_tokens: number;
   total_tokens: number;
-  usd: number;
-  krw: number;
   calls: number;
   sessions: number;
 };
@@ -541,7 +530,7 @@ export type CcSummary = {
   from_ms: number;
   to_ms: number;
   range: string;
-  krw_per_usd: number;
+  enabled: boolean;
   totals: CcTotals;
   by_model: CcModelBreakdown[];
   by_project: CcProjectBreakdown[];
@@ -551,13 +540,6 @@ export type CcSummary = {
   year_ago_today: CcTotals | null;
   top_days: CcDailyPoint[];
   disclaimer: string;
-};
-
-export type CcSummaryWithMode = {
-  effective_mode: CcEffectiveMode;
-  configured_mode: string;
-  enabled: boolean;
-  summary: CcSummary;
 };
 
 
@@ -602,15 +584,6 @@ export type McpAnomaly = {
   multiple: number;
 };
 
-export type McpCostEstimate = {
-  model_stem: string;
-  usd_per_mtok_input: number;
-  krw_per_usd: number;
-  krw: number;
-  usd: number;
-  reference_only: boolean;
-};
-
 export type McpTopContributor = {
   project: string;
   domain: string;
@@ -637,7 +610,6 @@ export type McpVaultSummary = {
   daily: McpDailyPoint[];
   top_contributors: McpTopContributor[];
   anomalies: McpAnomaly[];
-  cost_estimate: McpCostEstimate;
   heatmap: McpHeatmap;
   disclaimer: string;
   estimated: boolean;
@@ -654,7 +626,6 @@ export type McpProjectDetail = {
   by_tool: McpToolBreakdown[];
   by_domain: McpDomainStub[];
   daily: McpDailyPoint[];
-  cost_estimate: McpCostEstimate;
   disclaimer: string;
   estimated: boolean;
 };
@@ -670,7 +641,6 @@ export type McpDomainDetail = {
   by_client: McpClientBreakdown[];
   by_tool: McpToolBreakdown[];
   daily: McpDailyPoint[];
-  cost_estimate: McpCostEstimate;
   disclaimer: string;
   estimated: boolean;
 };
@@ -1245,7 +1215,7 @@ export const ipc = {
 
   // ---------- v0.7.0 Claude Code 사용량 + 단비 LLM 사용량 ----------
   dashboardClaudeCode: (range: CcRange) =>
-    invoke<CcSummaryWithMode>("dashboard_claude_code", { range }),
+    invoke<CcSummary>("dashboard_claude_code", { range }),
   dashboardClaudeCodeDaily: (days?: number) =>
     invoke<CcDailyPoint[]>("dashboard_claude_code_daily", {
       days: days ?? null,
@@ -1258,10 +1228,6 @@ export const ipc = {
     invoke<void>("dashboard_claude_code_reset_history"),
   usageSetClaudeCodeTracking: (enabled: boolean) =>
     invoke<void>("usage_set_claude_code_tracking", { enabled }),
-  usageSetClaudeCodeMode: (mode: CcConfiguredMode) =>
-    invoke<void>("usage_set_claude_code_mode", { mode }),
-  usageSetKrwRate: (krwPerUsd: number) =>
-    invoke<void>("usage_set_krw_rate", { krwPerUsd }),
   usageSetTrayOptions: (trayUsage: boolean, trayLabel: boolean) =>
     invoke<void>("usage_set_tray_options", {
       trayUsage,
@@ -1301,9 +1267,6 @@ export const ipc = {
       limit: limit ?? null,
       modelId: modelId ?? null,
     }),
-  usageMonthToDate: () => invoke<UsageSummary>("usage_month_to_date"),
-  usageSetRate: (krwPerUsd: number) =>
-    invoke<void>("usage_set_rate", { krwPerUsd }),
   vectorEstimateReindex: (modelId?: string) =>
     invoke<VectorEstimateResponse>("vector_estimate_reindex", {
       modelId: modelId ?? null,
@@ -1388,23 +1351,20 @@ export type VectorReindexEstimate = {
 
 export type VectorEstimateResponse = {
   estimate: VectorReindexEstimate;
-  krw: number;
-  krw_per_usd: number;
 };
 
 export type UsageRoleSummary = {
   role: string;
   input_tokens: number;
   output_tokens: number;
-  krw: number;
   top_model: string | null;
 };
 
 export type UsageSummary = {
   from_ms: number;
   to_ms: number;
-  total_krw: number;
-  krw_per_usd: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
   by_role: UsageRoleSummary[];
   calls: number;
 };

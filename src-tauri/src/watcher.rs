@@ -3,6 +3,7 @@ use crate::error::{DanbiError, DanbiResult};
 use notify::RecursiveMode;
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, RecommendedCache};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -129,6 +130,17 @@ impl WatcherState {
 struct WatcherHandle {
     path: PathBuf,
     _debouncer: Debouncer<notify::RecommendedWatcher, RecommendedCache>,
+    /// Shutdown flag for the backup worker thread. Set on drop so a
+    /// stop/restart doesn't orphan the previous worker.
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for WatcherHandle {
+    fn drop(&mut self) {
+        // Signal the backup worker to exit its loop. It polls this once
+        // per second, so it winds down within ~1s of the watcher stopping.
+        self.stop.store(true, Ordering::Relaxed);
+    }
 }
 
 fn build_debouncer(
@@ -224,10 +236,19 @@ fn build_debouncer(
 /// and, when due, re-loads config and fires a backup pass. We re-load
 /// config on every run so toggling the enabled flag in Settings takes
 /// effect on the very next tick without restarting the watcher.
-fn spawn_backup_worker(vault_path: PathBuf, scheduler: BackupScheduler) {
+fn spawn_backup_worker(
+    vault_path: PathBuf,
+    scheduler: BackupScheduler,
+    stop: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(1));
+            // Exit cleanly once the owning WatcherHandle is dropped —
+            // prevents thread accumulation across stop/restart cycles.
+            if stop.load(Ordering::Relaxed) {
+                return;
+            }
             if !scheduler.take_due() {
                 continue;
             }
@@ -277,10 +298,12 @@ pub fn start(app: &AppHandle, path: &Path) -> DanbiResult<()> {
 
     let scheduler = BackupScheduler::new();
     let debouncer = build_debouncer(path, app.clone(), scheduler.clone())?;
-    spawn_backup_worker(path.to_path_buf(), scheduler);
+    let stop = Arc::new(AtomicBool::new(false));
+    spawn_backup_worker(path.to_path_buf(), scheduler, stop.clone());
     *slot = Some(WatcherHandle {
         path: path.to_path_buf(),
         _debouncer: debouncer,
+        stop,
     });
     Ok(())
 }

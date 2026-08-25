@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.7.1-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.7.1" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.0" />
   </a>
 </p>
 
@@ -29,10 +29,22 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.7.1-success" alt="version 0.7.1" />
+  <img src="https://img.shields.io/badge/version-0.8.0-success" alt="version 0.8.0" />
 </p>
 
 ---
+
+## What's new in v0.8.0
+
+**사용량 카드는 토큰 그대로, 앱은 더 가볍게.**
+
+- 🧹 **토큰 비용 계산 로직 전면 제거** — ₩/$ 금액, 단가표, USD→KRW 환율, 결제 모드 분기, 비용 추정을 모두 걷어냈어요. 단가는 provider·region·구독 형태마다 다 달라서 "정확한 비용"을 앱이 흉내 내는 게 오히려 오해를 낳았거든요. 이제 사용량 카드는 **토큰 수량만** 정직하게 보여줍니다 (일별 · 모델별 · input/output/cache 분해).
+- 🪶 **메모리 사용량 최적화** — 장시간 켜두면 RSS 가 ~1.6GB 까지 오르던 문제를 손봤어요.
+  - Claude Code 사용량 집계가 대시보드 열 때마다 8만+ 이벤트를 통째로 복제·정렬하던 걸 참조 전달(`with_events`)로 교체
+  - 검색 재인덱싱 시 새 인덱스를 만들기 **전에** 기존 인덱스를 먼저 해제 (메모리 2× 피크 제거)
+  - MCP inbound 집계도 호출마다 캐시 전체 복제하던 걸 참조 전달로
+  - 백업 워커 스레드가 vault 전환 때 정리되지 않고 쌓이던 것 수정
+  - 채팅 turn 로그를 최근 100개로 상한 (첨부 텍스트·plan diff 를 물고 있어 무한 증가하던 프론트 메모리)
 
 ## What's new in v0.7.1
 

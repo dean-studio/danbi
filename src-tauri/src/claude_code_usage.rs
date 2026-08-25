@@ -46,7 +46,6 @@
 //! mcp_inbound 와 동일 패턴. (path, mtime, size) 키로 in-memory cache,
 //! 변경된 파일만 재파싱. 단비 첫 실행 시 풀스캔, 이후엔 mtime 비교만.
 
-use crate::pricing::{self, PriceUsdPerMTok};
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -79,28 +78,6 @@ pub struct CcEvent {
     /// 1h 캐시는 5m 보다 단가가 ~1.6× 비싸서 분리.
     pub cache_1h_tokens: u64,
     pub cache_read_tokens: u64,
-}
-
-impl CcEvent {
-    /// 절대 단가 (Bedrock cross-region) 기반 USD 추정. cache_5m / cache_1h /
-    /// cache_read 모두 가격표 절대값을 사용 — input × 비율 가정 폐기.
-    /// transcript 가 1h 분리를 안 주면 (구버전 Claude Code) 모두 5m 으로 처리.
-    fn usd(&self, p: PriceUsdPerMTok) -> f64 {
-        let m = 1_000_000.0;
-        let cc_5m = if self.cache_5m_tokens > 0 || self.cache_1h_tokens > 0 {
-            self.cache_5m_tokens
-        } else {
-            // 분리 정보 없으면 전부 5m 로 가정 (보수적 — 5m 이 더 쌈).
-            self.cache_creation_tokens
-        };
-        let cc_1h = self.cache_1h_tokens;
-        let price_1h = p.cache_1h.unwrap_or(p.cache_5m);
-        (self.input_tokens as f64 / m) * p.input
-            + (self.output_tokens as f64 / m) * p.output
-            + (cc_5m as f64 / m) * p.cache_5m
-            + (cc_1h as f64 / m) * price_1h
-            + (self.cache_read_tokens as f64 / m) * p.cache_read
-    }
 }
 
 // ---------- jsonl 파싱 ----------
@@ -255,10 +232,11 @@ fn parse_file(path: &Path) -> std::io::Result<Vec<CcEvent>> {
     Ok(events)
 }
 
-/// 모든 transcript 를 메모리에 적재 (증분). 변경 없는 파일은 캐시 적중.
-pub fn load_all() -> Vec<CcEvent> {
+/// 모든 transcript 캐시를 최신화(증분). 변경된 파일만 재파싱하고,
+/// 이벤트 자체는 캐시에 그대로 둔다 — 복사하지 않는다.
+fn refresh_cache() {
     let Some(root) = projects_dir() else {
-        return Vec::new();
+        return;
     };
     let files = list_jsonl_files(&root);
 
@@ -299,16 +277,26 @@ pub fn load_all() -> Vec<CcEvent> {
             cache.files.retain(|p, _| alive.contains(p.as_path()));
         }
     }
+}
 
-    // 2) 캐시에서 모은다.
-    let mut all: Vec<CcEvent> = Vec::new();
-    if let Ok(cache) = cache().read() {
+/// 캐시를 최신화한 뒤 read-lock 을 잡은 채, 시간순 정렬된 **참조** 슬라이스로
+/// 클로저를 실행한다.
+///
+/// v0.8.0: 예전 `load_all()` 은 84k+ 이벤트(파일별 Vec)를 매 호출마다 새 Vec 로
+/// 통째 clone + sort 했다. Claude Code 대시보드 한 번 열면 summarize/daily/monthly
+/// 세 경로가 각각 clone → 수십 MB 임시 할당이 반복되며 allocator RSS 고수위를
+/// 밀어올렸다. 이제 struct 는 복사하지 않고 포인터(`&CcEvent`)만 모아 정렬한다.
+fn with_events<R>(f: impl FnOnce(&[&CcEvent]) -> R) -> R {
+    refresh_cache();
+    let guard = cache().read();
+    let mut refs: Vec<&CcEvent> = Vec::new();
+    if let Ok(cache) = guard.as_ref() {
         for entry in cache.files.values() {
-            all.extend(entry.events.iter().cloned());
+            refs.extend(entry.events.iter());
         }
     }
-    all.sort_by_key(|e| e.ts_ms);
-    all
+    refs.sort_by_key(|e| e.ts_ms);
+    f(&refs)
 }
 
 /// 캐시 강제 무효화 — Settings 의 "다시 인덱싱" 버튼 등에서 호출.
@@ -388,8 +376,6 @@ pub struct Totals {
     pub cache_creation_tokens: u64,
     pub cache_read_tokens: u64,
     pub total_tokens: u64,
-    pub usd: f64,
-    pub krw: f64,
     pub calls: u64,
     pub sessions: u64,
 }
@@ -402,15 +388,11 @@ impl Totals {
         self.cache_creation_tokens += other.cache_creation_tokens;
         self.cache_read_tokens += other.cache_read_tokens;
         self.total_tokens += other.total_tokens;
-        self.usd += other.usd;
-        self.krw += other.krw;
         self.calls += other.calls;
         self.sessions += other.sessions;
     }
 
-    fn add(&mut self, ev: &CcEvent, krw_per_usd: f64) {
-        let p = pricing::lookup(&ev.model);
-        let usd = ev.usd(p);
+    fn add(&mut self, ev: &CcEvent) {
         self.input_tokens += ev.input_tokens;
         self.output_tokens += ev.output_tokens;
         self.cache_creation_tokens += ev.cache_creation_tokens;
@@ -419,8 +401,6 @@ impl Totals {
             + ev.output_tokens
             + ev.cache_creation_tokens
             + ev.cache_read_tokens;
-        self.usd += usd;
-        self.krw += usd * krw_per_usd;
         self.calls += 1;
     }
 }
@@ -459,7 +439,8 @@ pub struct CcSummary {
     pub from_ms: i64,
     pub to_ms: i64,
     pub range: String,
-    pub krw_per_usd: f64,
+    /// 추적 ON/OFF — OFF 면 빈 요약이고 UI 가 안내 배너를 보여준다.
+    pub enabled: bool,
     pub totals: Totals,
     pub by_model: Vec<ModelBreakdown>,
     pub by_project: Vec<ProjectBreakdown>,
@@ -468,38 +449,25 @@ pub struct CcSummary {
     pub hourly: Vec<HourlyHeatPoint>,
     /// 오늘 vs 1년 전 오늘 비교 (히스토리 카드용).
     pub year_ago_today: Option<Totals>,
-    /// 가장 비쌌던 날 Top 5 (range 내).
+    /// 토큰이 가장 많았던 날 Top 5 (range 내).
     pub top_days: Vec<DailyPoint>,
-    /// 모드별 안내 문구.
+    /// 안내 문구.
     pub disclaimer: String,
 }
 
-const DISCLAIMER_BEDROCK_ONLY: &str =
-    "이 숫자는 ~/.claude/projects 의 transcript 를 직접 읽어 계산한 값입니다. AWS Bedrock Global Cross-region 단가표 (5m / 1h / cache_read 절대 단가) 적용 — 실제 청구액과 거의 일치합니다.";
-const DISCLAIMER_API: &str =
-    "이 숫자는 ~/.claude/projects 의 transcript 를 직접 읽어 계산한 값입니다. Anthropic API key 모드는 실제 청구액에 가깝고, Pro/Max 구독 모드는 토큰만 의미가 있습니다 (구독료는 정액).";
+const DISCLAIMER_TOKENS: &str =
+    "이 숫자는 ~/.claude/projects 의 transcript 를 직접 읽어 집계한 토큰량입니다. OAuth endpoint 호출 없이 자기 디스크의 자기 파일만 사용합니다.";
 
-fn pick_disclaimer(by_backend: &HashMap<String, Totals>) -> String {
-    let only_bedrock = by_backend.contains_key("bedrock") && !by_backend.contains_key("anthropic_api");
-    if only_bedrock {
-        DISCLAIMER_BEDROCK_ONLY.to_string()
-    } else {
-        DISCLAIMER_API.to_string()
-    }
-}
-
-pub fn summarize(range: Range, krw_per_usd: f64) -> CcSummary {
+pub fn summarize(range: Range) -> CcSummary {
     let (from_ms, to_ms) = range.window();
-    let events = load_all();
-    summarize_events(&events, from_ms, to_ms, range.label(), krw_per_usd)
+    with_events(|events| summarize_events(events, from_ms, to_ms, range.label()))
 }
 
 fn summarize_events(
-    events: &[CcEvent],
+    events: &[&CcEvent],
     from_ms: i64,
     to_ms: i64,
     range_label: &str,
-    krw_per_usd: f64,
 ) -> CcSummary {
     let mut totals = Totals::default();
     let mut by_model: HashMap<(String, String), Totals> = HashMap::new();
@@ -509,21 +477,21 @@ fn summarize_events(
     let mut by_hour: HashMap<(u8, u8), u64> = HashMap::new();
     let mut sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for ev in events {
+    for &ev in events {
         if ev.ts_ms < from_ms || ev.ts_ms >= to_ms {
             continue;
         }
-        totals.add(ev, krw_per_usd);
+        totals.add(ev);
         sessions.insert(ev.session_id.clone());
 
         let key = (ev.model.clone(), ev.backend.clone());
-        by_model.entry(key).or_default().add(ev, krw_per_usd);
+        by_model.entry(key).or_default().add(ev);
 
-        by_project.entry(ev.cwd.clone()).or_default().add(ev, krw_per_usd);
-        by_backend.entry(ev.backend.clone()).or_default().add(ev, krw_per_usd);
+        by_project.entry(ev.cwd.clone()).or_default().add(ev);
+        by_backend.entry(ev.backend.clone()).or_default().add(ev);
 
         let day = day_label(ev.ts_ms);
-        by_day.entry(day).or_default().add(ev, krw_per_usd);
+        by_day.entry(day).or_default().add(ev);
 
         let dt = Local
             .timestamp_millis_opt(ev.ts_ms)
@@ -543,7 +511,7 @@ fn summarize_events(
         .into_iter()
         .map(|((model, backend), totals)| ModelBreakdown { model, backend, totals })
         .collect();
-    by_model_vec.sort_by(|a, b| b.totals.usd.partial_cmp(&a.totals.usd).unwrap_or(std::cmp::Ordering::Equal));
+    by_model_vec.sort_by(|a, b| b.totals.total_tokens.cmp(&a.totals.total_tokens));
 
     let mut by_project_vec: Vec<ProjectBreakdown> = by_project
         .into_iter()
@@ -556,7 +524,7 @@ fn summarize_events(
             ProjectBreakdown { cwd, label, totals }
         })
         .collect();
-    by_project_vec.sort_by(|a, b| b.totals.usd.partial_cmp(&a.totals.usd).unwrap_or(std::cmp::Ordering::Equal));
+    by_project_vec.sort_by(|a, b| b.totals.total_tokens.cmp(&a.totals.total_tokens));
     by_project_vec.truncate(10);
 
     let daily: Vec<DailyPoint> = by_day
@@ -565,7 +533,7 @@ fn summarize_events(
         .collect();
 
     let mut top_days = daily.clone();
-    top_days.sort_by(|a, b| b.totals.usd.partial_cmp(&a.totals.usd).unwrap_or(std::cmp::Ordering::Equal));
+    top_days.sort_by(|a, b| b.totals.total_tokens.cmp(&a.totals.total_tokens));
     top_days.truncate(5);
 
     let hourly: Vec<HourlyHeatPoint> = by_hour
@@ -573,14 +541,13 @@ fn summarize_events(
         .map(|((dow, hour), tokens)| HourlyHeatPoint { dow, hour, tokens })
         .collect();
 
-    let year_ago_today = compute_year_ago_today(events, krw_per_usd);
-    let disclaimer = pick_disclaimer(&by_backend);
+    let year_ago_today = compute_year_ago_today(events);
 
     CcSummary {
         from_ms,
         to_ms,
         range: range_label.to_string(),
-        krw_per_usd,
+        enabled: true,
         totals,
         by_model: by_model_vec,
         by_project: by_project_vec,
@@ -589,19 +556,19 @@ fn summarize_events(
         hourly,
         year_ago_today,
         top_days,
-        disclaimer,
+        disclaimer: DISCLAIMER_TOKENS.to_string(),
     }
 }
 
-fn compute_year_ago_today(events: &[CcEvent], krw_per_usd: f64) -> Option<Totals> {
+fn compute_year_ago_today(events: &[&CcEvent]) -> Option<Totals> {
     let today = Local::now().date_naive();
     let target = NaiveDate::from_ymd_opt(today.year() - 1, today.month(), today.day())?;
     let target_str = target.format("%Y-%m-%d").to_string();
     let mut totals = Totals::default();
     let mut hit = false;
-    for ev in events {
+    for &ev in events {
         if day_label(ev.ts_ms) == target_str {
-            totals.add(ev, krw_per_usd);
+            totals.add(ev);
             hit = true;
         }
     }
@@ -621,14 +588,10 @@ fn compute_year_ago_today(events: &[CcEvent], krw_per_usd: f64) -> Option<Totals
 //
 // 파일 위치: ~/.danbi/cc_billing_history.jsonl (vault 아님 — git 노이즈 회피)
 
-const PRICING_VERSION: &str = "v0.7.1";
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HistoryRow {
     date: String,
     totals: Totals,
-    /// 단가표 버전. 향후 단가 정정으로 재계산하고 싶을 때 필터 가능.
-    pricing_version: String,
     /// finalize 된 시각 (디버그용).
     finalized_at_ms: i64,
 }
@@ -677,13 +640,13 @@ fn append_history(row: &HistoryRow) {
 
 /// 어제까지의 (날짜, Totals) 를 history 우선, 없으면 transcript 에서 한 번
 /// 계산 후 history 에 finalize. 오늘은 호출자가 따로 transcript 실시간 집계.
-fn finalized_daily(events: &[CcEvent], krw_per_usd: f64) -> BTreeMap<String, Totals> {
+fn finalized_daily(events: &[&CcEvent]) -> BTreeMap<String, Totals> {
     let today = day_label(Utc::now().timestamp_millis());
     let mut history = load_history();
 
     // transcript 에서 어제까지의 날짜만 집계 (오늘 제외)
     let mut by_day: BTreeMap<String, Totals> = BTreeMap::new();
-    for ev in events {
+    for &ev in events {
         let day = day_label(ev.ts_ms);
         if day == today {
             continue;
@@ -692,7 +655,7 @@ fn finalized_daily(events: &[CcEvent], krw_per_usd: f64) -> BTreeMap<String, Tot
             // 이미 finalize 된 날짜 — transcript 재집계 스킵.
             continue;
         }
-        by_day.entry(day).or_default().add(ev, krw_per_usd);
+        by_day.entry(day).or_default().add(ev);
     }
 
     // 새로 계산된 날짜는 history 에 finalize (한 번만).
@@ -701,7 +664,6 @@ fn finalized_daily(events: &[CcEvent], krw_per_usd: f64) -> BTreeMap<String, Tot
         let row = HistoryRow {
             date: date.clone(),
             totals: totals.clone(),
-            pricing_version: PRICING_VERSION.to_string(),
             finalized_at_ms: now_ms,
         };
         append_history(&row);
@@ -722,69 +684,71 @@ fn finalized_daily(events: &[CcEvent], krw_per_usd: f64) -> BTreeMap<String, Tot
 /// 일별 히스토리 (90일 sparkline / 달력 잔디용 — 빈 날짜 0 으로 채움).
 ///
 /// v0.7.1+: 어제까지 = history.jsonl 에서, 오늘 = transcript 실시간.
-pub fn daily_series(days: u32, krw_per_usd: f64) -> Vec<DailyPoint> {
+pub fn daily_series(days: u32) -> Vec<DailyPoint> {
     let now = Utc::now().timestamp_millis();
     let from = now - (days as i64) * DAY_MS;
     let today = day_label(now);
-    let events = load_all();
 
-    let mut by_day = finalized_daily(&events, krw_per_usd);
+    with_events(|events| {
+        let mut by_day = finalized_daily(events);
 
-    // 오늘은 transcript 에서 실시간 집계.
-    let mut today_totals = Totals::default();
-    for ev in &events {
-        if day_label(ev.ts_ms) == today {
-            today_totals.add(ev, krw_per_usd);
+        // 오늘은 transcript 에서 실시간 집계.
+        let mut today_totals = Totals::default();
+        for &ev in events {
+            if day_label(ev.ts_ms) == today {
+                today_totals.add(ev);
+            }
         }
-    }
-    by_day.insert(today.clone(), today_totals);
+        by_day.insert(today.clone(), today_totals);
 
-    // 빈 날짜 0 으로 채움 (sparkline / 잔디 길이 보장).
-    let mut filled: BTreeMap<String, Totals> = BTreeMap::new();
-    for d in 0..=days as i64 {
-        let ts = now - (days as i64 - d) * DAY_MS;
-        let day = day_label(ts);
-        if ts < from {
-            continue;
+        // 빈 날짜 0 으로 채움 (sparkline / 잔디 길이 보장).
+        let mut filled: BTreeMap<String, Totals> = BTreeMap::new();
+        for d in 0..=days as i64 {
+            let ts = now - (days as i64 - d) * DAY_MS;
+            let day = day_label(ts);
+            if ts < from {
+                continue;
+            }
+            filled.insert(day.clone(), by_day.remove(&day).unwrap_or_default());
         }
-        filled.insert(day.clone(), by_day.remove(&day).unwrap_or_default());
-    }
 
-    filled
-        .into_iter()
-        .map(|(date, totals)| DailyPoint { date, totals })
-        .collect()
+        filled
+            .into_iter()
+            .map(|(date, totals)| DailyPoint { date, totals })
+            .collect()
+    })
 }
 
 /// 월별 히스토리 (전체 — 청구 추이).
 ///
 /// v0.7.1+: 어제까지 = history.jsonl 에서 월 단위 fold, 오늘 = transcript.
-pub fn monthly_series(krw_per_usd: f64) -> Vec<DailyPoint> {
-    let events = load_all();
+pub fn monthly_series() -> Vec<DailyPoint> {
     let today = day_label(Utc::now().timestamp_millis());
 
-    let by_day = finalized_daily(&events, krw_per_usd);
+    with_events(|events| {
+        let by_day = finalized_daily(events);
 
-    // history 의 모든 어제까지 + 오늘 transcript.
-    let mut by_month: BTreeMap<String, Totals> = BTreeMap::new();
-    for (date, totals) in &by_day {
-        let key = date[..7].to_string(); // "YYYY-MM"
-        by_month.entry(key).or_default().merge(totals);
-    }
-    // 오늘
-    let mut today_totals = Totals::default();
-    for ev in &events {
-        if day_label(ev.ts_ms) == today {
-            today_totals.add(ev, krw_per_usd);
+        // history 의 모든 어제까지 + 오늘 transcript.
+        let mut by_month: BTreeMap<String, Totals> = BTreeMap::new();
+        for (date, totals) in &by_day {
+            let key = date[..7].to_string(); // "YYYY-MM"
+            by_month.entry(key).or_default().merge(totals);
         }
-    }
-    let key_today = today[..7].to_string();
-    by_month.entry(key_today).or_default().merge(&today_totals);
+        // 오늘
+        let mut today_totals = Totals::default();
+        for &ev in events {
+            if day_label(ev.ts_ms) == today {
+                today_totals.add(ev);
+            }
+        }
+        let key_today = today[..7].to_string();
+        by_month.entry(key_today).or_default().merge(&today_totals);
 
-    by_month
-        .into_iter()
-        .map(|(date, totals)| DailyPoint { date, totals })
-        .collect()
+        by_month
+            .into_iter()
+            .map(|(date, totals)| DailyPoint { date, totals })
+            .collect()
+    })
 }
 
 /// 영속 히스토리 강제 재빌드 — 단가 보정 후 사용자가 "처음부터 다시" 원할
@@ -851,73 +815,35 @@ mod tests {
     }
 
     #[test]
-    fn cache_5m_priced_at_absolute_bedrock_rate() {
-        let e = ev(0, "claude-opus-4-7", "bedrock", 0, 0, 1_000_000, 0);
-        let p = pricing::lookup("claude-opus-4-7");
-        // Bedrock Opus 4.7 5m cache write = $6.25 / 1M
-        let usd = e.usd(p);
-        assert!((usd - 6.25).abs() < 0.01, "got {usd}");
+    fn totals_sum_all_token_kinds() {
+        let mut t = Totals::default();
+        let e = ev(0, "claude-opus-4-7", "bedrock", 1000, 500, 200, 100);
+        t.add(&e);
+        assert_eq!(t.input_tokens, 1000);
+        assert_eq!(t.output_tokens, 500);
+        assert_eq!(t.cache_creation_tokens, 200);
+        assert_eq!(t.cache_read_tokens, 100);
+        assert_eq!(t.total_tokens, 1800);
+        assert_eq!(t.calls, 1);
     }
 
     #[test]
-    fn cache_read_priced_at_absolute_bedrock_rate() {
-        let e = ev(0, "claude-opus-4-7", "bedrock", 0, 0, 0, 1_000_000);
-        let p = pricing::lookup("claude-opus-4-7");
-        // Bedrock Opus 4.7 cache read = $0.50 / 1M
-        let usd = e.usd(p);
-        assert!((usd - 0.5).abs() < 0.01, "got {usd}");
-    }
-
-    #[test]
-    fn cache_1h_priced_higher_than_5m() {
-        // 1h breakdown 이 들어오면 더 비싼 단가 적용.
-        let mut e = ev(0, "claude-opus-4-7", "bedrock", 0, 0, 1_000_000, 0);
-        e.cache_5m_tokens = 0;
-        e.cache_1h_tokens = 1_000_000;
-        let p = pricing::lookup("claude-opus-4-7");
-        // Bedrock Opus 4.7 1h cache write = $10.00 / 1M
-        let usd = e.usd(p);
-        assert!((usd - 10.0).abs() < 0.01, "got {usd}");
-    }
-
-    #[test]
-    fn input_output_priced_at_bedrock_rate_not_anthropic() {
-        // Bedrock cross-region: input $5 / output $25 (not Anthropic API $15/$75).
-        let e = ev(0, "claude-opus-4-7", "bedrock", 1_000_000, 1_000_000, 0, 0);
-        let p = pricing::lookup("claude-opus-4-7");
-        let usd = e.usd(p);
-        assert!((usd - 30.0).abs() < 0.01, "got {usd}");
-    }
-
-    #[test]
-    fn summarize_aggregates_totals_and_top_days() {
+    fn summarize_aggregates_totals_and_sorts_by_tokens() {
         let now = Utc::now().timestamp_millis();
         let events = vec![
             ev(now - 1000, "claude-opus-4-7", "bedrock", 1000, 500, 0, 0),
             ev(now - 2000, "claude-sonnet-4-6", "bedrock", 1000, 500, 0, 0),
             ev(now - 3000, "claude-opus-4-7", "anthropic_api", 100, 50, 0, 0),
         ];
-        let s = summarize_events(&events, 0, now + 1, "all", 1400.0);
+        let refs: Vec<&CcEvent> = events.iter().collect();
+        let s = summarize_events(&refs, 0, now + 1, "all");
         assert_eq!(s.totals.calls, 3);
         assert!(s.by_model.len() >= 2);
         assert!(s.by_backend.contains_key("bedrock"));
         assert!(s.by_backend.contains_key("anthropic_api"));
-    }
-
-    #[test]
-    fn pick_disclaimer_bedrock_only() {
-        let mut bb: HashMap<String, Totals> = HashMap::new();
-        bb.insert("bedrock".into(), Totals::default());
-        let d = pick_disclaimer(&bb);
-        assert!(d.contains("Bedrock"));
-    }
-
-    #[test]
-    fn pick_disclaimer_mixed_uses_api_message() {
-        let mut bb: HashMap<String, Totals> = HashMap::new();
-        bb.insert("bedrock".into(), Totals::default());
-        bb.insert("anthropic_api".into(), Totals::default());
-        let d = pick_disclaimer(&bb);
-        assert!(d.contains("구독"));
+        // 토큰 많은 순 정렬 확인.
+        assert!(
+            s.by_model[0].totals.total_tokens >= s.by_model[1].totals.total_tokens
+        );
     }
 }

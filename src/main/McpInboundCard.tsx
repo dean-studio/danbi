@@ -3,7 +3,6 @@ import {
   AlertTriangle,
   ChevronRight,
   Code2,
-  Coins,
   Download,
   FileText,
   Info,
@@ -101,22 +100,6 @@ export function McpInboundCard({
               {(data?.total_calls ?? 0).toLocaleString()} calls
             </span>
           </div>
-
-          {/* Reference cost estimate. Subtitle to the big number, never
-              presented as the primary metric. */}
-          {data?.cost_estimate && (
-            <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-stone">
-              <Coins size={11} className="text-stone" />
-              <span>
-                같은 분량을 <strong className="font-medium text-on-dark">{prettyModel(data.cost_estimate.model_stem)}</strong> input으로 다시 보낸다고 가정하면 약{" "}
-                <strong className="font-mono font-medium text-on-dark">₩{Math.round(data.cost_estimate.krw).toLocaleString()}</strong>
-                {" "}({"$"}{data.cost_estimate.usd.toFixed(4)})
-              </span>
-              <span className="rounded-xs border border-hairline bg-surface-elevated px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-stone">
-                참고용
-              </span>
-            </div>
-          )}
 
           {/* Sparkline — bare bones SVG. ~120px tall. */}
           <Sparkline daily={data?.daily ?? []} max={sparklineMax} />
@@ -646,19 +629,6 @@ function fmtTokens(n: number): string {
   if (n < 1_000_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
   if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(2).replace(/\.00$/, "")}M`;
   return `${(n / 1_000_000_000).toFixed(2).replace(/\.00$/, "")}B`;
-}
-
-function prettyModel(stem: string): string {
-  switch (stem) {
-    case "claude-sonnet-4-6":
-      return "Sonnet 4.6";
-    case "claude-opus-4-7":
-      return "Opus 4.7";
-    case "claude-haiku-4-5":
-      return "Haiku 4.5";
-    default:
-      return stem;
-  }
 }
 
 function clientLabel(c: string): string {

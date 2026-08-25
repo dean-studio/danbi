@@ -62,11 +62,9 @@ export function DanbiLlmUsageCard() {
         <div className="px-4 py-4">
           <div className="flex flex-wrap items-baseline gap-3">
             <span className="font-mono text-[36px] font-medium leading-none tracking-tight text-ink tabular-nums">
-              ₩{Math.round(data?.total_krw ?? 0).toLocaleString()}
+              {fmtTokens(totalIn + totalOut)}
             </span>
-            <span className="text-[12px] text-stone">
-              KRW · ${(((data?.total_krw ?? 0) / (data?.krw_per_usd ?? 1380))).toFixed(2)}
-            </span>
+            <span className="text-[12px] text-stone">tokens</span>
             <span className="ml-auto text-[12px] text-stone">
               {(data?.calls ?? 0).toLocaleString()} calls
             </span>
@@ -101,9 +99,6 @@ export function DanbiLlmUsageCard() {
                     <span className="shrink-0 font-mono text-[11px] tabular-nums text-on-dark">
                       {fmtTokens(totalT)}
                     </span>
-                    <span className="shrink-0 font-mono text-[11px] tabular-nums text-stone">
-                      ₩{Math.round(r.krw).toLocaleString()}
-                    </span>
                   </li>
                 );
               })}
@@ -112,8 +107,7 @@ export function DanbiLlmUsageCard() {
 
           <p className="mt-4 text-[11px] leading-snug text-stone">
             단비 본 앱이 Bedrock·기타 provider 에 쏜 호출의 토큰입니다.
-            응답 헤더의 usage 필드 → 단가표 매칭 → KRW 환산. 비용은 실제
-            청구액에 매우 가깝습니다.
+            응답 헤더의 usage 필드에서 직접 집계한 실제 토큰량이에요.
           </p>
         </div>
       )}

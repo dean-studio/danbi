@@ -19,7 +19,6 @@
 //! triggers a full reload (still cheap — ~50 MB ceiling). Concurrent
 //! readers share a `RwLock`. We don't need a SQLite mirror at this scale.
 
-use crate::pricing;
 use crate::usage::{self, UsageEvent, MCP_PROVIDER};
 use chrono::{Local, NaiveDate, TimeZone, Utc};
 use serde::Serialize;
@@ -158,22 +157,6 @@ pub struct Anomaly {
     pub multiple: f64,
 }
 
-/// Reference-only KRW estimate. The math uses the writer-tier price
-/// (Sonnet 4.6 input by default) since users typically saved content
-/// from a writer-class call. Marked `reference` because it does NOT
-/// represent a billed amount — it's "if you re-fed this content as
-/// input to Sonnet, it would cost roughly this much."
-#[derive(Debug, Serialize, Clone)]
-pub struct CostEstimate {
-    pub model_stem: String,
-    pub usd_per_mtok_input: f64,
-    pub krw_per_usd: f64,
-    pub krw: f64,
-    pub usd: f64,
-    /// Always `true` — surfaces in the UI as a "참고용 추정" tag.
-    pub reference_only: bool,
-}
-
 /// One row of the "오늘의 Top Contributors" list — the 5 domains
 /// (across the entire vault) that received the most tokens during
 /// the selected window. Distinct from `by_project.top_domains` which
@@ -213,8 +196,6 @@ pub struct VaultSummary {
     pub top_contributors: Vec<TopContributor>,
     /// Spikes vs the rolling 7-day baseline. May be empty.
     pub anomalies: Vec<Anomaly>,
-    /// Reference-only KRW estimate at the writer-tier price.
-    pub cost_estimate: CostEstimate,
     /// 7×24 token heatmap by local day-of-week × hour-of-day.
     pub heatmap: Heatmap,
     /// Fixed Korean-language disclaimer. Always present — the UI must
@@ -237,7 +218,6 @@ pub struct ProjectDetail {
     pub by_tool: Vec<ToolBreakdown>,
     pub by_domain: Vec<DomainStub>,
     pub daily: Vec<DailyPoint>,
-    pub cost_estimate: CostEstimate,
     pub disclaimer: &'static str,
     pub estimated: bool,
 }
@@ -254,7 +234,6 @@ pub struct DomainDetail {
     pub by_client: Vec<ClientBreakdown>,
     pub by_tool: Vec<ToolBreakdown>,
     pub daily: Vec<DailyPoint>,
-    pub cost_estimate: CostEstimate,
     pub disclaimer: &'static str,
     pub estimated: bool,
 }
@@ -278,13 +257,13 @@ fn cache_lock() -> &'static RwLock<Cache> {
     CACHE.get_or_init(|| RwLock::new(Cache::default()))
 }
 
-/// Read the raw JSONL log if it changed since last call, otherwise
-/// reuse the cached vector. Filters down to `provider == "mcp"` while
-/// loading so subsequent folds run on the smaller slice.
-fn load_events() -> Vec<UsageEvent> {
+/// Refresh the in-memory event cache if the log changed since last call.
+/// Filters down to `provider == "mcp"` while loading so subsequent folds
+/// run on the smaller slice.
+fn refresh_events_cache() {
     let path = match usage::usage_log_path() {
         Some(p) => p,
-        None => return Vec::new(),
+        None => return,
     };
     let (size, mtime_ms) = match std::fs::metadata(&path) {
         Ok(m) => {
@@ -296,13 +275,13 @@ fn load_events() -> Vec<UsageEvent> {
                 .unwrap_or(0);
             (m.len(), mtime)
         }
-        Err(_) => return Vec::new(),
+        Err(_) => return,
     };
 
     {
         let cache = cache_lock().read().unwrap();
         if cache.size == size && cache.mtime_ms == mtime_ms {
-            return cache.events.clone();
+            return;
         }
     }
 
@@ -310,14 +289,27 @@ fn load_events() -> Vec<UsageEvent> {
     // because the file is bounded (retention truncates it) and a full
     // reload is simpler to keep correct. ~50k lines parses in <100ms.
     let all = usage::load_all().unwrap_or_default();
-    let filtered: Vec<UsageEvent> = all.into_iter()
+    let filtered: Vec<UsageEvent> = all
+        .into_iter()
         .filter(|e| e.provider == MCP_PROVIDER)
         .collect();
     let mut cache = cache_lock().write().unwrap();
     cache.size = size;
     cache.mtime_ms = mtime_ms;
-    cache.events = filtered.clone();
-    filtered
+    cache.events = filtered;
+}
+
+/// Refresh the cache, then run `f` against the cached events **by reference**
+/// while holding the read lock.
+///
+/// v0.8.0: the old `load_events()` returned `cache.events.clone()` on every
+/// call — and `summarize_vault` is also hit by the 5-min background warm
+/// loop. At the retention ceiling (~50 MB) that was a full clone per panel
+/// refresh, churning allocator RSS. Now callers borrow the cached slice.
+fn with_events<R>(f: impl FnOnce(&[UsageEvent]) -> R) -> R {
+    refresh_events_cache();
+    let cache = cache_lock().read().unwrap();
+    f(&cache.events)
 }
 
 /// Drop the cache. Called from tests and from the retention sweep so a
@@ -441,37 +433,7 @@ fn fold_daily(events: &[&UsageEvent], from_ms: i64, to_ms: i64) -> Vec<DailyPoin
     out
 }
 
-// ---------- Cost / contributors / anomalies ---------------------------
-
-/// Default model stem used for the reference cost estimate. Sonnet 4.6
-/// is the writer-tier default in Danbi's onboarding, so it's the most
-/// representative price for "what would re-feeding this content cost?"
-const COST_MODEL_STEM: &str = "claude-sonnet-4-6";
-
-/// Build the reference-only cost estimate for a token total. Pulls the
-/// USD→KRW rate out of `config.json` (falls back to the default
-/// 1380 if the file is unreadable). Output tokens are zeroed because
-/// MCP inbound never has output.
-fn cost_estimate_for(total_tokens: u64) -> CostEstimate {
-    let krw_per_usd = match crate::config::default_vault_path() {
-        Ok(vault) => match crate::config::load_config(&vault) {
-            Ok(Some(cfg)) => cfg.usage.krw_per_usd,
-            _ => 1_380.0,
-        },
-        Err(_) => 1_380.0,
-    };
-    let price = pricing::lookup(COST_MODEL_STEM);
-    let usd = (total_tokens as f64 / 1_000_000.0) * price.input;
-    let krw = usd * krw_per_usd;
-    CostEstimate {
-        model_stem: COST_MODEL_STEM.to_string(),
-        usd_per_mtok_input: price.input,
-        krw_per_usd,
-        krw,
-        usd,
-        reference_only: true,
-    }
-}
+// ---------- Contributors / anomalies ---------------------------
 
 /// Pick the top 5 (project, domain) pairs by token count.
 fn top_contributors(events: &[&UsageEvent]) -> Vec<TopContributor> {
@@ -621,119 +583,118 @@ fn build_heatmap(events: &[&UsageEvent]) -> Heatmap {
 /// Vault-wide summary across every project. Top-level dashboard card.
 pub fn summarize_vault(range: Range) -> VaultSummary {
     let (from_ms, to_ms) = range.window();
-    let events = load_events();
-    let in_range: Vec<&UsageEvent> =
-        events.iter().filter(|e| within(e, from_ms, to_ms)).collect();
+    with_events(|events| {
+        let in_range: Vec<&UsageEvent> =
+            events.iter().filter(|e| within(e, from_ms, to_ms)).collect();
 
-    let total_tokens: u64 = in_range.iter().map(|e| e.input_tokens as u64).sum();
-    let total_calls = in_range.len() as u64;
+        let total_tokens: u64 = in_range.iter().map(|e| e.input_tokens as u64).sum();
+        let total_calls = in_range.len() as u64;
 
-    // Per-project fold.
-    let mut by_proj: HashMap<String, Vec<&UsageEvent>> = HashMap::new();
-    for ev in &in_range {
-        let key = ev.project.clone().unwrap_or_else(|| "(unscoped)".to_string());
-        by_proj.entry(key).or_default().push(ev);
-    }
-    let mut by_project: Vec<ProjectStats> = by_proj
-        .into_iter()
-        .map(|(project, evs)| {
-            let tokens: u64 = evs.iter().map(|e| e.input_tokens as u64).sum();
-            let calls = evs.len() as u64;
-            let by_client = fold_by_client(&evs);
-            let mut top_domains = fold_by_domain(&evs);
-            top_domains.truncate(5);
-            ProjectStats { project, tokens, calls, by_client, top_domains }
-        })
-        .collect();
-    by_project.sort_by(|a, b| b.tokens.cmp(&a.tokens));
+        // Per-project fold.
+        let mut by_proj: HashMap<String, Vec<&UsageEvent>> = HashMap::new();
+        for ev in &in_range {
+            let key = ev.project.clone().unwrap_or_else(|| "(unscoped)".to_string());
+            by_proj.entry(key).or_default().push(ev);
+        }
+        let mut by_project: Vec<ProjectStats> = by_proj
+            .into_iter()
+            .map(|(project, evs)| {
+                let tokens: u64 = evs.iter().map(|e| e.input_tokens as u64).sum();
+                let calls = evs.len() as u64;
+                let by_client = fold_by_client(&evs);
+                let mut top_domains = fold_by_domain(&evs);
+                top_domains.truncate(5);
+                ProjectStats { project, tokens, calls, by_client, top_domains }
+            })
+            .collect();
+        by_project.sort_by(|a, b| b.tokens.cmp(&a.tokens));
 
-    let top_contributors = top_contributors(&in_range);
-    let anomalies = anomalies_in_window(&events, from_ms, to_ms);
-    let cost_estimate = cost_estimate_for(total_tokens);
-    let heatmap = build_heatmap(&in_range);
+        let top_contributors = top_contributors(&in_range);
+        let anomalies = anomalies_in_window(events, from_ms, to_ms);
+        let heatmap = build_heatmap(&in_range);
 
-    VaultSummary {
-        range: range.label().to_string(),
-        from_ms,
-        to_ms,
-        total_tokens,
-        total_calls,
-        by_client: fold_by_client(&in_range),
-        by_tool: fold_by_tool(&in_range),
-        by_project,
-        daily: fold_daily(&in_range, from_ms, to_ms),
-        top_contributors,
-        anomalies,
-        cost_estimate,
-        heatmap,
-        disclaimer: DISCLAIMER,
-        estimated: true,
-    }
+        VaultSummary {
+            range: range.label().to_string(),
+            from_ms,
+            to_ms,
+            total_tokens,
+            total_calls,
+            by_client: fold_by_client(&in_range),
+            by_tool: fold_by_tool(&in_range),
+            by_project,
+            daily: fold_daily(&in_range, from_ms, to_ms),
+            top_contributors,
+            anomalies,
+            heatmap,
+            disclaimer: DISCLAIMER,
+            estimated: true,
+        }
+    })
 }
 
 /// Project drill-down: per-domain, per-client, daily series.
 pub fn summarize_project(project: &str, range: Range) -> ProjectDetail {
     let (from_ms, to_ms) = range.window();
-    let events = load_events();
-    let in_range: Vec<&UsageEvent> = events
-        .iter()
-        .filter(|e| within(e, from_ms, to_ms))
-        .filter(|e| {
-            e.project.as_deref().map(|p| p == project).unwrap_or(false)
-        })
-        .collect();
+    with_events(|events| {
+        let in_range: Vec<&UsageEvent> = events
+            .iter()
+            .filter(|e| within(e, from_ms, to_ms))
+            .filter(|e| {
+                e.project.as_deref().map(|p| p == project).unwrap_or(false)
+            })
+            .collect();
 
-    let total_tokens: u64 = in_range.iter().map(|e| e.input_tokens as u64).sum();
-    let total_calls = in_range.len() as u64;
+        let total_tokens: u64 = in_range.iter().map(|e| e.input_tokens as u64).sum();
+        let total_calls = in_range.len() as u64;
 
-    ProjectDetail {
-        project: project.to_string(),
-        range: range.label().to_string(),
-        from_ms,
-        to_ms,
-        total_tokens,
-        total_calls,
-        by_client: fold_by_client(&in_range),
-        by_tool: fold_by_tool(&in_range),
-        by_domain: fold_by_domain(&in_range),
-        daily: fold_daily(&in_range, from_ms, to_ms),
-        cost_estimate: cost_estimate_for(total_tokens),
-        disclaimer: DISCLAIMER,
-        estimated: true,
-    }
+        ProjectDetail {
+            project: project.to_string(),
+            range: range.label().to_string(),
+            from_ms,
+            to_ms,
+            total_tokens,
+            total_calls,
+            by_client: fold_by_client(&in_range),
+            by_tool: fold_by_tool(&in_range),
+            by_domain: fold_by_domain(&in_range),
+            daily: fold_daily(&in_range, from_ms, to_ms),
+            disclaimer: DISCLAIMER,
+            estimated: true,
+        }
+    })
 }
 
 /// Domain drill-down: per-client, per-tool, daily series for the file.
 pub fn summarize_domain(project: &str, domain: &str, range: Range) -> DomainDetail {
     let (from_ms, to_ms) = range.window();
-    let events = load_events();
-    let in_range: Vec<&UsageEvent> = events
-        .iter()
-        .filter(|e| within(e, from_ms, to_ms))
-        .filter(|e| {
-            e.project.as_deref() == Some(project)
-                && e.domain.as_deref() == Some(domain)
-        })
-        .collect();
+    with_events(|events| {
+        let in_range: Vec<&UsageEvent> = events
+            .iter()
+            .filter(|e| within(e, from_ms, to_ms))
+            .filter(|e| {
+                e.project.as_deref() == Some(project)
+                    && e.domain.as_deref() == Some(domain)
+            })
+            .collect();
 
-    let total_tokens: u64 = in_range.iter().map(|e| e.input_tokens as u64).sum();
-    let total_calls = in_range.len() as u64;
+        let total_tokens: u64 = in_range.iter().map(|e| e.input_tokens as u64).sum();
+        let total_calls = in_range.len() as u64;
 
-    DomainDetail {
-        project: project.to_string(),
-        domain: domain.to_string(),
-        range: range.label().to_string(),
-        from_ms,
-        to_ms,
-        total_tokens,
-        total_calls,
-        by_client: fold_by_client(&in_range),
-        by_tool: fold_by_tool(&in_range),
-        daily: fold_daily(&in_range, from_ms, to_ms),
-        cost_estimate: cost_estimate_for(total_tokens),
-        disclaimer: DISCLAIMER,
-        estimated: true,
-    }
+        DomainDetail {
+            project: project.to_string(),
+            domain: domain.to_string(),
+            range: range.label().to_string(),
+            from_ms,
+            to_ms,
+            total_tokens,
+            total_calls,
+            by_client: fold_by_client(&in_range),
+            by_tool: fold_by_tool(&in_range),
+            daily: fold_daily(&in_range, from_ms, to_ms),
+            disclaimer: DISCLAIMER,
+            estimated: true,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -928,14 +889,5 @@ mod tests {
         let a = anomalies.iter().find(|a| a.domain == "x.md").unwrap();
         assert!(a.multiple > 3.0);
         assert_eq!(a.tokens, 8000);
-    }
-
-    #[test]
-    fn cost_estimate_uses_sonnet_input_price() {
-        // 1M tokens at Sonnet 4.6 input ($3/MTok) ≈ $3.
-        let est = cost_estimate_for(1_000_000);
-        assert!((est.usd - 3.0).abs() < 0.01, "got {}", est.usd);
-        assert_eq!(est.model_stem, COST_MODEL_STEM);
-        assert!(est.reference_only);
     }
 }

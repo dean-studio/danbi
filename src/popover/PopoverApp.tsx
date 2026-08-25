@@ -3,7 +3,7 @@ import { ArrowRight, ChevronRight, Coins, Power } from "lucide-react";
 import {
   ipc,
   type ActivityOverview,
-  type CcSummaryWithMode,
+  type CcSummary,
   type McpStatus,
   type ProjectActivity,
 } from "@/lib/ipc";
@@ -19,7 +19,7 @@ import { projectIconOf } from "@/components/ProjectIconPicker";
 export function PopoverApp() {
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [activity, setActivity] = useState<ActivityOverview | null>(null);
-  const [usage, setUsage] = useState<CcSummaryWithMode | null>(null);
+  const [usage, setUsage] = useState<CcSummary | null>(null);
   const [usageEnabled, setUsageEnabled] = useState(true);
 
   useEffect(() => {
@@ -120,7 +120,7 @@ export function PopoverApp() {
           />
         </button>
 
-        {usageEnabled && usage && usage.summary.totals.total_tokens > 0 && (
+        {usageEnabled && usage && usage.totals.total_tokens > 0 && (
           <UsageMini summary={usage} />
         )}
 
@@ -195,12 +195,8 @@ function ProjectQuickRow({
   );
 }
 
-function UsageMini({ summary }: { summary: CcSummaryWithMode }) {
-  const t = summary.summary.totals;
-  const showCost =
-    summary.effective_mode === "bedrock" ||
-    summary.effective_mode === "api_key" ||
-    summary.effective_mode === "mixed";
+function UsageMini({ summary }: { summary: CcSummary }) {
+  const t = summary.totals;
   return (
     <div className="rounded-md border border-hairline bg-surface-elevated px-2.5 py-2">
       <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.4px] text-stone">
@@ -208,22 +204,12 @@ function UsageMini({ summary }: { summary: CcSummaryWithMode }) {
           <Coins size={10} />
           오늘 Claude Code
         </span>
-        <span className="font-mono normal-case tracking-normal text-stone">
-          {modeLabel(summary.effective_mode)}
-        </span>
       </div>
       <div className="mt-1 flex items-baseline justify-between gap-2">
         <span className="font-mono text-[18px] font-medium tabular-nums text-on-dark">
           {fmtToks(t.total_tokens)}
         </span>
-        {showCost && (
-          <span className="font-mono text-[11px] tabular-nums text-stone">
-            ₩{Math.round(t.krw).toLocaleString()}
-          </span>
-        )}
-        {!showCost && (
-          <span className="text-[10px] text-stone">정액 구독</span>
-        )}
+        <span className="text-[10px] text-stone">tokens</span>
       </div>
       <div className="mt-1 flex items-center gap-1.5 text-[10px] text-stone">
         <Bar label="in" value={t.input_tokens} max={t.total_tokens} />
@@ -268,21 +254,6 @@ function Bar({
       </div>
     </div>
   );
-}
-
-function modeLabel(m: CcSummaryWithMode["effective_mode"]): string {
-  switch (m) {
-    case "bedrock":
-      return "Bedrock";
-    case "api_key":
-      return "API";
-    case "subscription":
-      return "Sub";
-    case "mixed":
-      return "Mix";
-    default:
-      return "—";
-  }
 }
 
 function fmtToks(n: number): string {

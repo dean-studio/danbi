@@ -363,6 +363,10 @@ fn ensure_corpus_fresh(vault: &Path) -> DanbiResult<()> {
             return Ok(());
         }
     }
+    // v0.8.0: 옛 인덱스를 먼저 drop 해서 재빌드 중 2× 메모리 피크를 없앤다.
+    // (예전엔 slot 에 옛 인덱스를 둔 채 새 인덱스를 만든 뒤 교체 → RAM 2배.)
+    // 재빌드가 실패하면 slot 은 None 이 되고, 다음 검색이 다시 빌드를 시도한다.
+    *slot = None;
     let corpus = build_corpus(vault)?;
     *slot = Some(corpus);
     Ok(())

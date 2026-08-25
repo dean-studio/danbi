@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-08-25
+
+### Changed
+
+- **토큰 비용 계산 전면 제거 — 사용량 카드는 토큰량만 표시** — USD/KRW
+  환산, 단가표, 환율 설정, 결제 모드(Bedrock/API/구독) 분기, 참고용 비용
+  추정을 모두 걷어냈습니다. 부정확한 환산이 오히려 신뢰를 떨어뜨린다는
+  판단. Claude Code 사용량 · 단비 자체 LLM 사용량 · MCP 저장 토큰 카드는
+  그대로 유지되며, 이제 **토큰량만** 노출합니다.
+
+### Removed
+
+- 백엔드: `pricing.rs` 단가·비용 로직(토큰 집계만 남김), `Totals` 의
+  usd/krw 필드, `UsageConfig` 의 `krw_per_usd`·`claude_code_mode`,
+  `mcp_inbound.rs` 의 `CostEstimate`, billing history 의 `pricing_version`.
+- IPC 커맨드 4개 삭제: `usage_set_claude_code_mode`, `usage_set_krw_rate`,
+  `usage_month_to_date`, `usage_set_rate`. `dashboard_claude_code` 는 이제
+  `CcSummary` 를 직접 반환(`enabled` 플래그 포함).
+- 프론트: `CcSummaryWithMode`/`CcEffectiveMode`/`McpCostEstimate` 타입,
+  카드·popover 의 ₩/$ 표기와 ModeBadge, Settings 의 결제 모드 셀렉트 +
+  KRW 환율 입력. 재인덱싱 예상치는 비용 대신 처리 토큰량으로 표시.
+
 ## [0.7.2] — 2026-07-14
 
 ### Fixed

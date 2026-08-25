@@ -14,9 +14,8 @@ import {
 import {
   ipc,
   type CcDailyPoint,
-  type CcEffectiveMode,
   type CcRange,
-  type CcSummaryWithMode,
+  type CcSummary,
   type CcTotals,
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
@@ -24,21 +23,17 @@ import { cn } from "@/lib/utils";
 /**
  * Claude Code 사용량 카드 (v0.7.0).
  *
- * `~/.claude/projects/**\/*.jsonl` transcript 를 직접 읽어 토큰·비용·세션·
+ * `~/.claude/projects/**\/*.jsonl` transcript 를 직접 읽어 토큰·세션·
  * 모델/프로젝트별 분포·히트맵·히스토리를 보여준다. agentcat connectors
  * 와 달리 OAuth endpoint 호출 없이 자기 디스크의 자기 파일만 사용 — 권한
  * 이슈/유지보수 부담 0.
  *
- * 모드별 UI 차별화 (`effective_mode`):
- *   - `bedrock` / `api_key` → 종량형. 큰 비용 + 모델별 USD/KRW.
- *   - `subscription`        → 정액. 비용은 숨기고 토큰만.
- *   - `mixed`               → 둘 다. 비용은 종량 부분만.
- *   - `unknown`             → transcript 없음. 안내만.
+ * v0.8.0 부터 비용 계산은 제거하고 토큰량만 표시한다.
  */
 export function ClaudeCodeUsageCard() {
   const [tab, setTab] = useState<"current" | "history">("current");
   const [range, setRange] = useState<CcRange>("today");
-  const [data, setData] = useState<CcSummaryWithMode | null>(null);
+  const [data, setData] = useState<CcSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [reindexing, setReindexing] = useState(false);
 
@@ -80,10 +75,8 @@ export function ClaudeCodeUsageCard() {
     }
   };
 
-  const summary = data?.summary;
-  const mode = data?.effective_mode ?? "unknown";
+  const summary = data ?? undefined;
   const enabled = data?.enabled ?? true;
-  const showCost = mode === "bedrock" || mode === "api_key" || mode === "mixed";
 
   const empty =
     !loading && (summary == null || summary.totals.calls === 0);
@@ -96,7 +89,6 @@ export function ClaudeCodeUsageCard() {
           <h2 className="text-[14px] font-medium text-ink">
             Claude Code 사용량
           </h2>
-          <ModeBadge mode={mode} />
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -120,15 +112,9 @@ export function ClaudeCodeUsageCard() {
       {!enabled ? (
         <DisabledState />
       ) : tab === "current" ? (
-        <CurrentTab
-          loading={loading}
-          empty={empty}
-          summary={summary}
-          mode={mode}
-          showCost={showCost}
-        />
+        <CurrentTab loading={loading} empty={empty} summary={summary} />
       ) : (
-        <HistoryTab showCost={showCost} />
+        <HistoryTab />
       )}
     </section>
   );
@@ -140,17 +126,13 @@ function CurrentTab({
   loading,
   empty,
   summary,
-  mode,
-  showCost,
 }: {
   loading: boolean;
   empty: boolean;
-  summary?: CcSummaryWithMode["summary"];
-  mode: CcEffectiveMode;
-  showCost: boolean;
+  summary?: CcSummary;
 }) {
   if (loading && !summary) return <CardSkeleton />;
-  if (empty) return <EmptyState mode={mode} />;
+  if (empty) return <EmptyState />;
   if (!summary) return null;
 
   const totals = summary.totals;
@@ -163,14 +145,6 @@ function CurrentTab({
           {fmtTokens(totals.total_tokens)}
         </span>
         <span className="text-[12px] text-stone">tokens</span>
-        {showCost && (
-          <span className="ml-1 inline-flex items-baseline gap-1.5 rounded-md border border-hairline bg-surface-elevated px-2 py-1 font-mono text-[12px] text-on-dark tabular-nums">
-            ₩{Math.round(totals.krw).toLocaleString()}
-            <span className="text-[10px] text-stone">
-              (${totals.usd.toFixed(2)})
-            </span>
-          </span>
-        )}
         <span className="ml-auto text-[12px] text-stone">
           {totals.calls.toLocaleString()} calls · {totals.sessions} sessions
         </span>
@@ -180,24 +154,9 @@ function CurrentTab({
       <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
         <Stat label="input" value={totals.input_tokens} />
         <Stat label="output" value={totals.output_tokens} />
-        <Stat
-          label="cache write"
-          value={totals.cache_creation_tokens}
-          hint="input × 1.25"
-        />
-        <Stat
-          label="cache read"
-          value={totals.cache_read_tokens}
-          hint="input × 0.10"
-        />
+        <Stat label="cache write" value={totals.cache_creation_tokens} />
+        <Stat label="cache read" value={totals.cache_read_tokens} />
       </div>
-
-      {mode === "subscription" && (
-        <p className="mt-3 rounded-md border border-hairline bg-surface-elevated px-3 py-2 text-[11px] text-stone">
-          Pro/Max 구독 모드 — 토큰만 의미가 있고 비용은 정액입니다. 잔여
-          한도/리셋 시간은 transcript 만으로는 알 수 없어요.
-        </p>
-      )}
 
       {/* 일별 sparkline */}
       <Sparkline daily={summary.daily} className="mt-4" />
@@ -211,10 +170,7 @@ function CurrentTab({
             label: prettyModel(m.model),
             extra: m.backend === "bedrock" ? "Bedrock" : "Anthropic API",
             tokens: m.totals.total_tokens,
-            usd: m.totals.usd,
-            krw: m.totals.krw,
           }))}
-          showCost={showCost}
         />
         <BreakdownPanel
           title="프로젝트별 (cwd)"
@@ -223,10 +179,7 @@ function CurrentTab({
             label: p.label,
             extra: p.cwd,
             tokens: p.totals.total_tokens,
-            usd: p.totals.usd,
-            krw: p.totals.krw,
           }))}
-          showCost={showCost}
         />
       </div>
 
@@ -243,7 +196,7 @@ function CurrentTab({
 
 // ---------- 히스토리 탭 (Phase 4.5) -------------------------------------
 
-function HistoryTab({ showCost }: { showCost: boolean }) {
+function HistoryTab() {
   const [daily, setDaily] = useState<CcDailyPoint[] | null>(null);
   const [monthly, setMonthly] = useState<CcDailyPoint[] | null>(null);
   const [yearAgo, setYearAgo] = useState<CcTotals | null>(null);
@@ -259,8 +212,8 @@ function HistoryTab({ showCost }: { showCost: boolean }) {
       if (cancelled) return;
       setDaily(d);
       setMonthly(m);
-      setYearAgo(all.summary.year_ago_today);
-      setTopDays(all.summary.top_days);
+      setYearAgo(all.year_ago_today);
+      setTopDays(all.top_days);
     });
     return () => {
       cancelled = true;
@@ -298,16 +251,16 @@ function HistoryTab({ showCost }: { showCost: boolean }) {
 
       {/* 월별 추이 + 1년 전 비교 */}
       <div className="grid gap-3 lg:grid-cols-2">
-        <MonthlyTrend monthly={monthly} showCost={showCost} />
+        <MonthlyTrend monthly={monthly} />
         <YearAgoCompare yearAgo={yearAgo} />
       </div>
 
-      {/* 가장 비쌌던 날 */}
+      {/* 가장 많이 쓴 날 */}
       {topDays && topDays.length > 0 && (
         <div>
           <SectionHead
             icon={<TrendingUp size={11} className="text-accent-yellow" />}
-            title={showCost ? "가장 비쌌던 날" : "가장 많이 쓴 날"}
+            title="가장 많이 쓴 날"
           />
           <ul className="mt-2 divide-y divide-hairline rounded-md border border-hairline bg-surface-elevated">
             {topDays.map((d) => (
@@ -321,11 +274,6 @@ function HistoryTab({ showCost }: { showCost: boolean }) {
                 <span className="ml-auto font-mono tabular-nums text-on-dark">
                   {fmtTokens(d.totals.total_tokens)}
                 </span>
-                {showCost && (
-                  <span className="font-mono text-[11px] text-stone tabular-nums">
-                    ₩{Math.round(d.totals.krw).toLocaleString()}
-                  </span>
-                )}
               </li>
             ))}
           </ul>
@@ -340,13 +288,7 @@ function totalSpan(daily: CcDailyPoint[]): string {
   return `합계 ${fmtTokens(t)}`;
 }
 
-function MonthlyTrend({
-  monthly,
-  showCost,
-}: {
-  monthly: CcDailyPoint[];
-  showCost: boolean;
-}) {
+function MonthlyTrend({ monthly }: { monthly: CcDailyPoint[] }) {
   const last12 = monthly.slice(-12);
   const max = Math.max(1, ...last12.map((m) => m.totals.total_tokens));
   return (
@@ -372,11 +314,6 @@ function MonthlyTrend({
               <span className="w-20 shrink-0 text-right font-mono text-[11px] tabular-nums text-on-dark">
                 {fmtTokens(m.totals.total_tokens)}
               </span>
-              {showCost && (
-                <span className="w-20 shrink-0 text-right font-mono text-[11px] tabular-nums text-stone">
-                  ₩{Math.round(m.totals.krw).toLocaleString()}
-                </span>
-              )}
             </li>
           );
         })}
@@ -400,11 +337,6 @@ function YearAgoCompare({ yearAgo }: { yearAgo: CcTotals | null }) {
           <div className="mt-0.5 text-[11px] text-stone">
             {yearAgo.calls} calls · {yearAgo.sessions} sessions
           </div>
-          {yearAgo.usd > 0 && (
-            <div className="mt-1 font-mono text-[12px] text-stone tabular-nums">
-              ₩{Math.round(yearAgo.krw).toLocaleString()} / ${yearAgo.usd.toFixed(2)}
-            </div>
-          )}
         </div>
       ) : (
         <p className="mt-2 rounded-md border border-hairline bg-surface-elevated px-3 py-3 text-[11px] text-stone">
@@ -462,7 +394,7 @@ function YearGrass({ daily }: { daily: CcDailyPoint[] }) {
                   key={j}
                   className="h-[10px] w-[10px] rounded-[1px] border border-hairline/30"
                   style={{ background: tint }}
-                  title={`${cell.date} — ${fmtTokens(cell.totals.total_tokens)} tokens · ₩${Math.round(cell.totals.krw).toLocaleString()}`}
+                  title={`${cell.date} — ${fmtTokens(cell.totals.total_tokens)} tokens`}
                 />
               );
             })}
@@ -493,20 +425,11 @@ function SectionHead({
   );
 }
 
-function Stat({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: number;
-  hint?: string;
-}) {
+function Stat({ label, value }: { label: string; value: number }) {
   return (
     <div className="rounded-md border border-hairline bg-surface-elevated px-3 py-2">
       <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-stone">
         <span>{label}</span>
-        {hint && <span className="text-stone/70">· {hint}</span>}
       </div>
       <div className="mt-0.5 font-mono text-[16px] font-medium tabular-nums text-on-dark">
         {fmtTokens(value)}
@@ -519,20 +442,16 @@ type BreakdownRow = {
   label: string;
   extra?: string;
   tokens: number;
-  usd: number;
-  krw: number;
 };
 
 function BreakdownPanel({
   title,
   icon,
   rows,
-  showCost,
 }: {
   title: string;
   icon: React.ReactNode;
   rows: BreakdownRow[];
-  showCost: boolean;
 }) {
   if (rows.length === 0) return null;
   const totalT = rows.reduce((s, r) => s + r.tokens, 0);
@@ -564,11 +483,6 @@ function BreakdownPanel({
               <span className="shrink-0 font-mono text-[11px] tabular-nums text-on-dark">
                 {fmtTokens(r.tokens)}
               </span>
-              {showCost && (
-                <span className="shrink-0 font-mono text-[11px] tabular-nums text-stone">
-                  ₩{Math.round(r.krw).toLocaleString()}
-                </span>
-              )}
             </li>
           );
         })}
@@ -739,30 +653,9 @@ function RangeToggle({
   );
 }
 
-function ModeBadge({ mode }: { mode: CcEffectiveMode }) {
-  const map: Record<CcEffectiveMode, { text: string; tone: string }> = {
-    bedrock: { text: "Bedrock", tone: "text-accent-blue" },
-    api_key: { text: "API key", tone: "text-accent-green" },
-    subscription: { text: "Subscription", tone: "text-accent-yellow" },
-    mixed: { text: "Mixed", tone: "text-on-dark" },
-    unknown: { text: "—", tone: "text-stone" },
-  };
-  const m = map[mode];
-  return (
-    <span
-      className={cn(
-        "ml-1 rounded-xs border border-hairline bg-surface-elevated px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider",
-        m.tone,
-      )}
-    >
-      {m.text}
-    </span>
-  );
-}
-
 // ---------- 빈/오류 상태 ------------------------------------------------
 
-function EmptyState({ mode }: { mode: CcEffectiveMode }) {
+function EmptyState() {
   return (
     <div className="px-4 py-10 text-center">
       <div className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-hairline bg-surface-elevated">
@@ -770,9 +663,8 @@ function EmptyState({ mode }: { mode: CcEffectiveMode }) {
       </div>
       <p className="text-[13px] text-on-dark">아직 사용량이 없어요.</p>
       <p className="mt-1 text-[11px] text-stone">
-        {mode === "unknown"
-          ? "~/.claude/projects 에 transcript 가 없습니다. Claude Code 를 한 번이라도 실행하면 자동으로 채워집니다."
-          : "선택한 기간에 호출이 없어요. 다른 기간을 선택해보세요."}
+        선택한 기간에 호출이 없어요. ~/.claude/projects 에 transcript 가 쌓이면
+        자동으로 채워집니다.
       </p>
     </div>
   );
