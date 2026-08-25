@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.0" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.1-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.1" />
   </a>
 </p>
 
@@ -29,10 +29,16 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.8.0-success" alt="version 0.8.0" />
+  <img src="https://img.shields.io/badge/version-0.8.1-success" alt="version 0.8.1" />
 </p>
 
 ---
+
+## What's new in v0.8.1
+
+**Apple Silicon 네이티브 빌드 고정.**
+
+- 🍎 **"Intel 기반 앱 지원 종료" 경고 해결** — 릴리즈 빌드가 실수로 x86_64(Intel)로 컴파일돼 macOS 가 "미래 버전에서 못 연다"는 경고를 띄우던 문제. 빌드 파이프라인을 rustup arm64 툴체인으로 고정하고 `--target aarch64-apple-darwin` 을 명시해 재발을 막았어요. 이제 순수 Apple Silicon 네이티브 바이너리입니다.
 
 ## What's new in v0.8.0
 

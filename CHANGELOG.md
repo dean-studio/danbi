@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-08-25
+
+### Fixed
+
+- **"Intel 기반 앱 지원 종료" 경고 — Apple Silicon 전용 빌드 고정** — PATH
+  에서 Intel Homebrew rust(`/usr/local/bin/cargo`, host x86_64)가 rustup
+  보다 먼저 잡혀 릴리즈 DMG 가 x86_64 로 빌드되던 문제. 설치된 앱이 Intel
+  슬라이스라 macOS 가 미래 버전 미지원 경고를 띄웠습니다.
+
+### Changed
+
+- `package.json` 의 `bundle` 스크립트가 PATH 에 `~/.cargo/bin`(rustup)을
+  먼저 얹고 `--target aarch64-apple-darwin` 을 명시하도록 변경.
+- `src-tauri/rust-toolchain.toml` 추가 — 채널·타겟을 arm64 로 고정.
+- README: "Apple Silicon · Intel" → "Apple Silicon" 전용 명시.
+
 ## [0.8.0] — 2026-08-25
 
 ### Changed

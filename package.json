@@ -1,7 +1,7 @@
 {
   "name": "danbi",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,7 +10,7 @@
     "tauri": "tauri",
     "dev:restart": "bash scripts/restart-dev.sh",
     "dev:restart:bg": "bash scripts/restart-dev.sh -b",
-    "bundle": "tauri build --bundles dmg"
+    "bundle": "PATH=\"$HOME/.cargo/bin:$PATH\" tauri build --bundles dmg --target aarch64-apple-darwin"
   },
   "dependencies": {
     "@blocknote/core": "^0.50.0",
