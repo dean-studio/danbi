@@ -115,6 +115,11 @@ export type ProjectContextStatus = {
   schema_clipped: boolean;
 };
 
+/** Which external coding agent we're wiring up. Claude Code installs
+ *  skills under `~/.claude/skills/`, Codex under `~/.codex/skills/`;
+ *  both consume the same MCP endpoint and the same SKILL.md format. */
+export type AgentTarget = "claude" | "codex";
+
 export type McpProjectEndpoint = {
   project: string;
   id: string;
@@ -929,13 +934,14 @@ export const ipc = {
       toFolder,
     }),
   /** Install (or refresh) a per-project Danbi skill. Lands at
-   *  `~/.claude/skills/danbi-<slug>/SKILL.md` with the project's scoped
-   *  MCP endpoint baked in. Returns the absolute path. */
-  installSkill: (project: string) =>
-    invoke<string>("install_skill", { project }),
-  /** True if THIS project's skill file exists. */
-  skillStatus: (project: string) =>
-    invoke<boolean>("skill_status", { project }),
+   *  `~/.<agent>/skills/danbi-<slug>/SKILL.md` (`.claude` or `.codex`)
+   *  with the project's scoped MCP endpoint baked in. Returns the
+   *  absolute path. `agent` defaults to Claude Code on the backend. */
+  installSkill: (project: string, agent: AgentTarget = "claude") =>
+    invoke<string>("install_skill", { project, agent }),
+  /** True if THIS project's skill file exists for the given agent. */
+  skillStatus: (project: string, agent: AgentTarget = "claude") =>
+    invoke<boolean>("skill_status", { project, agent }),
   trashList: () => invoke<TrashEntry[]>("trash_list"),
   trashRestore: (id: string) =>
     invoke<TrashEntry>("trash_restore", { id }),

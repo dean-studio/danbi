@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [0.8.2] — 2026-09-02
+
+### Added
+
+- **Codex 연결·Skill 지원 (프로젝트 홈)** — 프로젝트 홈 헤더의 "연결"·
+  "Skill" 버튼을 **에이전트 드롭다운**으로 바꿔 Claude Code / Codex 를 각각
+  선택할 수 있습니다.
+  - **연결** — Claude Code 는 기존 `claude mcp add --transport http …` 명령을
+    복사하고, Codex 는 `~/.codex/config.toml` 에 붙여넣을
+    `[mcp_servers.danbi-<slug>]` 블록(`url` + `[…http_headers]` 에
+    `Authorization = "Bearer …"` 인라인)을 복사합니다. Codex config 는 인라인
+    `bearer_token` 을 거부하지만 `http_headers` 는 정식 지원해서, 환경변수 없이
+    토큰을 한 번에 넘길 수 있습니다.
+  - **Skill** — Claude Code(`~/.claude/skills/`) / Codex(`~/.codex/skills/`)
+    별로 SKILL.md 를 설치·갱신하고, 각 항목에 설치 여부를 표시합니다. vault 의
+    `<project>/SKILL.md` 는 두 에이전트 공용 원본이라 "Skill 수정" 은 그대로
+    한 곳만 편집하면 됩니다.
+
+### Changed
+
+- `install_skill` / `skill_status` 커맨드에 `agent`(`claude` | `codex`)
+  파라미터 추가. 기존 단일 인자 호출부(홈의 일괄 설치, 사이드바 우클릭)는
+  기본값 `claude` 로 동작이 그대로 유지됩니다.
+
 ## [0.8.1] — 2026-08-25
 
 ### Fixed

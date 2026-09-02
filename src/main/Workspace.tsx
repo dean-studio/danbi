@@ -199,7 +199,10 @@ export function Workspace() {
     setTimeout(() => setToast(null), 2400);
   }
 
-  async function copyMcpInstall(project: string) {
+  async function copyMcpInstall(
+    project: string,
+    agent: import("@/lib/ipc").AgentTarget = "claude",
+  ) {
     try {
       const status = await ipc.mcpStatus();
       if (!status.enabled || !status.running) {
@@ -211,13 +214,35 @@ export function Workspace() {
       }
       const endpoint = await ipc.mcpProjectEndpoint(project);
       // Slugify the project name for the MCP server identifier so non-ASCII
-      // project names don't end up in the CLI token (Claude Code uses this as
-      // a server handle; it must match [a-z0-9_-]).
+      // project names don't end up in the CLI token. Both Claude Code and
+      // Codex use this as a server handle; it must match [a-z0-9_-].
       const slug = project
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-+|-+$/g, "");
       const serverName = slug ? `danbi-${slug}` : "danbi";
+
+      if (agent === "codex") {
+        // Codex reads MCP servers from `~/.codex/config.toml`. Its schema
+        // rejects an inline `bearer_token` (only `bearer_token_env_var`),
+        // but `http_headers` is a supported inline header map — so we hand
+        // the user a paste-ready TOML block that carries the token inline,
+        // no env var to wire up. (verified: codex-cli 0.149.1)
+        const block = [
+          `[mcp_servers.${serverName}]`,
+          `url = "${endpoint.url}"`,
+          ``,
+          `[mcp_servers.${serverName}.http_headers]`,
+          `Authorization = "Bearer ${status.token}"`,
+        ].join("\n");
+        await clipboardWriteText(block);
+        flash(
+          "ok",
+          `"${project}" Codex 설정 블록을 복사했어요. ~/.codex/config.toml 에 붙여넣으세요.`,
+        );
+        return;
+      }
+
       const cmd = `claude mcp add --transport http ${serverName} "${endpoint.url}" --header "Authorization: Bearer ${status.token}"`;
       await clipboardWriteText(cmd);
       flash(

@@ -1,8 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   Archive,
   CalendarDays,
   Check,
+  ChevronDown,
   Clock4,
   Copy,
   Edit3,
@@ -24,6 +32,7 @@ import {
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   ipc,
+  type AgentTarget,
   type BriefingResult,
   type DailyNoteRef,
   type DailySnapshot,
@@ -54,7 +63,7 @@ export function ProjectHome({
   project: string;
   onAddDomain: (project: string) => void;
   onOpenGraph: (project: string) => void;
-  onCopyMcpInstall: (project: string) => void;
+  onCopyMcpInstall: (project: string, agent: AgentTarget) => void;
 }) {
   const tree = useApp((s) => s.tree);
   const linkIndex = useApp((s) => s.linkIndex);
@@ -234,7 +243,7 @@ export function ProjectHome({
         <div className="mx-auto max-w-[820px] px-6 py-8">
           <ProjectHero
             project={project}
-            onCopyInstall={() => onCopyMcpInstall(project)}
+            onCopyInstall={(agent) => onCopyMcpInstall(project, agent)}
             onEditSkill={async () => {
               // 사이드바에 SKILL.md 가 안 보이는 vault (예전엔
               // ~/.claude 만 만들고 vault seed 가 없던 케이스) 도
@@ -289,7 +298,7 @@ function ProjectHero({
   onEditSkill,
 }: {
   project: string;
-  onCopyInstall: () => void;
+  onCopyInstall: (agent: AgentTarget) => void;
   onEditSkill: () => void;
 }) {
   const groups = useApp((s) => s.cfg?.project_groups ?? []);
@@ -302,27 +311,45 @@ function ProjectHero({
     return g?.label ?? null;
   }, [groups, project]);
 
-  // Skill installation state. Polled once on mount; re-checked after
-  // the user clicks "설치" so the label flips to "업데이트".
-  const [skillInstalled, setSkillInstalled] = useState(false);
+  // Per-agent skill installation state. Polled once on mount for both
+  // Claude Code and Codex; re-checked after each install so the menu
+  // label flips to "갱신". "Skill 수정" shows once either agent has it
+  // (both render from the same shared vault SKILL.md source).
+  const [skillInstalled, setSkillInstalled] = useState<
+    Record<AgentTarget, boolean>
+  >({ claude: false, codex: false });
   const [skillFlash, setSkillFlash] = useState<string | null>(null);
   useEffect(() => {
-    ipc.skillStatus(project).then(setSkillInstalled).catch(() => {});
+    let alive = true;
+    (["claude", "codex"] as const).forEach((agent) => {
+      ipc
+        .skillStatus(project, agent)
+        .then((ok) => {
+          if (alive) setSkillInstalled((s) => ({ ...s, [agent]: ok }));
+        })
+        .catch(() => {});
+    });
+    return () => {
+      alive = false;
+    };
   }, [project]);
   useEffect(() => {
     if (!skillFlash) return;
     const t = setTimeout(() => setSkillFlash(null), 3500);
     return () => clearTimeout(t);
   }, [skillFlash]);
-  const installSkill = async () => {
+  const anySkillInstalled = skillInstalled.claude || skillInstalled.codex;
+  const installSkill = async (agent: AgentTarget) => {
+    const label = agent === "codex" ? "Codex" : "Claude Code";
     try {
-      const path = await ipc.installSkill(project);
-      setSkillInstalled(true);
-      setSkillFlash(skillInstalled ? "업데이트됨" : "설치됨");
+      const path = await ipc.installSkill(project, agent);
+      const was = skillInstalled[agent];
+      setSkillInstalled((s) => ({ ...s, [agent]: true }));
+      setSkillFlash(`${label} ${was ? "갱신됨" : "설치됨"}`);
       console.log("[danbi] skill installed at", path);
     } catch (e) {
       console.error("[danbi] install skill failed", e);
-      setSkillFlash(`실패: ${e}`);
+      setSkillFlash(`${label} 실패: ${e}`);
     }
   };
 
@@ -346,43 +373,61 @@ function ProjectHero({
          *  title so the user can copy install/MCP cmds without
          *  scrolling. Tooltips carry the full intent. */}
         <div className="flex shrink-0 items-center gap-1.5">
-          {/* 필수 두 개만 헤더에 노출:
-              - Claude Code 연결 (MCP 등록 명령 복사)
-              - Skill 설치/갱신 (Claude Code 의 자동 활성화 가이드)
-              CLAUDE.md 단비 블록은 프로젝트별 강제 규칙이 필요한 사용자만
-              가끔 쓰는 거라 사이드바 우클릭 → "CLAUDE.md 단비 블록 복사"
-              로 옮겨서 헤더 혼선을 줄임. */}
-          <button
-            type="button"
-            onClick={onCopyInstall}
-            title="Claude Code 설치 명령 복사 (필수 1단계)"
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
-          >
-            <Server size={12} /> Claude Code 연결
-          </button>
-          <button
-            type="button"
-            onClick={installSkill}
-            title={
-              skillInstalled
-                ? `~/.claude/skills/danbi-${project}/SKILL.md 갱신 — 사이드바의 SKILL.md 를 편집한 뒤 누르면 ~/.claude 로 동기화됩니다`
-                : `~/.claude/skills/danbi-${project}/SKILL.md 설치 (필수 2단계) — 처음 설치 시 사이드바에 편집 가능한 SKILL.md 가 생성됩니다`
-            }
-            className={cn(
-              "inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-[12px] transition-colors",
-              skillInstalled
-                ? "border-accent-green/40 bg-accent-green-soft text-accent-green hover:border-accent-green"
-                : "border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark",
-            )}
-          >
-            <Sparkles size={12} />
-            {skillInstalled ? "Skill 갱신" : "Skill 설치"}
-          </button>
-          {skillInstalled && (
+          {/* 헤더 필수 액션 — 에이전트(Claude Code / Codex)별로 갈래가
+              있어 각각 드롭다운으로 노출:
+              - 연결: MCP 등록. Claude Code = `claude mcp add` 명령,
+                Codex = ~/.codex/config.toml 블록.
+              - Skill: 자동 활성화 가이드 설치/갱신 (~/.claude 또는 ~/.codex).
+              CLAUDE.md 단비 블록은 사이드바 우클릭 메뉴로 옮겨 헤더 혼선을
+              줄임. "Skill 수정" 은 두 에이전트 공용 vault 원본을 편집. */}
+          <AgentMenu
+            label="연결"
+            icon={<Server size={12} />}
+            title="MCP 연결 (필수 1단계) — 에이전트를 선택하세요"
+            items={[
+              {
+                agent: "claude",
+                label: "Claude Code",
+                hint: "claude mcp add 명령 복사",
+              },
+              {
+                agent: "codex",
+                label: "Codex",
+                hint: "~/.codex/config.toml 블록 복사",
+              },
+            ]}
+            onSelect={onCopyInstall}
+          />
+          <AgentMenu
+            label="Skill"
+            icon={<Sparkles size={12} />}
+            title="자동 활성화 SKILL.md 설치/갱신 (필수 2단계)"
+            active={anySkillInstalled}
+            items={[
+              {
+                agent: "claude",
+                label: "Claude Code",
+                hint: skillInstalled.claude
+                  ? "~/.claude 로 갱신"
+                  : "~/.claude 에 설치",
+                done: skillInstalled.claude,
+              },
+              {
+                agent: "codex",
+                label: "Codex",
+                hint: skillInstalled.codex
+                  ? "~/.codex 로 갱신"
+                  : "~/.codex 에 설치",
+                done: skillInstalled.codex,
+              },
+            ]}
+            onSelect={installSkill}
+          />
+          {anySkillInstalled && (
             <button
               type="button"
               onClick={onEditSkill}
-              title={`${project}/SKILL.md 편집 — 저장 후 'Skill 갱신' 누르면 ~/.claude 로 동기화됩니다`}
+              title={`${project}/SKILL.md 편집 (Claude Code · Codex 공용 원본) — 저장 후 'Skill' 에서 갱신하면 각 에이전트로 동기화됩니다`}
               className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
             >
               <Edit3 size={12} /> Skill 수정
@@ -402,8 +447,120 @@ function ProjectHero({
         </div>
       </div>
       {skillFlash && (
-        <div className="self-end text-[11px] text-accent-green">
-          ✓ Skill {skillFlash}
+        <div
+          className={cn(
+            "self-end text-[11px]",
+            skillFlash.includes("실패")
+              ? "text-accent-red"
+              : "text-accent-green",
+          )}
+        >
+          {skillFlash.includes("실패") ? "✕" : "✓"} Skill · {skillFlash}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Small header dropdown that fans a single action (연결 / Skill) out
+ *  across coding agents (Claude Code · Codex). Keeps the header button
+ *  count flat while staying extensible to future agents. Closes on
+ *  outside-click or Esc. No drop-shadow (DESIGN.md) — the menu sits on
+ *  the surface-card rung above surface-elevated with a hairline border. */
+function AgentMenu({
+  label,
+  icon,
+  title,
+  items,
+  onSelect,
+  active = false,
+}: {
+  label: string;
+  icon: ReactNode;
+  title: string;
+  items: Array<{
+    agent: AgentTarget;
+    label: string;
+    hint?: string;
+    done?: boolean;
+  }>;
+  onSelect: (agent: AgentTarget) => void;
+  active?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        title={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={cn(
+          "inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-[12px] transition-colors",
+          active
+            ? "border-accent-green/40 bg-accent-green-soft text-accent-green hover:border-accent-green"
+            : "border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark",
+        )}
+      >
+        {icon}
+        {label}
+        <ChevronDown
+          size={11}
+          className={cn(
+            "opacity-60 transition-transform",
+            open && "rotate-180",
+          )}
+        />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          className="absolute right-0 top-full z-30 mt-1 min-w-[210px] overflow-hidden rounded-md border border-hairline bg-surface-card py-1"
+        >
+          {items.map((it) => (
+            <button
+              key={it.agent}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setOpen(false);
+                onSelect(it.agent);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-body transition-colors hover:bg-surface-elevated hover:text-on-dark"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="text-on-dark">{it.label}</span>
+                {it.hint && (
+                  <span className="ml-1.5 text-[11px] text-stone">
+                    {it.hint}
+                  </span>
+                )}
+              </span>
+              {it.done && (
+                <Check size={12} className="shrink-0 text-accent-green" />
+              )}
+            </button>
+          ))}
         </div>
       )}
     </div>

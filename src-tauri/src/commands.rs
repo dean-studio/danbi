@@ -3733,6 +3733,17 @@ fn short_hash(s: &str) -> String {
     format!("{:08x}", (h.finish() as u32))
 }
 
+/// Root config dir for a coding agent's skills. Claude Code reads
+/// `~/.claude/skills/`, Codex reads `~/.codex/skills/`. The SKILL.md
+/// format is identical for both, so only the root differs. Unknown /
+/// missing values fall back to Claude Code (the original behaviour).
+fn agent_skill_root(agent: Option<&str>) -> &'static str {
+    match agent {
+        Some("codex") => ".codex",
+        _ => ".claude",
+    }
+}
+
 /// Resolve the project's scoped MCP URL using the running config + the
 /// project's stable `.danbi-id`. Falls back to a placeholder when MCP
 /// isn't configured yet so the skill still installs cleanly.
@@ -3760,7 +3771,7 @@ fn project_mcp_url(vault_path: &std::path::Path, project: &str) -> String {
 /// `~/.claude/skills/`. Editing vault's SKILL.md and pressing 갱신
 /// is the round-trip.
 #[tauri::command]
-pub fn install_skill(project: String) -> DanbiResult<String> {
+pub fn install_skill(project: String, agent: Option<String>) -> DanbiResult<String> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
@@ -3769,7 +3780,9 @@ pub fn install_skill(project: String) -> DanbiResult<String> {
 
     // Seed vault's SKILL.md from the default template the first time.
     // The vault copy keeps placeholders so the user can edit it once and
-    // every project's install gets the right substitutions.
+    // every project's install gets the right substitutions. The vault
+    // copy is shared across agents — Claude Code and Codex render from
+    // the same source, only the install destination differs.
     let vault_skill = vault::ensure_project_skill(&vault_path, &project)?;
     let template = std::fs::read_to_string(&vault_skill)
         .map_err(|e| DanbiError::Other(format!("read vault SKILL.md: {e}")))?;
@@ -3780,7 +3793,7 @@ pub fn install_skill(project: String) -> DanbiResult<String> {
     let home = dirs::home_dir()
         .ok_or_else(|| DanbiError::Other("home directory not found".into()))?;
     let skill_dir = home
-        .join(".claude")
+        .join(agent_skill_root(agent.as_deref()))
         .join("skills")
         .join(skill_dir_for(&project));
     std::fs::create_dir_all(&skill_dir)
@@ -3794,13 +3807,13 @@ pub fn install_skill(project: String) -> DanbiResult<String> {
 /// Whether THIS project's skill file exists. Used to swap the header
 /// button between "Skill 설치" and "Skill 갱신".
 #[tauri::command]
-pub fn skill_status(project: String) -> DanbiResult<bool> {
+pub fn skill_status(project: String, agent: Option<String>) -> DanbiResult<bool> {
     let home = match dirs::home_dir() {
         Some(p) => p,
         None => return Ok(false),
     };
     let skill_md = home
-        .join(".claude")
+        .join(agent_skill_root(agent.as_deref()))
         .join("skills")
         .join(skill_dir_for(&project))
         .join("SKILL.md");

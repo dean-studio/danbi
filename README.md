@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.1-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.1" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.2-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.2" />
   </a>
 </p>
 
@@ -29,10 +29,18 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.8.1-success" alt="version 0.8.1" />
+  <img src="https://img.shields.io/badge/version-0.8.2-success" alt="version 0.8.2" />
 </p>
 
 ---
+
+## What's new in v0.8.2
+
+**이제 Codex 도 한 번에 연결돼요.**
+
+- 🔌 **Codex 연결·Skill 지원** — 프로젝트 홈 헤더의 "연결"·"Skill" 버튼이 **에이전트 드롭다운**으로 바뀌어 Claude Code / Codex 를 골라서 붙일 수 있어요.
+  - **연결** — Claude Code 는 `claude mcp add …` 명령을, Codex 는 `~/.codex/config.toml` 에 붙여넣을 `[mcp_servers.danbi-…]` 블록(토큰 인라인)을 복사합니다. 환경변수 세팅 없이 한 번에 끝나요.
+  - **Skill** — Claude Code(`~/.claude/skills/`) / Codex(`~/.codex/skills/`) 별로 SKILL.md 를 설치·갱신. 원본(`<project>/SKILL.md`)은 공용이라 "Skill 수정" 은 한 곳만 편집하면 두 에이전트에 반영됩니다.
 
 ## What's new in v0.8.1
 
