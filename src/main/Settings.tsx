@@ -27,6 +27,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 import { runUpdateCheck } from "@/lib/updater";
+import { useAppVersion } from "@/lib/useAppVersion";
 import appIconUrl from "@/assets/danbi-app-icon.png";
 
 type Section =
@@ -2764,6 +2765,7 @@ function friendlyUpdateError(raw: string): string {
 
 function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
   const updateInfo = useApp((s) => s.updateInfo);
+  const appVersion = useAppVersion();
   const [checking, setChecking] = useState(false);
   const [latestSeen, setLatestSeen] = useState(false);
   const onCheck = async () => {
@@ -2844,7 +2846,7 @@ function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
       <SectionTitle title="시스템" />
       <Row label="버전">
         <code className="rounded-sm border border-hairline bg-surface-elevated px-2 py-1 font-mono text-[11px] text-on-dark-mute">
-          0.3.0
+          {appVersion ?? "…"}
         </code>
       </Row>
       <Row

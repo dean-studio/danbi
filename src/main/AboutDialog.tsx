@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { X } from "lucide-react";
 import appIconUrl from "@/assets/danbi-app-icon.png";
+import { useAppVersion } from "@/lib/useAppVersion";
 
 /**
  * Custom "About Danbi" dialog shown when the macOS app menu "About" item
@@ -19,6 +20,7 @@ export function AboutDialog({
   open: boolean;
   onClose: () => void;
 }) {
+  const version = useAppVersion();
   useEffect(() => {
     if (!open) return;
     function onKey(e: KeyboardEvent) {
@@ -56,7 +58,7 @@ export function AboutDialog({
           <div className="text-center">
             <div className="text-[18px] font-medium text-ink">단비 (Danbi)</div>
             <div className="mt-0.5 text-caption-sm text-mute">
-              Version 0.3.0
+              {version ? `Version ${version}` : " "}
             </div>
           </div>
 
