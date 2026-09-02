@@ -50,7 +50,7 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 use std::time::SystemTime;
@@ -171,7 +171,11 @@ fn projects_dir() -> Option<PathBuf> {
 #[derive(Default)]
 struct FileEntry {
     mtime_ms: i64,
+    /// stat 으로 본 마지막 파일 크기 (변경 감지용).
     size: u64,
+    /// 마지막 개행까지 실제로 소비(파싱)한 바이트 오프셋. transcript 는
+    /// append-only 라 다음 refresh 때 이 지점부터 tail 만 읽으면 된다.
+    parsed_bytes: u64,
     events: Vec<CcEvent>,
 }
 
@@ -217,65 +221,173 @@ fn list_jsonl_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn parse_file(path: &Path) -> std::io::Result<Vec<CcEvent>> {
-    let f = fs::File::open(path)?;
+/// `start` 바이트 오프셋부터 EOF 까지 읽어 **완결된 줄(개행으로 끝나는
+/// 줄)만** 파싱한다. 반환값의 두 번째 요소는 마지막 개행 다음 절대
+/// 오프셋 — 다음 tail 파싱의 시작점이 된다. 아직 개행으로 끝나지 않은
+/// 꼬리(쓰는 중인 부분 줄)는 소비하지 않고 남겨둔다.
+fn parse_from(path: &Path, start: u64) -> std::io::Result<(Vec<CcEvent>, u64)> {
+    let mut f = fs::File::open(path)?;
+    if start > 0 {
+        f.seek(SeekFrom::Start(start))?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+
+    // 마지막 개행 위치까지만 "완결" 로 간주.
+    let complete_end = match buf.iter().rposition(|&b| b == b'\n') {
+        Some(i) => i + 1,
+        None => 0,
+    };
+
     let mut events = Vec::new();
-    for line in BufReader::new(f).lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Some(ev) = parse_line(&line) {
-            events.push(ev);
+    let mut line_start = 0usize;
+    for i in 0..complete_end {
+        if buf[i] == b'\n' {
+            if let Ok(s) = std::str::from_utf8(&buf[line_start..i]) {
+                let t = s.trim();
+                if !t.is_empty() {
+                    if let Some(ev) = parse_line(t) {
+                        events.push(ev);
+                    }
+                }
+            }
+            line_start = i + 1;
         }
     }
-    Ok(events)
+    Ok((events, start + complete_end as u64))
 }
 
-/// 모든 transcript 캐시를 최신화(증분). 변경된 파일만 재파싱하고,
-/// 이벤트 자체는 캐시에 그대로 둔다 — 복사하지 않는다.
+/// 캐시 반영 액션. 파싱은 락 밖에서 끝내고, 짧게 write-lock 을 잡아
+/// 결과만 반영한다.
+enum CacheUpdate {
+    /// `from` 오프셋부터 tail 만 파싱한 델타. append-only 파일용.
+    Append {
+        from: u64,
+        events: Vec<CcEvent>,
+        parsed_bytes: u64,
+        mtime_ms: i64,
+        size: u64,
+    },
+    /// 신규 / 잘림·회전 파일 — 전체 재파싱.
+    Replace {
+        events: Vec<CcEvent>,
+        parsed_bytes: u64,
+        mtime_ms: i64,
+        size: u64,
+    },
+}
+
+/// 모든 transcript 캐시를 최신화(증분).
+///
+/// v0.8.3: 예전 구현은 mtime/size 가 바뀐 파일을 **통째로** 다시 파싱했다.
+/// Claude Code 가 활성 세션 transcript 에 계속 append 하므로, 팝오버를
+/// 열거나 창에 포커스가 갈 때마다 수백 MB(하루 300M 토큰이면 활성 파일
+/// 합계 400MB+)를 매번 처음부터 JSON 파싱 → 메뉴바 팝오버 버벅임의 주범.
+/// transcript 는 append-only 라, 마지막으로 소비한 오프셋(`parsed_bytes`)
+/// 이후의 새 바이트만 파싱한다. 파일이 줄거나(size < parsed_bytes) 사라진
+/// 뒤 새로 생기면 전체 재파싱으로 안전하게 폴백.
 fn refresh_cache() {
     let Some(root) = projects_dir() else {
         return;
     };
     let files = list_jsonl_files(&root);
 
-    // 1) 캐시 무효 항목만 다시 파싱.
-    let mut to_reparse: Vec<(PathBuf, i64, u64)> = Vec::new();
-    {
-        let cache = cache().read().ok();
+    // 1) read-lock 으로 이전 상태 스냅샷만 확보 (파싱은 락 밖에서).
+    let mut prev: HashMap<PathBuf, (i64, u64, u64)> = HashMap::new();
+    if let Ok(cache) = cache().read() {
         for path in &files {
-            let Ok(meta) = fs::metadata(path) else { continue };
-            let m = mtime_ms(&meta);
-            let s = meta.len();
-            let needs = match cache.as_ref().and_then(|c| c.files.get(path)) {
-                Some(entry) => entry.mtime_ms != m || entry.size != s,
-                None => true,
-            };
-            if needs {
-                to_reparse.push((path.clone(), m, s));
+            if let Some(e) = cache.files.get(path) {
+                prev.insert(path.clone(), (e.mtime_ms, e.size, e.parsed_bytes));
             }
         }
     }
 
-    if !to_reparse.is_empty() {
-        if let Ok(mut cache) = cache().write() {
-            for (path, m, s) in to_reparse {
-                let events = parse_file(&path).unwrap_or_default();
-                cache.files.insert(
-                    path,
-                    FileEntry {
-                        mtime_ms: m,
-                        size: s,
-                        events,
-                    },
-                );
+    // 2) 락 없이 변경분만 파싱.
+    let mut work: Vec<(PathBuf, CacheUpdate)> = Vec::new();
+    for path in &files {
+        let Ok(meta) = fs::metadata(path) else { continue };
+        let m = mtime_ms(&meta);
+        let s = meta.len();
+        match prev.get(path) {
+            // 변화 없음 → skip.
+            Some(&(pm, ps, _)) if pm == m && ps == s => {}
+            // append-only 성장(또는 mtime 만 갱신) → tail 만.
+            Some(&(_, _, parsed)) if s >= parsed => {
+                if let Ok((events, new_parsed)) = parse_from(path, parsed) {
+                    work.push((
+                        path.clone(),
+                        CacheUpdate::Append {
+                            from: parsed,
+                            events,
+                            parsed_bytes: new_parsed,
+                            mtime_ms: m,
+                            size: s,
+                        },
+                    ));
+                }
             }
-            // 사라진 파일은 캐시에서 제거.
-            let alive: std::collections::HashSet<&Path> =
-                files.iter().map(|p| p.as_path()).collect();
-            cache.files.retain(|p, _| alive.contains(p.as_path()));
+            // 신규 or 잘림/회전 → 전체.
+            _ => {
+                if let Ok((events, new_parsed)) = parse_from(path, 0) {
+                    work.push((
+                        path.clone(),
+                        CacheUpdate::Replace {
+                            events,
+                            parsed_bytes: new_parsed,
+                            mtime_ms: m,
+                            size: s,
+                        },
+                    ));
+                }
+            }
         }
+    }
+
+    // 3) 짧게 write-lock 을 잡고 반영 + 죽은 파일 정리.
+    if let Ok(mut cache) = cache().write() {
+        for (path, update) in work {
+            match update {
+                CacheUpdate::Append {
+                    from,
+                    mut events,
+                    parsed_bytes,
+                    mtime_ms,
+                    size,
+                } => {
+                    // 스냅샷 이후 다른 스레드가 먼저 진행시켰으면(오프셋 불일치)
+                    // 이 델타는 버린다 — 이중 집계 방지. 그 파일은 이미 최신.
+                    if let Some(entry) = cache.files.get_mut(&path) {
+                        if entry.parsed_bytes == from {
+                            entry.events.append(&mut events);
+                            entry.parsed_bytes = parsed_bytes;
+                            entry.mtime_ms = mtime_ms;
+                            entry.size = size;
+                        }
+                    }
+                    // entry 가 사라졌으면 skip — 다음 refresh 가 전체 재파싱.
+                }
+                CacheUpdate::Replace {
+                    events,
+                    parsed_bytes,
+                    mtime_ms,
+                    size,
+                } => {
+                    cache.files.insert(
+                        path,
+                        FileEntry {
+                            mtime_ms,
+                            size,
+                            parsed_bytes,
+                            events,
+                        },
+                    );
+                }
+            }
+        }
+        // 사라진 파일은 캐시에서 제거.
+        let alive: std::collections::HashSet<&Path> =
+            files.iter().map(|p| p.as_path()).collect();
+        cache.files.retain(|p, _| alive.contains(p.as_path()));
     }
 }
 

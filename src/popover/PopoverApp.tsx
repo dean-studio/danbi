@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ArrowRight, ChevronRight, Coins, Power } from "lucide-react";
 import {
   ipc,
@@ -21,6 +21,8 @@ export function PopoverApp() {
   const [activity, setActivity] = useState<ActivityOverview | null>(null);
   const [usage, setUsage] = useState<CcSummary | null>(null);
   const [usageEnabled, setUsageEnabled] = useState(true);
+  // 마지막 refresh 시각 — focus 연타 시 재조회를 throttle 한다.
+  const lastRefreshRef = useRef(0);
 
   useEffect(() => {
     // 첫 paint 가 끝난 다음 tick 에 IPC 시작 — webview 가 즉시 화면을
@@ -45,6 +47,9 @@ export function PopoverApp() {
 
   useEffect(() => {
     function onFocus() {
+      // 최근 8s 안에 이미 새로고침했으면 skip — 팝오버가 뜬 채 창 포커스가
+      // 오갈 때마다 백엔드를 두드리지 않도록.
+      if (Date.now() - lastRefreshRef.current < 8000) return;
       refresh();
     }
     function onKey(e: KeyboardEvent) {
@@ -61,6 +66,7 @@ export function PopoverApp() {
   }, []);
 
   function refresh() {
+    lastRefreshRef.current = Date.now();
     // 두 호출은 서로 독립이라 병렬로. activity 는 backend 60s TTL 캐시 +
     // 5분 prefetch 가 있어서 보통 즉시 응답이지만, 캐시 miss 첫 호출은
     // 잠깐 걸릴 수 있으니 mcp 표시는 그동안 막지 않음.

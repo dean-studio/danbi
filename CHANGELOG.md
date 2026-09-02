@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+## [0.8.3] — 2026-09-02
+
+### Fixed
+
+- **메뉴바 팝오버 버벅임 — 활성 transcript 전체 재파싱 제거** — 팝오버를
+  열거나 창에 포커스가 갈 때마다 `dashboard_claude_code("today")` 가
+  `~/.claude/projects/**/*.jsonl` 중 **mtime/size 가 바뀐 파일을 통째로**
+  다시 파싱하고 있었습니다. Claude Code 가 활성 세션 transcript 에 계속
+  append 하는 탓에, 하루 300M+ 토큰을 쓰는 날엔 활성 파일 합계 400MB 이상을
+  매 focus 마다 처음부터 JSON 파싱 + 전체 이벤트 정렬 → 수백 ms 스파이크로
+  이어졌습니다 (write-lock 을 잡은 채라 본체 사용량 카드까지 대기).
+  - transcript 는 append-only 라는 점을 이용해 **증분 tail 파싱** 으로 전환.
+    `FileEntry` 에 마지막으로 소비한 오프셋(`parsed_bytes`)을 저장하고, 다음
+    갱신 때 그 지점부터 새로 추가된 바이트만 파싱합니다. 파일이 줄거나
+    회전되면 전체 재파싱으로 안전하게 폴백. 450MB 재파싱 → 수 KB 수준.
+  - `refresh_cache` 를 (1) read-lock 스냅샷 → (2) 락 밖 델타 파싱 →
+    (3) 짧은 write-lock 반영 3단계로 재구성해 락 점유 시간을 최소화.
+    반영 시 오프셋이 어긋나면 델타를 버려 이중 집계를 막습니다.
+  - 팝오버는 창 focus 재조회에 8초 throttle 을 걸어 focus 연타 시 백엔드를
+    반복 호출하지 않습니다.
+  - 같은 경로를 쓰는 **본체 Claude Code 사용량 카드도 함께 빨라집니다.**
+
 ## [0.8.2] — 2026-09-02
 
 ### Added

@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.2-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.2" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.3-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.3" />
   </a>
 </p>
 
@@ -29,10 +29,21 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.8.2-success" alt="version 0.8.2" />
+  <img src="https://img.shields.io/badge/version-0.8.3-success" alt="version 0.8.3" />
 </p>
 
 ---
+
+## What's new in v0.8.3
+
+**메뉴바 팝오버가 다시 즉각적으로.**
+
+- ⚡ **팝오버 버벅임 제거 — 활성 transcript 증분 파싱** — 팝오버를 열거나 창에
+  포커스가 갈 때마다 오늘치 Claude Code 사용량을 계산하느라 `~/.claude` 의
+  활성 세션 로그(하루 300M+ 토큰 쓰는 날엔 합계 400MB 이상)를 **매번 처음부터
+  다시 파싱**하던 게 원인이었어요. transcript 가 append-only 인 점을 이용해
+  마지막으로 읽은 지점 이후 **새로 추가된 부분만** 파싱하도록 바꿔, 450MB 재파싱을
+  수 KB 수준으로 줄였습니다. 본체의 Claude Code 사용량 카드도 함께 빨라져요.
 
 ## What's new in v0.8.2
 
