@@ -2794,7 +2794,7 @@ function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
         <div className="text-center">
           <div className="text-[18px] font-medium text-ink">단비 (Danbi)</div>
           <div className="mt-0.5 text-caption-sm text-mute">
-            v0.3.0 · © 2026 Dean Works inc.
+            {appVersion ? `v${appVersion}` : "단비"} · © 2026 Dean Works inc.
           </div>
         </div>
       </div>

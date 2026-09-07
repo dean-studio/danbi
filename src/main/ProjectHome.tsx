@@ -338,7 +338,6 @@ function ProjectHero({
     const t = setTimeout(() => setSkillFlash(null), 3500);
     return () => clearTimeout(t);
   }, [skillFlash]);
-  const anySkillInstalled = skillInstalled.claude || skillInstalled.codex;
   const installSkill = async (agent: AgentTarget) => {
     const label = agent === "codex" ? "Codex" : "Claude Code";
     try {
@@ -369,81 +368,36 @@ function ProjectHero({
             {project}
           </h1>
         </div>
-        {/* Compact Claude Code connect actions — sits next to the
-         *  title so the user can copy install/MCP cmds without
-         *  scrolling. Tooltips carry the full intent. */}
-        <div className="flex shrink-0 items-center gap-1.5">
-          {/* 헤더 필수 액션 — 에이전트(Claude Code / Codex)별로 갈래가
-              있어 각각 드롭다운으로 노출:
-              - 연결: MCP 등록. Claude Code = `claude mcp add` 명령,
-                Codex = ~/.codex/config.toml 블록.
-              - Skill: 자동 활성화 가이드 설치/갱신 (~/.claude 또는 ~/.codex).
-              CLAUDE.md 단비 블록은 사이드바 우클릭 메뉴로 옮겨 헤더 혼선을
-              줄임. "Skill 수정" 은 두 에이전트 공용 vault 원본을 편집. */}
-          <AgentMenu
-            label="연결"
-            icon={<Server size={12} />}
-            title="MCP 연결 (필수 1단계) — 에이전트를 선택하세요"
-            items={[
-              {
-                agent: "claude",
-                label: "Claude Code",
-                hint: "claude mcp add 명령 복사",
-              },
-              {
-                agent: "codex",
-                label: "Codex",
-                hint: "~/.codex/config.toml 블록 복사",
-              },
-            ]}
-            onSelect={onCopyInstall}
+        {/* 에이전트별 연결 액션 — Codex / Claude Code 각각 한 줄씩,
+         *  [연결] [Skill] [Skill 수정] 3버튼을 그대로 노출. 드롭다운을
+         *  없애 한눈에 두 에이전트를 다 볼 수 있게 함 (사용자 요청).
+         *  - 연결: MCP 등록. Codex = ~/.codex/config.toml 에 직접 기록
+         *    (이미 있으면 그 자리를 교체, 중복 X). Claude Code =
+         *    `claude mcp add` 명령 복사.
+         *  - Skill: 자동 활성화 SKILL.md 설치/갱신 (~/.codex 또는 ~/.claude).
+         *  - Skill 수정: 두 에이전트 공용 vault 원본(SKILL.md) 편집. */}
+        <div className="flex shrink-0 flex-col items-stretch gap-1.5">
+          <AgentActionRow
+            agentLabel="Codex"
+            agentIcon={<CodexIcon size={13} />}
+            connectHint={`${project} → ~/.codex/config.toml 에 바로 연결 (이미 있으면 갱신)`}
+            onConnect={() => onCopyInstall("codex")}
+            skillDone={skillInstalled.codex}
+            onSkill={() => installSkill("codex")}
+            onEditSkill={onEditSkill}
+            project={project}
           />
-          <AgentMenu
-            label="Skill"
-            icon={<Sparkles size={12} />}
-            title="자동 활성화 SKILL.md 설치/갱신 (필수 2단계)"
-            active={anySkillInstalled}
-            items={[
-              {
-                agent: "claude",
-                label: "Claude Code",
-                hint: skillInstalled.claude
-                  ? "~/.claude 로 갱신"
-                  : "~/.claude 에 설치",
-                done: skillInstalled.claude,
-              },
-              {
-                agent: "codex",
-                label: "Codex",
-                hint: skillInstalled.codex
-                  ? "~/.codex 로 갱신"
-                  : "~/.codex 에 설치",
-                done: skillInstalled.codex,
-              },
-            ]}
-            onSelect={installSkill}
+          <div className="h-px bg-hairline" />
+          <AgentActionRow
+            agentLabel="Claude Code"
+            agentIcon={<ClaudeIcon size={13} />}
+            connectHint={`${project} → claude mcp add 명령 복사`}
+            onConnect={() => onCopyInstall("claude")}
+            skillDone={skillInstalled.claude}
+            onSkill={() => installSkill("claude")}
+            onEditSkill={onEditSkill}
+            project={project}
           />
-          {anySkillInstalled && (
-            <button
-              type="button"
-              onClick={onEditSkill}
-              title={`${project}/SKILL.md 편집 (Claude Code · Codex 공용 원본) — 저장 후 'Skill' 에서 갱신하면 각 에이전트로 동기화됩니다`}
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
-            >
-              <Edit3 size={12} /> Skill 수정
-            </button>
-          )}
-          <WeeklySummaryButton project={project} />
-          {/* CLAUDE.md 버튼 보존 (필요시 다시 노출):
-          <button
-            type="button"
-            onClick={onCopyClaudeMd}
-            title="CLAUDE.md 단비 블록 복사 (프로젝트별 강제 규칙)"
-            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
-          >
-            <Copy size={12} /> CLAUDE.md
-          </button>
-          */}
         </div>
       </div>
       {skillFlash && (
@@ -462,11 +416,126 @@ function ProjectHero({
   );
 }
 
+/** OpenAI/Codex 로고마크 (공식 knot). 단색 currentColor 로 렌더해
+ *  라벨 텍스트 톤과 어울리게. */
+function CodexIcon({ size = 13 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z" />
+    </svg>
+  );
+}
+
+/** Anthropic/Claude 로고마크 — 방사형 burst. 브랜드 terracotta 로 고정해
+ *  Codex 와 한눈에 구분되게. */
+function ClaudeIcon({ size = 13 }: { size?: number }) {
+  const rays = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330];
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <g stroke="#D97757" strokeWidth="2.1" strokeLinecap="round">
+        {rays.map((deg) => {
+          const r = (deg * Math.PI) / 180;
+          return (
+            <line
+              key={deg}
+              x1={12}
+              y1={12}
+              x2={12 + 8.5 * Math.cos(r)}
+              y2={12 + 8.5 * Math.sin(r)}
+            />
+          );
+        })}
+      </g>
+    </svg>
+  );
+}
+
+/** One agent's connect row: [agent label] [연결] [Skill] [Skill 수정].
+ *  Rendered once per coding agent (Codex, Claude Code) so both are
+ *  visible at a glance — no dropdown. The Skill button flips to the
+ *  accent-green "installed" tone (with a ✓) once its SKILL.md exists;
+ *  pressing it again re-renders from the shared vault source. "Skill
+ *  수정" edits that shared source, so it's identical across rows. */
+function AgentActionRow({
+  agentLabel,
+  agentIcon,
+  connectHint,
+  onConnect,
+  skillDone,
+  onSkill,
+  onEditSkill,
+  project,
+}: {
+  agentLabel: string;
+  agentIcon: ReactNode;
+  connectHint: string;
+  onConnect: () => void;
+  skillDone: boolean;
+  onSkill: () => void;
+  onEditSkill: () => void;
+  project: string;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="flex w-[100px] shrink-0 items-center justify-end gap-1.5 text-[11px] font-medium tracking-[0.2px] text-mute">
+        {agentIcon}
+        {agentLabel}
+      </span>
+      <button
+        type="button"
+        onClick={onConnect}
+        title={connectHint}
+        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
+      >
+        <Server size={12} /> 연결
+      </button>
+      <button
+        type="button"
+        onClick={onSkill}
+        title={
+          skillDone
+            ? `${agentLabel} 용 SKILL.md 갱신`
+            : `${agentLabel} 용 SKILL.md 설치`
+        }
+        className={cn(
+          "inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-[12px] transition-colors",
+          skillDone
+            ? "border-accent-green/40 bg-accent-green-soft text-accent-green hover:border-accent-green"
+            : "border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark",
+        )}
+      >
+        <Sparkles size={12} /> Skill
+        {skillDone && <Check size={12} className="text-accent-green" />}
+      </button>
+      <button
+        type="button"
+        onClick={onEditSkill}
+        title={`${project}/SKILL.md 편집 (Codex · Claude Code 공용 원본) — 저장 후 'Skill' 로 갱신하면 각 에이전트에 반영됩니다`}
+        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
+      >
+        <Edit3 size={12} /> Skill 수정
+      </button>
+    </div>
+  );
+}
+
 /** Small header dropdown that fans a single action (연결 / Skill) out
  *  across coding agents (Claude Code · Codex). Keeps the header button
  *  count flat while staying extensible to future agents. Closes on
  *  outside-click or Esc. No drop-shadow (DESIGN.md) — the menu sits on
- *  the surface-card rung above surface-elevated with a hairline border. */
+ *  the surface-card rung above surface-elevated with a hairline border.
+ *  Parked (replaced by AgentActionRow) — kept for potential reuse. */
 function AgentMenu({
   label,
   icon,
@@ -1827,6 +1896,10 @@ export {
   _Stat,
   _prettyBytes,
   _timeAgo,
+  // Parked after the header was split into per-agent AgentActionRow rows
+  // and 주간 회고 was dropped — kept in the bundle for potential reuse.
+  AgentMenu,
+  WeeklySummaryButton,
 };
 
 /** Inline action card on the project home — three big affordances:

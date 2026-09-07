@@ -3820,6 +3820,184 @@ pub fn skill_status(project: String, agent: Option<String>) -> DanbiResult<bool>
     Ok(skill_md.exists())
 }
 
+/// MCP server handle for a project, mirroring the frontend slug logic
+/// (`danbi-<slug>` where the slug lowercases and replaces runs of
+/// non-`[a-z0-9]` with `-`). Wholly non-ASCII names (Korean etc.) reduce
+/// to an empty slug → bare `danbi`. Kept byte-for-byte identical to
+/// `copyMcpInstall` so the file we write matches what users used to paste.
+fn codex_server_name(project: &str) -> String {
+    let lower = project.to_lowercase();
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for c in lower.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        "danbi".to_string()
+    } else {
+        format!("danbi-{slug}")
+    }
+}
+
+#[derive(Serialize)]
+pub struct CodexConnectResult {
+    pub path: String,
+    pub server_name: String,
+    /// "added" when the block was newly inserted, "updated" when an
+    /// existing `[mcp_servers.<name>]` group was replaced in place.
+    pub action: String,
+}
+
+/// Write (or refresh) the Danbi MCP block directly into
+/// `~/.codex/config.toml`. Codex reads MCP servers only at startup, so
+/// this saves the user the copy-paste step. Idempotent: if a
+/// `[mcp_servers.<name>]` group (plus its `.http_headers` subtable) is
+/// already present it is replaced in place rather than duplicated —
+/// re-pressing 연결 never stacks blocks. All other content (comments,
+/// unrelated servers) is preserved verbatim via line-based editing.
+#[tauri::command]
+pub fn codex_connect(app: AppHandle, project: String) -> DanbiResult<CodexConnectResult> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    if !cfg.mcp.enabled {
+        return Err(DanbiError::Other(
+            "MCP 서버가 꺼져 있어요. 설정 → MCP 에서 먼저 켜주세요.".into(),
+        ));
+    }
+    let server = app.state::<crate::mcp::McpServer>();
+    if server.info().is_none() {
+        return Err(DanbiError::Other(
+            "MCP 서버가 실행 중이 아니에요. 설정 → MCP 에서 켜주세요.".into(),
+        ));
+    }
+    let vault_path = require_vault(&cfg)?;
+    let id = vault::ensure_project_id(&vault_path, &project)?;
+    let url = format!("http://127.0.0.1:{}/mcp/{id}", cfg.mcp.port);
+    let token = cfg.mcp.token.clone();
+    let server_name = codex_server_name(&project);
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| DanbiError::Other("home directory not found".into()))?;
+    let codex_dir = home.join(".codex");
+    std::fs::create_dir_all(&codex_dir)
+        .map_err(|e| DanbiError::Other(format!("create ~/.codex: {e}")))?;
+    let config_path = codex_dir.join("config.toml");
+    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+
+    let (merged, replaced) = merge_codex_block(&existing, &server_name, &url, &token);
+    std::fs::write(&config_path, &merged)
+        .map_err(|e| DanbiError::Other(format!("write config.toml: {e}")))?;
+
+    Ok(CodexConnectResult {
+        path: config_path.to_string_lossy().to_string(),
+        server_name,
+        action: if replaced { "updated" } else { "added" }.to_string(),
+    })
+}
+
+/// Line-based merge of the Danbi MCP TOML block into an existing
+/// `config.toml` body. Returns `(new_body, replaced)` where `replaced`
+/// is true when a pre-existing `[mcp_servers.<name>]` group was found and
+/// swapped out (vs. appended fresh).
+///
+/// A "group" is the `[mcp_servers.<name>]` table plus any of its dotted
+/// subtables (`[mcp_servers.<name>.http_headers]`, …). Removal drops the
+/// group's header lines and everything under them up to the next
+/// unrelated table header, plus a preceding `# danbi:mcp <name>` marker
+/// line if we wrote one before. Everything else is left byte-identical.
+fn merge_codex_block(
+    existing: &str,
+    server_name: &str,
+    url: &str,
+    token: &str,
+) -> (String, bool) {
+    let marker = format!("# danbi:mcp {server_name}");
+    let block = format!(
+        "{marker}\n[mcp_servers.{server_name}]\nurl = \"{url}\"\n\n[mcp_servers.{server_name}.http_headers]\nAuthorization = \"Bearer {token}\"\n"
+    );
+
+    // Does a header belong to our server's group?
+    let group_prefix_eq = format!("mcp_servers.{server_name}");
+    let group_prefix_dot = format!("mcp_servers.{server_name}.");
+    let belongs = |header: &str| -> bool {
+        let key = header.trim();
+        key == group_prefix_eq || key.starts_with(&group_prefix_dot)
+    };
+    // Parse a `[table.header]` line → inner key. Ignores `[[array]]`.
+    let table_key = |line: &str| -> Option<String> {
+        let t = line.trim();
+        if t.starts_with('[') && !t.starts_with("[[") && t.ends_with(']') {
+            Some(t[1..t.len() - 1].trim().to_string())
+        } else {
+            None
+        }
+    };
+
+    let mut out: Vec<String> = Vec::new();
+    let mut replaced = false;
+    let mut skipping = false;
+    for line in existing.lines() {
+        if skipping {
+            // Stay in skip mode until we reach a boundary that likely
+            // belongs to the *next* section: an unrelated table header, or
+            // a comment line (which usually labels what follows). This
+            // preserves user comments that sit right after our block. Our
+            // own generated block has no trailing comments, so this never
+            // strands Danbi content.
+            match table_key(line) {
+                Some(key) if belongs(&key) => continue, // subtable of ours
+                Some(_) => {
+                    skipping = false; // unrelated table — stop skipping, fall through
+                }
+                None => {
+                    if line.trim_start().starts_with('#') {
+                        skipping = false; // comment for the next section — keep it
+                    } else {
+                        continue; // key/val or blank inside our group
+                    }
+                }
+            }
+        }
+        if let Some(key) = table_key(line) {
+            if belongs(&key) {
+                replaced = true;
+                skipping = true;
+                // Drop a danbi marker comment we previously emitted right above.
+                if out.last().map(|l| l.trim() == marker).unwrap_or(false) {
+                    out.pop();
+                }
+                continue;
+            }
+        }
+        out.push(line.to_string());
+    }
+
+    // Trim trailing blank lines from the surviving body, then append the
+    // block with a single blank-line separator when there's prior content.
+    while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
+        out.pop();
+    }
+    let mut body = out.join("\n");
+    if body.is_empty() {
+        body = block;
+    } else {
+        body.push_str("\n\n");
+        body.push_str(&block);
+    }
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    (body, replaced)
+}
+
 // ---------- Goals ----------------------------------------------------------
 
 #[tauri::command]
@@ -3961,4 +4139,63 @@ pub fn doc_change_history(
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
     crate::vcs::doc_history(&vault_path, &project, &domain, limit.unwrap_or(40))
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::{codex_server_name, merge_codex_block};
+
+    #[test]
+    fn server_name_matches_frontend_slug() {
+        assert_eq!(codex_server_name("Bonny"), "danbi-bonny");
+        assert_eq!(codex_server_name("side blog"), "danbi-side-blog");
+        assert_eq!(codex_server_name("RAG_v2"), "danbi-rag-v2");
+        // Wholly non-ASCII (Korean) → empty slug → bare danbi.
+        assert_eq!(codex_server_name("지원사업용"), "danbi");
+    }
+
+    #[test]
+    fn adds_block_to_empty_file() {
+        let (out, replaced) = merge_codex_block("", "danbi", "http://x/mcp/1", "TOK");
+        assert!(!replaced);
+        assert!(out.contains("[mcp_servers.danbi]"));
+        assert!(out.contains("url = \"http://x/mcp/1\""));
+        assert!(out.contains("[mcp_servers.danbi.http_headers]"));
+        assert!(out.contains("Authorization = \"Bearer TOK\""));
+        assert!(out.ends_with('\n'));
+    }
+
+    #[test]
+    fn appends_after_unrelated_content() {
+        let existing = "[mcp_servers.node_repl]\nurl = \"http://other\"\n";
+        let (out, replaced) = merge_codex_block(existing, "danbi", "http://x/mcp/1", "TOK");
+        assert!(!replaced);
+        assert!(out.contains("[mcp_servers.node_repl]")); // preserved
+        assert!(out.contains("[mcp_servers.danbi]"));
+    }
+
+    #[test]
+    fn replaces_existing_block_in_place_no_duplicate() {
+        let existing = "# danbi:mcp danbi\n[mcp_servers.danbi]\nurl = \"http://old/mcp/9\"\n\n[mcp_servers.danbi.http_headers]\nAuthorization = \"Bearer OLD\"\n";
+        let (out, replaced) = merge_codex_block(existing, "danbi", "http://new/mcp/1", "NEW");
+        assert!(replaced);
+        // Exactly one occurrence of the table header — no stacking.
+        assert_eq!(out.matches("[mcp_servers.danbi]").count(), 1);
+        assert_eq!(out.matches("[mcp_servers.danbi.http_headers]").count(), 1);
+        assert!(out.contains("http://new/mcp/1"));
+        assert!(out.contains("Bearer NEW"));
+        assert!(!out.contains("http://old/mcp/9"));
+        assert!(!out.contains("Bearer OLD"));
+    }
+
+    #[test]
+    fn preserves_other_servers_when_replacing() {
+        let existing = "[mcp_servers.danbi]\nurl = \"http://old\"\n\n[mcp_servers.danbi.http_headers]\nAuthorization = \"Bearer OLD\"\n\n# my repl\n[mcp_servers.node_repl]\nurl = \"http://other\"\n";
+        let (out, replaced) = merge_codex_block(existing, "danbi", "http://new", "NEW");
+        assert!(replaced);
+        assert!(out.contains("[mcp_servers.node_repl]"));
+        assert!(out.contains("url = \"http://other\""));
+        assert!(out.contains("# my repl")); // comment before next server kept
+        assert_eq!(out.matches("[mcp_servers.danbi]").count(), 1);
+    }
 }

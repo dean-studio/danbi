@@ -544,7 +544,7 @@ async fn handle_rpc(
     State(state): State<McpState>,
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
-) -> (StatusCode, Json<Value>) {
+) -> axum::response::Response {
     run_rpc(&state, &headers, req, None).await
 }
 
@@ -553,7 +553,7 @@ async fn handle_rpc_scoped(
     AxumPath(project_id): AxumPath<String>,
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
-) -> (StatusCode, Json<Value>) {
+) -> axum::response::Response {
     run_rpc(&state, &headers, req, Some(project_id)).await
 }
 
@@ -562,18 +562,31 @@ async fn run_rpc(
     headers: &HeaderMap,
     req: RpcRequest,
     scoped_project_id: Option<String>,
-) -> (StatusCode, Json<Value>) {
+) -> axum::response::Response {
     if req.jsonrpc != "2.0" {
         return (
             StatusCode::BAD_REQUEST,
             Json(rpc_err(req.id, -32600, "jsonrpc must be '2.0'")),
-        );
+        )
+            .into_response();
     }
     if !auth_ok(headers, &state.token) {
         return (
             StatusCode::UNAUTHORIZED,
             Json(rpc_err(req.id, -32000, "invalid or missing bearer token")),
-        );
+        )
+            .into_response();
+    }
+
+    // JSON-RPC notifications carry no `id` and MUST NOT receive a response
+    // object. MCP Streamable HTTP requires the server to answer 202 Accepted
+    // with an empty body. Returning a `{"id":null,...,"result":{}}` object
+    // (as we used to for `notifications/initialized`) makes strict clients —
+    // notably Codex's rmcp client — treat it as a protocol violation and drop
+    // the whole session ("danbi: failed (0 tools)"). Handle every incoming
+    // notification uniformly here, before method dispatch.
+    if req.id.is_none() {
+        return StatusCode::ACCEPTED.into_response();
     }
 
     // Resolve the scoped project (UUID → name) once per request so tool
@@ -592,7 +605,8 @@ async fn run_rpc(
                         -32001,
                         &format!("no project matches id: {id}"),
                     )),
-                );
+                )
+                    .into_response();
             }
             Err(e) => {
                 return (
@@ -602,12 +616,13 @@ async fn run_rpc(
                         -32003,
                         &format!("project lookup failed: {e}"),
                     )),
-                );
+                )
+                    .into_response();
             }
         },
     };
 
-    match req.method.as_str() {
+    let (status, body) = match req.method.as_str() {
         "initialize" => {
             let server_name = match scoped_project.as_ref() {
                 Some(p) => format!("{SERVER_NAME} · {p}"),
@@ -738,7 +753,8 @@ async fn run_rpc(
                 &format!("method not found: {other}"),
             )),
         ),
-    }
+    };
+    (status, body).into_response()
 }
 
 // ---------- Tool catalog ----------

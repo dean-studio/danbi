@@ -557,6 +557,7 @@ pub fn run() {
             commands::move_domain,
             commands::install_skill,
             commands::skill_status,
+            commands::codex_connect,
             commands::trash_list,
             commands::trash_restore,
             commands::trash_purge,

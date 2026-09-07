@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.3-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.3" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.4-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.4" />
   </a>
 </p>
 
@@ -29,10 +29,28 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.8.3-success" alt="version 0.8.3" />
+  <img src="https://img.shields.io/badge/version-0.8.4-success" alt="version 0.8.4" />
 </p>
 
 ---
+
+## What's new in v0.8.4
+
+**Codex 연결이 한 번에, 그리고 중복 없이.**
+
+- 🔌 **Codex MCP 연결 실패(`failed (0 tools)`) 해결** — `notifications/initialized`
+  같은 notification 에 응답 객체를 돌려주던 규약 위반이 원인이었어요. Codex 는
+  이걸 프로토콜 오류로 보고 초기화 중 연결을 끊었습니다. 이제 id 없는 요청은
+  스펙대로 `202 Accepted` 빈 본문으로 응답합니다.
+- 🧩 **"연결" 이 `~/.codex/config.toml` 에 바로 기록** — 클립보드 복사 대신 파일에
+  직접 씁니다. **이미 있으면 그 블록을 제자리에서 교체** 해서, 여러 번 눌러도
+  설정이 아래로 중복 누적되지 않아요. 다른 서버 항목·주석은 그대로 둡니다.
+- 🎛 **프로젝트 홈 헤더 재구성** — 드롭다운을 없애고 **Codex** / **Claude Code**
+  를 각각 한 줄씩 `[연결] [Skill] [Skill 수정]` 로 펼쳐 두 에이전트를 한눈에.
+  두 행 사이엔 구분선, 라벨 앞엔 **OpenAI · Anthropic 브랜드 아이콘** 을 붙여
+  직관적으로 구분돼요. 주간 회고 버튼은 정리했습니다.
+- 🔢 **설정 → 정보 버전 표기 `v0.3.0` 잔존 수정** — 런타임 번들 버전을 읽도록
+  바꿔 실제 릴리즈 버전이 뜹니다.
 
 ## What's new in v0.8.3
 

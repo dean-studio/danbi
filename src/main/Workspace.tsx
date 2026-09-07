@@ -223,22 +223,21 @@ export function Workspace() {
       const serverName = slug ? `danbi-${slug}` : "danbi";
 
       if (agent === "codex") {
-        // Codex reads MCP servers from `~/.codex/config.toml`. Its schema
-        // rejects an inline `bearer_token` (only `bearer_token_env_var`),
-        // but `http_headers` is a supported inline header map — so we hand
-        // the user a paste-ready TOML block that carries the token inline,
-        // no env var to wire up. (verified: codex-cli 0.149.1)
-        const block = [
-          `[mcp_servers.${serverName}]`,
-          `url = "${endpoint.url}"`,
-          ``,
-          `[mcp_servers.${serverName}.http_headers]`,
-          `Authorization = "Bearer ${status.token}"`,
-        ].join("\n");
-        await clipboardWriteText(block);
+        // Codex reads MCP servers from `~/.codex/config.toml`. Rather than
+        // hand the user a block to paste (and risk them stacking duplicate
+        // `[mcp_servers.…]` sections on repeat presses), write it straight
+        // into the file. The backend merge replaces an existing Danbi block
+        // in place — idempotent — and preserves everything else verbatim.
+        // Its schema rejects inline `bearer_token`, but `http_headers` is a
+        // supported inline header map, so the token rides along with no env
+        // var to wire up. (verified: codex-cli 0.149.1)
+        void serverName; // server name is derived identically on the backend
+        const res = await ipc.codexConnect(project);
         flash(
           "ok",
-          `"${project}" Codex 설정 블록을 복사했어요. ~/.codex/config.toml 에 붙여넣으세요.`,
+          res.action === "updated"
+            ? `"${project}" Codex 연결을 갱신했어요 (${res.server_name}). Codex 를 재시작하세요.`
+            : `"${project}" 를 ~/.codex/config.toml 에 연결했어요 (${res.server_name}). Codex 를 재시작하세요.`,
         );
         return;
       }
