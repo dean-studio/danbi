@@ -48,6 +48,7 @@ import {
   type TriggerKind,
   type VaultSuggestion,
 } from "@/lib/ipc";
+import { CodexIcon, ClaudeIcon } from "@/components/AgentIcons";
 import { projectIconOf } from "@/components/ProjectIconPicker";
 import { ReindexProgressCard } from "@/main/Settings";
 import { cn } from "@/lib/utils";
@@ -258,6 +259,7 @@ export function ProjectHome({
               selectDomain(project, "SKILL.md");
             }}
           />
+          <ConnectCard project={project} />
           <div className="mt-6">
             <ProjectActions
               project={project}
@@ -416,51 +418,6 @@ function ProjectHero({
   );
 }
 
-/** OpenAI/Codex 로고마크 (공식 knot). 단색 currentColor 로 렌더해
- *  라벨 텍스트 톤과 어울리게. */
-function CodexIcon({ size = 13 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      aria-hidden="true"
-    >
-      <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z" />
-    </svg>
-  );
-}
-
-/** Anthropic/Claude 로고마크 — 방사형 burst. 브랜드 terracotta 로 고정해
- *  Codex 와 한눈에 구분되게. */
-function ClaudeIcon({ size = 13 }: { size?: number }) {
-  const rays = [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330];
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      aria-hidden="true"
-    >
-      <g stroke="#D97757" strokeWidth="2.1" strokeLinecap="round">
-        {rays.map((deg) => {
-          const r = (deg * Math.PI) / 180;
-          return (
-            <line
-              key={deg}
-              x1={12}
-              y1={12}
-              x2={12 + 8.5 * Math.cos(r)}
-              y2={12 + 8.5 * Math.sin(r)}
-            />
-          );
-        })}
-      </g>
-    </svg>
-  );
-}
-
 /** One agent's connect row: [agent label] [연결] [Skill] [Skill 수정].
  *  Rendered once per coding agent (Codex, Claude Code) so both are
  *  visible at a glance — no dropdown. The Skill button flips to the
@@ -526,6 +483,210 @@ function AgentActionRow({
       >
         <Edit3 size={12} /> Skill 수정
       </button>
+    </div>
+  );
+}
+
+/** 첫-연결 안내 카드. 단비의 핵심 사용자는 "이미 Claude Code · Codex 를
+ *  쓰는 사람" 이라, 홈에 처음 들어왔을 때 "그래서 내 에이전트를 어떻게
+ *  붙이지?" 가 바로 이어져야 한다. 아직 어느 에이전트에도 SKILL 이 깔려
+ *  있지 않으면(=미연결로 간주) 이 카드가 히어로 바로 아래에 크게 뜨고,
+ *  연결이 끝나면 자동으로 사라진다. "연결" 한 번에 MCP 등록 + SKILL 설치를
+ *  함께 해서 스텝을 줄이고(#2), 성공/재시작 안내로 결과를 확인시킨다.
+ *
+ *  Codex 는 ~/.codex/config.toml 이 전역이라 원클릭 직접 기록.
+ *  Claude 는 `claude mcp add` 가 cwd(프로젝트) 스코프라 완전 자동화가
+ *  불가능 — 정직하게 명령을 복사해 "당신 프로젝트 폴더에서 실행" 하도록
+ *  안내한다(프로젝트 격리 유지). */
+function ConnectCard({ project }: { project: string }) {
+  const dismissKey = `danbi:connect-card-dismissed:${project}`;
+  const [installed, setInstalled] = useState<Record<AgentTarget, boolean>>({
+    claude: false,
+    codex: false,
+  });
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState<AgentTarget | null>(null);
+  const [dismissed, setDismissed] = useState(false);
+  const [flash, setFlash] = useState<{ kind: "ok" | "err"; msg: string } | null>(
+    null,
+  );
+
+  useEffect(() => {
+    let alive = true;
+    setDismissed(localStorage.getItem(dismissKey) === "1");
+    Promise.all(
+      (["claude", "codex"] as const).map((a) =>
+        ipc.skillStatus(project, a).then((ok) => [a, ok] as const).catch(
+          () => [a, false] as const,
+        ),
+      ),
+    ).then((pairs) => {
+      if (!alive) return;
+      setInstalled({
+        claude: pairs.find((p) => p[0] === "claude")?.[1] ?? false,
+        codex: pairs.find((p) => p[0] === "codex")?.[1] ?? false,
+      });
+      setLoaded(true);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [project, dismissKey]);
+
+  useEffect(() => {
+    if (!flash) return;
+    const t = setTimeout(() => setFlash(null), 4000);
+    return () => clearTimeout(t);
+  }, [flash]);
+
+  async function connect(agent: AgentTarget) {
+    setBusy(agent);
+    try {
+      const status = await ipc.mcpStatus();
+      if (!status.enabled || !status.running) {
+        setFlash({
+          kind: "err",
+          msg: "MCP 서버가 꺼져 있어요. ⌘, 설정 → MCP 에서 먼저 켜주세요.",
+        });
+        return;
+      }
+      if (agent === "codex") {
+        const res = await ipc.codexConnect(project);
+        // MCP 등록과 함께 자동 활성화 SKILL 도 설치 — 두 스텝을 한 번에.
+        await ipc.installSkill(project, "codex").catch(() => {});
+        setInstalled((s) => ({ ...s, codex: true }));
+        setFlash({
+          kind: "ok",
+          msg:
+            (res.action === "updated"
+              ? "Codex 연결을 갱신했어요"
+              : "~/.codex/config.toml 에 연결했어요") +
+            " · SKILL 설치 완료 — Codex 를 재시작하면 도구가 뜹니다.",
+        });
+      } else {
+        const endpoint = await ipc.mcpProjectEndpoint(project);
+        const slug = project
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "");
+        const serverName = slug ? `danbi-${slug}` : "danbi";
+        const cmd = `claude mcp add --transport http ${serverName} "${endpoint.url}" --header "Authorization: Bearer ${status.token}"`;
+        await clipboardWriteText(cmd);
+        await ipc.installSkill(project, "claude").catch(() => {});
+        setInstalled((s) => ({ ...s, claude: true }));
+        setFlash({
+          kind: "ok",
+          msg: "설치 명령을 복사했어요 · 이 명령을 당신 프로젝트 폴더에서 실행하세요.",
+        });
+      }
+    } catch (e) {
+      setFlash({ kind: "err", msg: `연결 실패: ${e}` });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function dismiss() {
+    localStorage.setItem(dismissKey, "1");
+    setDismissed(true);
+  }
+
+  // 상태 로드 전엔 깜빡임 방지, 이미 연결됐거나(둘 중 하나 SKILL 설치)
+  // 사용자가 숨겼으면 렌더하지 않는다.
+  if (!loaded || dismissed || installed.claude || installed.codex) return null;
+
+  const AGENTS: {
+    key: AgentTarget;
+    label: string;
+    icon: ReactNode;
+    cta: string;
+    hint: string;
+  }[] = [
+    {
+      key: "codex",
+      label: "Codex",
+      icon: <CodexIcon size={16} />,
+      cta: "지금 연결",
+      hint: "~/.codex/config.toml 에 바로 기록 (원클릭)",
+    },
+    {
+      key: "claude",
+      label: "Claude Code",
+      icon: <ClaudeIcon size={16} />,
+      cta: "명령 복사",
+      hint: "복사한 명령을 당신 프로젝트 폴더에서 실행",
+    },
+  ];
+
+  return (
+    <div className="mt-6 rounded-lg border border-hairline bg-surface-card p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <Server size={15} className="text-accent-blue" />
+            <h3 className="text-[15px] font-semibold text-ink">
+              이 프로젝트를 에이전트에 연결하세요
+            </h3>
+          </div>
+          <p className="mt-1.5 text-[13px] leading-[1.6] text-body">
+            Claude Code · Codex 가{" "}
+            <span className="text-on-dark">{project}</span> 의 vault 를 직접
+            읽고 씁니다. 한 번만 붙이면, 다음부턴 새 세션에서도 맥락을 기억해요.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={dismiss}
+          className="shrink-0 text-[11px] text-mute hover:text-on-dark"
+        >
+          이미 연결했어요 · 숨기기
+        </button>
+      </div>
+
+      <div className="mt-4 flex flex-col gap-2">
+        {AGENTS.map((a) => (
+          <div
+            key={a.key}
+            className="flex items-center justify-between gap-3 rounded-md border border-hairline bg-surface-elevated px-3.5 py-2.5"
+          >
+            <div className="flex min-w-0 items-center gap-2.5">
+              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-surface-card text-on-dark-mute">
+                {a.icon}
+              </span>
+              <div className="min-w-0">
+                <div className="text-[13px] font-medium text-on-dark">
+                  {a.label}
+                </div>
+                <div className="truncate text-[11px] text-mute">{a.hint}</div>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => connect(a.key)}
+              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-hairline bg-surface-card px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark disabled:opacity-50"
+            >
+              {busy === a.key ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : (
+                <Server size={12} />
+              )}
+              {a.cta}
+            </button>
+          </div>
+        ))}
+      </div>
+
+      {flash && (
+        <div
+          className={cn(
+            "mt-3 text-[12px]",
+            flash.kind === "err" ? "text-accent-red" : "text-accent-green",
+          )}
+        >
+          {flash.kind === "err" ? "✕" : "✓"} {flash.msg}
+        </div>
+      )}
     </div>
   );
 }

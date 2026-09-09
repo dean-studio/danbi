@@ -430,7 +430,23 @@ pub fn save_config(vault: &std::path::Path, cfg: &DanbiConfig) -> DanbiResult<()
         cfg.version = CURRENT_SCHEMA_VERSION;
     }
     let s = serde_json::to_string_pretty(&cfg)?;
-    std::fs::write(&p, s)?;
+    std::fs::write(&p, &s)?;
+
+    // Keep the fixed pointer in sync. The read side (`load_config()` with no
+    // arg, `current_vault_path()`, and the MCP server) always resolves the
+    // active vault via `default_vault_path()/config.json` → its `vault_path`
+    // field. If the user picked a vault folder other than the default, that
+    // pointer would otherwise never learn about it — leaving MCP/connect
+    // resolving to the wrong (or a stale) vault ("project not found"). So when
+    // we're writing to a non-default location, mirror the same config to the
+    // default location so the two views can't drift apart.
+    if let Ok(default_dir) = default_vault_path() {
+        let pointer = config_path(&default_dir);
+        if pointer != p {
+            let _ = std::fs::create_dir_all(&default_dir);
+            let _ = std::fs::write(&pointer, &s);
+        }
+    }
     Ok(())
 }
 

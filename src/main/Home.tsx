@@ -63,6 +63,12 @@ export function Home() {
 
   const activity = useMemo(() => build30DayActivity(commits), [commits]);
 
+  // 빈 vault (프로젝트 0개) 에선 사용량/집계 카드를 감춘다. 특히 Claude
+  // Code 사용량 카드는 `~/.claude` 전역 통계라 vault 와 무관하게 뜨는데,
+  // 갓 만든 vault 에선 "이전 데이터가 남았다" 는 오해를 준다. 첫 프로젝트를
+  // 만들기 전까진 환영 + 시작 안내만 보여준다.
+  const hasProjects = (tree?.projects?.length ?? 0) > 0;
+
   return (
     <div className="flex h-full flex-col">
       <header
@@ -77,17 +83,21 @@ export function Home() {
       <div className="flex-1 min-h-0 overflow-auto">
         <div className="mx-auto max-w-[960px] px-7 py-9">
           <h1 className="text-[32px] font-medium leading-tight text-ink">
-            좋은 하루예요 👋
+            {hasProjects ? "좋은 하루예요 👋" : "단비에 오신 걸 환영해요 👋"}
           </h1>
           <p className="mt-2 text-[15px] text-mute">
-            좌측에서 도메인을 고르거나 바로 명령해도 돼요.
+            {hasProjects
+              ? "좌측에서 도메인을 고르거나 바로 명령해도 돼요."
+              : "아직 vault 가 비어 있어요. 좌측 사이드바의 + 로 첫 프로젝트를 만들면 여기에 활동과 사용량이 채워집니다."}
           </p>
 
           {/* 사용량/집계 카드들은 신규 데이터 소스(transcript·usage.jsonl·
               MCP 로그) 를 파싱하므로, 한 카드가 예기치 못한 데이터에 터져도
               홈 전체(사이드바·에디터)가 검은 화면이 되지 않도록 각각 개별
-              ErrorBoundary 로 격리한다. */}
-
+              ErrorBoundary 로 격리한다. 프로젝트가 하나도 없으면(갓 만든
+              vault) 아래 카드들은 통째로 감춘다. */}
+          {hasProjects && (
+          <>
           {/* Claude Code 사용량 — transcript 기반 정확값. v0.7.0 신규. */}
           <ErrorBoundary scope="ClaudeCodeUsageCard" fallback={cardFallback}>
             <ClaudeCodeUsageCard />
@@ -194,6 +204,8 @@ export function Home() {
                 </tbody>
               </table>
             </section>
+          )}
+          </>
           )}
 
         </div>

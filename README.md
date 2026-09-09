@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.4-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.4" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.5-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.5" />
   </a>
 </p>
 
@@ -29,10 +29,27 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.8.4-success" alt="version 0.8.4" />
+  <img src="https://img.shields.io/badge/version-0.8.5-success" alt="version 0.8.5" />
 </p>
 
 ---
+
+## What's new in v0.8.5
+
+**커스텀 vault 를 써도 연결이 안 어긋나고, 첫 화면은 더 또렷하게.**
+
+- 🧭 **커스텀 vault 폴더 split-brain 수정** — 온보딩에서 기본값이 아닌 폴더를
+  고르면 MCP·에이전트 연결이 엉뚱한(또는 예전) vault 를 보며 `project not found`
+  가 나던 문제를 잡았어요. 고정 포인터에 config 를 미러링해 읽기/쓰기 경로가
+  항상 같은 vault 를 가리킵니다.
+- 🧹 **새 vault 에 이전 프로젝트 그룹이 딸려오던 문제 수정** — vault 를 실제로
+  바꿀 때만 그룹·아이콘·색상 같은 vault 전용 메타를 초기화해, 빈 vault 에
+  유령 그룹이 보이지 않습니다.
+- ✨ **빈 vault 첫 화면 정리** — 프로젝트가 없을 땐 환영 문구만 보이고 분석
+  카드를 모두 숨겨, 첫 프로젝트를 만들기 전까지 깔끔한 빈 상태를 유지합니다.
+- 🔗 **온보딩 마지막 "에이전트 연결" 안내 스텝 추가** — 위저드 끝에서 Codex ·
+  Claude Code 를 브랜드 아이콘과 함께 미리 보여주고, 실제 연결은 홈 상단
+  **ConnectCard** 에서 원클릭으로 이어집니다.
 
 ## What's new in v0.8.4
 

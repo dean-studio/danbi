@@ -246,7 +246,7 @@ export function Workspace() {
       await clipboardWriteText(cmd);
       flash(
         "ok",
-        `"${project}" 전용 설치 명령을 복사했어요. 터미널에 붙여넣기만 하세요.`,
+        `"${project}" 설치 명령을 복사했어요. 이 명령을 당신 프로젝트 폴더에서 실행하세요.`,
       );
     } catch (e) {
       flash("err", `복사 실패: ${e}`);

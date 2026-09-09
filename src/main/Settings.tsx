@@ -134,9 +134,6 @@ export function Settings({
               );
             })}
           </nav>
-          <footer className="border-t border-hairline px-5 py-2.5 text-[12px] text-stone">
-            v0.2
-          </footer>
         </aside>
 
         {/* Body */}

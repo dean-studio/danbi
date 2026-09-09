@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   PrimaryButton,
   SecondaryButton,
@@ -12,21 +12,27 @@ import {
 } from "@/lib/ipc";
 import { cn } from "@/lib/utils";
 import { Wordmark } from "@/components/Wordmark";
+import { CodexIcon, ClaudeIcon } from "@/components/AgentIcons";
 
-// 0.1 온보딩 흐름:
-//   Welcome → (선택) AI 연동 → Vault → Template
+// 온보딩 흐름:
+//   Welcome → (선택) AI 연동 → Vault → Template → 에이전트 연결
 // "AI 연동" 단계는 검색 품질을 한 단계 올려주는 임베딩 provider 를 받는
-// 곳. 0.1 에서는 Google Gemini (무료 한도) + AWS Bedrock (Titan Embed v2)
-// 두 옵션 노출. "나중에 설정" 으로 건너뛸 수 있고, Settings 에서 언제든
-// 다시 켤 수 있다. 추후 LLM 호출 자동화 (purpose 자동 작성 등) 도
-// 같은 provider 키를 재사용해서 추가될 예정.
-type Step = "welcome" | "embed" | "vault" | "template";
+// 곳. Google Gemini (무료 한도) + AWS Bedrock (Titan Embed v2) 두 옵션
+// 노출. "나중에 설정" 으로 건너뛸 수 있고, Settings 에서 언제든 다시 켤
+// 수 있다.
+// 마지막 "에이전트 연결" 단계는 단비의 정체성 — 이미 Claude Code · Codex
+// 를 쓰는 사람이 vault 를 외장 기억으로 붙이는 것 — 을 위저드 끝에서
+// 명확히 각인시키기 위한 안내/미리보기 스텝. 실제 연결은 앱을 열면 홈
+// 첫 화면(ConnectCard)에서 한 번에 하도록 유도한다 (위저드 시점엔 MCP
+// 서버가 아직 안 떠 있고 토큰도 비어 있어 실연결이 불가능).
+type Step = "welcome" | "embed" | "vault" | "template" | "connect";
 
 function stepIndex(s: Step): number {
   if (s === "welcome") return 0;
   if (s === "embed") return 1;
   if (s === "vault") return 2;
   if (s === "template") return 3;
+  if (s === "connect") return 4;
   return 0;
 }
 
@@ -44,6 +50,9 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
   const [embedKind, setEmbedKind] = useState<EmbedKind>("none");
   const [geminiKey, setGeminiKey] = useState<string>("");
   const [bedrockRegion, setBedrockRegion] = useState<string>("us-east-1");
+  // Template 단계에서 만든 cfg 를 마지막 "연결" 안내 스텝까지 넘겨,
+  // 사용자가 "단비 시작하기" 를 누르면 그때 onDone(cfg) 로 마무리한다.
+  const [pendingCfg, setPendingCfg] = useState<DanbiConfig | null>(null);
 
   useEffect(() => {
     ipc.defaultVault().then(setVaultPath).catch(() => {});
@@ -56,7 +65,7 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
       .catch(() => {});
   }, []);
 
-  const total = 4;
+  const total = 5;
   const stepNumber = stepIndex(step) + 1;
 
   function next(to: Step) {
@@ -415,9 +424,25 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
                   embedModel = "amazon.titan-embed-text-v2:0";
                 }
 
-                // 재실행 시 기존 cfg 의 group/theme/shortcuts/MCP token/
-                // backup 등은 보존 — spread + LLM/embed 필드만 패치.
+                // 재실행 시 기존 cfg 의 theme/shortcuts/MCP token/backup 등
+                // vault-무관 prefs 는 보존 — spread + LLM/embed 필드만 패치.
+                //
+                // 단, *다른* vault 로 전환하는 경우엔 이전 vault 의 그룹·
+                // 프로젝트·아이콘·last-seen 같은 vault-종속 상태를 물려받으면
+                // 안 된다 (물려받으면 새 vault 엔 프로젝트가 없는데 옛 그룹
+                // 헤더만 유령처럼 남는다). 같은 vault 재-온보딩일 때만 보존.
                 const existing = await ipc.loadConfig().catch(() => null);
+                const switchingVault =
+                  !!existing && existing.vault_path !== vaultPath;
+                const vaultScopedReset = {
+                  projects: [],
+                  project_groups: [],
+                  project_last_seen_at: {},
+                  domain_last_seen_at: {},
+                  project_icons: {},
+                  project_colors: {},
+                  capture: { last_project: null, last_domain: null },
+                };
                 const cfg: DanbiConfig = existing
                   ? {
                       ...existing,
@@ -433,6 +458,7 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
                           : existing.default_domains,
                       default_folders:
                         sel.default_folders ?? existing.default_folders,
+                      ...(switchingVault ? vaultScopedReset : {}),
                     }
                   : {
                       version: 2,
@@ -471,10 +497,12 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
                 } catch (e) {
                   console.error("[danbi] applyTemplate failed", e);
                 }
-                onDone(cfg);
+                // 마지막 "에이전트 연결" 안내 스텝으로. onDone 은 거기서.
+                setPendingCfg(cfg);
+                next("connect");
               }}
             >
-              완료
+              다음 →
             </PrimaryButton>
           </>
         }
@@ -541,7 +569,76 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
     );
   }
 
+  // --- 에이전트 연결 (안내/미리보기) ---
+  if (step === "connect") {
+    return (
+      <WizardShell
+        step={stepNumber}
+        total={total}
+        title="이제 에이전트를 연결하세요"
+        subtitle="단비의 핵심 — 이미 쓰고 있는 Claude Code · Codex 에 이 vault 를 붙이면, 새 세션에서도 맥락을 기억합니다. 지금 앱을 열면 홈 첫 화면에서 프로젝트별로 한 번에 연결할 수 있어요."
+        footer={
+          <>
+            <SecondaryButton onClick={() => next("template")}>
+              ← 뒤로
+            </SecondaryButton>
+            <PrimaryButton
+              onClick={() => {
+                if (pendingCfg) onDone(pendingCfg);
+              }}
+            >
+              단비 시작하기
+            </PrimaryButton>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-2">
+          <AgentPreviewRow
+            icon={<CodexIcon size={16} />}
+            label="Codex"
+            desc="~/.codex/config.toml 에 바로 기록 — 원클릭. 연결 후 Codex 만 재시작하면 끝."
+          />
+          <AgentPreviewRow
+            icon={<ClaudeIcon size={16} />}
+            label="Claude Code"
+            desc="설치 명령을 복사해 당신 프로젝트 폴더에서 한 번 실행하면 연결돼요."
+          />
+        </div>
+        <div className="mt-3 rounded-md border border-hairline bg-surface px-3.5 py-2.5 text-[12px] leading-[1.6] text-mute">
+          연결은 지금 안 해도 괜찮아요. 홈 화면 상단에{" "}
+          <span className="text-on-dark">“이 프로젝트를 에이전트에 연결하세요”</span>{" "}
+          카드가 떠서 언제든 한 번에 붙일 수 있습니다.
+        </div>
+      </WizardShell>
+    );
+  }
+
   return null;
+}
+
+/** 온보딩 마지막 스텝의 에이전트 미리보기 행. 실제 연결 버튼은 홈의
+ *  ConnectCard 가 담당하고, 여기선 "무엇을 하게 될지" 만 브랜드 아이콘과
+ *  함께 각인시킨다. */
+function AgentPreviewRow({
+  icon,
+  label,
+  desc,
+}: {
+  icon: ReactNode;
+  label: string;
+  desc: string;
+}) {
+  return (
+    <div className="flex items-center gap-3 rounded-md border border-hairline bg-surface-elevated px-3.5 py-3">
+      <span className="grid h-8 w-8 shrink-0 place-items-center rounded-md bg-surface text-on-dark-mute">
+        {icon}
+      </span>
+      <div className="min-w-0">
+        <div className="text-[13px] font-medium text-on-dark">{label}</div>
+        <div className="text-[12px] leading-[1.5] text-body">{desc}</div>
+      </div>
+    </div>
+  );
 }
 
 

@@ -2,6 +2,43 @@
 
 ## [Unreleased]
 
+## [0.8.5] — 2026-09-09
+
+### Fixed
+
+- **커스텀 vault 폴더를 쓰면 MCP·에이전트 연결이 엉뚱한 vault 를 보던
+  split-brain 수정** — 읽기 경로(`current_vault_path()`·MCP 서버)는 항상
+  고정 포인터 `~/Danbi_Vault/config.json` 의 `vault_path` 필드로 활성 vault 를
+  찾는데, 온보딩에서 기본값이 아닌 폴더를 고르면 이 포인터가 갱신되지 않아
+  연결 시 `project not found` 가 나거나 예전 vault 를 가리켰습니다. 이제
+  `save_config()` 가 비-기본 위치에 쓸 때 고정 포인터에도 같은 config 를
+  미러링해 두 경로가 어긋나지 않습니다.
+- **온보딩에서 새 vault 를 골랐는데 이전 vault 의 프로젝트 그룹이 딸려오던
+  문제** — 위저드가 기존 config 를 통째로 스프레드하면서 `project_groups`·
+  아이콘·색상 등 vault-scoped 메타를 그대로 복사해, 빈 새 vault 에도 유령
+  그룹 헤더가 보였습니다. vault 를 실제로 바꿀 때(`switchingVault`)만
+  vault-scoped 필드를 초기화하도록 분리했습니다.
+- **빈 vault 첫 화면에 남의 데이터처럼 보이던 홈 대시보드 정리** — 프로젝트가
+  하나도 없을 때는 인사말을 "환영" 문구로 바꾸고, 분석 카드(Claude Code
+  사용량·최근 활동·커밋 등)를 모두 숨겨 첫 프로젝트를 만들 때까지 깔끔한
+  빈 상태를 보여줍니다.
+
+### Added
+
+- **온보딩 마지막에 "에이전트 연결" 안내 스텝 추가** — 단비의 정체성(외부
+  AI 의 외부 뇌)을 처음부터 각인시키기 위해, 위저드 끝에서 **Codex** 와
+  **Claude Code** 를 브랜드 아이콘과 함께 미리 보여줍니다. 실제 연결은 앱을
+  열면 프로젝트 홈 상단 **ConnectCard** 에서 원클릭으로 하도록 유도 (위저드
+  시점엔 MCP 서버·토큰이 아직 준비 전이라 실연결 불가).
+- **프로젝트 홈 상단 ConnectCard + 브랜드 로고마크** — Codex(OpenAI knot)·
+  Claude(terracotta burst) 공식 마크를 인라인 SVG(`AgentIcons`)로 두고,
+  연결/Skill 액션을 카드 형태로 정리했습니다.
+
+### Changed
+
+- **설정 좌측 사이드바 하단의 `v0.2` 하드코딩 제거** — 잘못된 버전 문자열이
+  고정 노출되던 자리를 삭제 (정확한 버전은 정보 패널의 런타임 표기 사용).
+
 ## [0.8.4] — 2026-09-07
 
 ### Fixed
