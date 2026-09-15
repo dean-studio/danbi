@@ -3820,50 +3820,30 @@ pub fn skill_status(project: String, agent: Option<String>) -> DanbiResult<bool>
     Ok(skill_md.exists())
 }
 
-/// MCP server handle for a project, mirroring the frontend slug logic
-/// (`danbi-<slug>` where the slug lowercases and replaces runs of
-/// non-`[a-z0-9]` with `-`). Wholly non-ASCII names (Korean etc.) reduce
-/// to an empty slug → bare `danbi`. Kept byte-for-byte identical to
-/// `copyMcpInstall` so the file we write matches what users used to paste.
-fn codex_server_name(project: &str) -> String {
-    let lower = project.to_lowercase();
-    let mut slug = String::new();
-    let mut prev_dash = false;
-    for c in lower.chars() {
-        if c.is_ascii_alphanumeric() {
-            slug.push(c);
-            prev_dash = false;
-        } else if !prev_dash {
-            slug.push('-');
-            prev_dash = true;
-        }
-    }
-    let slug = slug.trim_matches('-');
-    if slug.is_empty() {
-        "danbi".to_string()
-    } else {
-        format!("danbi-{slug}")
-    }
-}
-
 #[derive(Serialize)]
 pub struct CodexConnectResult {
     pub path: String,
     pub server_name: String,
+    pub global_removed: bool,
     /// "added" when the block was newly inserted, "updated" when an
     /// existing `[mcp_servers.<name>]` group was replaced in place.
     pub action: String,
 }
 
-/// Write (or refresh) the Danbi MCP block directly into
-/// `~/.codex/config.toml`. Codex reads MCP servers only at startup, so
-/// this saves the user the copy-paste step. Idempotent: if a
+/// Write (or refresh) the Danbi MCP block into the selected code project's
+/// `.codex/config.toml`. Codex reads trusted project config from the repo
+/// root down to its cwd, keeping MCP lists isolated between code projects.
+/// Idempotent: if a
 /// `[mcp_servers.<name>]` group (plus its `.http_headers` subtable) is
 /// already present it is replaced in place rather than duplicated —
 /// re-pressing 연결 never stacks blocks. All other content (comments,
 /// unrelated servers) is preserved verbatim via line-based editing.
 #[tauri::command]
-pub fn codex_connect(app: AppHandle, project: String) -> DanbiResult<CodexConnectResult> {
+pub fn codex_connect(
+    app: AppHandle,
+    project: String,
+    target_dir: String,
+) -> DanbiResult<CodexConnectResult> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
@@ -3882,25 +3862,140 @@ pub fn codex_connect(app: AppHandle, project: String) -> DanbiResult<CodexConnec
     let id = vault::ensure_project_id(&vault_path, &project)?;
     let url = format!("http://127.0.0.1:{}/mcp/{id}", cfg.mcp.port);
     let token = cfg.mcp.token.clone();
-    let server_name = codex_server_name(&project);
+    // Project-local configs are isolated, so a stable name gives every
+    // installed skill the same `mcp__danbi__*` tool prefix.
+    let server_name = "danbi".to_string();
 
-    let home = dirs::home_dir()
-        .ok_or_else(|| DanbiError::Other("home directory not found".into()))?;
-    let codex_dir = home.join(".codex");
+    let target = std::path::PathBuf::from(&target_dir);
+    if !target.is_absolute() || !target.is_dir() {
+        return Err(DanbiError::Other(
+            "Codex 연결 폴더가 존재하는 절대 경로여야 합니다.".into(),
+        ));
+    }
+    let target = std::fs::canonicalize(&target)
+        .map_err(|e| DanbiError::Other(format!("resolve Codex project folder: {e}")))?;
+    let codex_dir = target.join(".codex");
     std::fs::create_dir_all(&codex_dir)
-        .map_err(|e| DanbiError::Other(format!("create ~/.codex: {e}")))?;
+        .map_err(|e| DanbiError::Other(format!("create project .codex: {e}")))?;
     let config_path = codex_dir.join("config.toml");
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+    // Establish Git safety before placing the bearer token on disk. This
+    // refuses tracked config files and supports nested folders/worktrees.
+    exclude_codex_config_from_git(&target, &config_path)?;
+    let existing = match std::fs::read_to_string(&config_path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(DanbiError::Other(format!("read project config.toml: {e}"))),
+    };
 
     let (merged, replaced) = merge_codex_block(&existing, &server_name, &url, &token);
     std::fs::write(&config_path, &merged)
         .map_err(|e| DanbiError::Other(format!("write config.toml: {e}")))?;
 
+    // Migrate every Danbi-managed legacy global entry away. Leaving even one
+    // in ~/.codex/config.toml would keep exposing it in every workspace.
+    let global_removed = remove_legacy_global_codex_blocks()?;
+
     Ok(CodexConnectResult {
         path: config_path.to_string_lossy().to_string(),
         server_name,
+        global_removed,
         action: if replaced { "updated" } else { "added" }.to_string(),
     })
+}
+
+fn remove_legacy_global_codex_blocks() -> DanbiResult<bool> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(false);
+    };
+    let config_path = home.join(".codex/config.toml");
+    let Ok(existing) = std::fs::read_to_string(&config_path) else {
+        return Ok(false);
+    };
+    // Only entries carrying Danbi's own marker are migrated. User-managed
+    // MCP tables, even similarly named ones, are never touched.
+    let (cleaned, removed) = remove_all_marked_codex_blocks(&existing);
+    if removed {
+        std::fs::write(&config_path, cleaned)
+            .map_err(|e| DanbiError::Other(format!("remove global Codex MCP block: {e}")))?;
+    }
+    Ok(removed)
+}
+
+fn remove_all_marked_codex_blocks(existing: &str) -> (String, bool) {
+    let server_names: Vec<String> = existing
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("# danbi:mcp "))
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut cleaned = existing.to_string();
+    let mut removed = false;
+    for server_name in server_names {
+        let (next, did_remove) = remove_codex_block(&cleaned, &server_name);
+        cleaned = next;
+        removed |= did_remove;
+    }
+    (cleaned, removed)
+}
+
+fn exclude_codex_config_from_git(
+    target: &std::path::Path,
+    config_path: &std::path::Path,
+) -> DanbiResult<()> {
+    let config_suffix = config_path.strip_prefix(target).map_err(|_| {
+        DanbiError::Other("Codex 설정 경로가 선택한 폴더 밖에 있습니다.".into())
+    })?;
+    let canonical_target = std::fs::canonicalize(target)
+        .map_err(|e| DanbiError::Other(format!("resolve Git project folder: {e}")))?;
+    let canonical_config = canonical_target.join(config_suffix);
+    let Ok(repo) = git2::Repository::discover(&canonical_target) else {
+        return Ok(());
+    };
+    let Some(workdir) = repo.workdir() else {
+        return Ok(());
+    };
+    let canonical_workdir = std::fs::canonicalize(workdir)
+        .map_err(|e| DanbiError::Other(format!("resolve Git worktree: {e}")))?;
+    let relative = canonical_config.strip_prefix(&canonical_workdir).map_err(|_| {
+        DanbiError::Other("선택한 폴더의 Codex 설정 경로를 Git 저장소 안에서 확인할 수 없습니다.".into())
+    })?;
+    let relative_git = relative.to_string_lossy().replace('\\', "/");
+    let index = repo
+        .index()
+        .map_err(|e| DanbiError::Other(format!("read Git index: {e}")))?;
+    if index
+        .get_path(std::path::Path::new(&relative_git), 0)
+        .is_some()
+    {
+        return Err(DanbiError::Other(format!(
+            "{} 파일이 Git에서 이미 추적 중이라 MCP 토큰을 기록하지 않았습니다. 먼저 추적을 해제한 뒤 다시 연결하세요.",
+            config_path.display()
+        )));
+    }
+
+    let info_dir = repo.commondir().join("info");
+    std::fs::create_dir_all(&info_dir)
+        .map_err(|e| DanbiError::Other(format!("create .git/info: {e}")))?;
+    let exclude_path = info_dir.join("exclude");
+    let existing = match std::fs::read_to_string(&exclude_path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(DanbiError::Other(format!("read .git/info/exclude: {e}"))),
+    };
+    let rule = format!("/{relative_git}");
+    if existing.lines().any(|line| line.trim() == rule) {
+        return Ok(());
+    }
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str("\n# Danbi project-local MCP credentials\n");
+    next.push_str(&rule);
+    next.push('\n');
+    std::fs::write(&exclude_path, next)
+        .map_err(|e| DanbiError::Other(format!("write .git/info/exclude: {e}")))
 }
 
 /// Line-based merge of the Danbi MCP TOML block into an existing
@@ -3924,7 +4019,22 @@ fn merge_codex_block(
         "{marker}\n[mcp_servers.{server_name}]\nurl = \"{url}\"\n\n[mcp_servers.{server_name}.http_headers]\nAuthorization = \"Bearer {token}\"\n"
     );
 
-    // Does a header belong to our server's group?
+    let (mut body, replaced) = remove_codex_block(existing, server_name);
+    while body.ends_with("\n\n") {
+        body.pop();
+    }
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    body.push_str(&block);
+    (body, replaced)
+}
+
+fn remove_codex_block(existing: &str, server_name: &str) -> (String, bool) {
+    let marker = format!("# danbi:mcp {server_name}");
     let group_prefix_eq = format!("mcp_servers.{server_name}");
     let group_prefix_dot = format!("mcp_servers.{server_name}.");
     let belongs = |header: &str| -> bool {
@@ -3980,19 +4090,11 @@ fn merge_codex_block(
         out.push(line.to_string());
     }
 
-    // Trim trailing blank lines from the surviving body, then append the
-    // block with a single blank-line separator when there's prior content.
     while out.last().map(|l| l.trim().is_empty()).unwrap_or(false) {
         out.pop();
     }
     let mut body = out.join("\n");
-    if body.is_empty() {
-        body = block;
-    } else {
-        body.push_str("\n\n");
-        body.push_str(&block);
-    }
-    if !body.ends_with('\n') {
+    if !body.is_empty() && !body.ends_with('\n') {
         body.push('\n');
     }
     (body, replaced)
@@ -4143,15 +4245,24 @@ pub fn doc_change_history(
 
 #[cfg(test)]
 mod codex_tests {
-    use super::{codex_server_name, merge_codex_block};
+    use super::{
+        exclude_codex_config_from_git, merge_codex_block, remove_all_marked_codex_blocks,
+        remove_codex_block,
+    };
 
-    #[test]
-    fn server_name_matches_frontend_slug() {
-        assert_eq!(codex_server_name("Bonny"), "danbi-bonny");
-        assert_eq!(codex_server_name("side blog"), "danbi-side-blog");
-        assert_eq!(codex_server_name("RAG_v2"), "danbi-rag-v2");
-        // Wholly non-ASCII (Korean) → empty slug → bare danbi.
-        assert_eq!(codex_server_name("지원사업용"), "danbi");
+    fn temp_repo(label: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "danbi-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&path).unwrap();
+        git2::Repository::init(&path).unwrap();
+        path
     }
 
     #[test]
@@ -4197,5 +4308,54 @@ mod codex_tests {
         assert!(out.contains("url = \"http://other\""));
         assert!(out.contains("# my repl")); // comment before next server kept
         assert_eq!(out.matches("[mcp_servers.danbi]").count(), 1);
+    }
+
+    #[test]
+    fn removes_only_matching_global_server() {
+        let existing = "# danbi:mcp danbi\n[mcp_servers.danbi]\nurl = \"http://old\"\n\n[mcp_servers.danbi.http_headers]\nAuthorization = \"Bearer OLD\"\n\n[mcp_servers.keep]\nurl = \"http://keep\"\n";
+        let (out, removed) = remove_codex_block(existing, "danbi");
+        assert!(removed);
+        assert!(!out.contains("mcp_servers.danbi"));
+        assert!(out.contains("[mcp_servers.keep]"));
+        assert!(out.contains("http://keep"));
+    }
+
+    #[test]
+    fn removes_all_danbi_marked_global_servers_only() {
+        let existing = "# danbi:mcp danbi-a\n[mcp_servers.danbi-a]\nurl = \"http://a\"\n\n# danbi:mcp danbi-b\n[mcp_servers.danbi-b]\nurl = \"http://b\"\n\n[mcp_servers.user]\nurl = \"http://user\"\n";
+        let (out, removed) = remove_all_marked_codex_blocks(existing);
+        assert!(removed);
+        assert!(!out.contains("danbi-a"));
+        assert!(!out.contains("danbi-b"));
+        assert!(out.contains("[mcp_servers.user]"));
+    }
+
+    #[test]
+    fn excludes_untracked_project_config_from_git() {
+        let root = temp_repo("exclude");
+        let config = root.join(".codex/config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        exclude_codex_config_from_git(&root, &config).unwrap();
+        let exclude = std::fs::read_to_string(root.join(".git/info/exclude")).unwrap();
+        assert!(exclude.lines().any(|line| line == "/.codex/config.toml"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refuses_tracked_project_config() {
+        let root = temp_repo("tracked");
+        let config = root.join(".codex/config.toml");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::fs::write(&config, "model = \"gpt\"\n").unwrap();
+        let repo = git2::Repository::open(&root).unwrap();
+        let mut index = repo.index().unwrap();
+        index
+            .add_path(std::path::Path::new(".codex/config.toml"))
+            .unwrap();
+        index.write().unwrap();
+        assert!(exclude_codex_config_from_git(&root, &config).is_err());
+        drop(index);
+        drop(repo);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

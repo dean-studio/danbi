@@ -120,10 +120,11 @@ export type ProjectContextStatus = {
  *  both consume the same MCP endpoint and the same SKILL.md format. */
 export type AgentTarget = "claude" | "codex";
 
-/** Result of writing the Danbi MCP block into ~/.codex/config.toml. */
+/** Result of writing the Danbi MCP block into a project's .codex/config.toml. */
 export type CodexConnectResult = {
   path: string;
   server_name: string;
+  global_removed: boolean;
   /** "added" (new block) | "updated" (existing block replaced). */
   action: "added" | "updated";
 };
@@ -950,11 +951,10 @@ export const ipc = {
   /** True if THIS project's skill file exists for the given agent. */
   skillStatus: (project: string, agent: AgentTarget = "claude") =>
     invoke<boolean>("skill_status", { project, agent }),
-  /** Write (or refresh) the Danbi MCP block directly into
-   *  ~/.codex/config.toml. Idempotent — replaces an existing block in
-   *  place instead of duplicating. */
-  codexConnect: (project: string) =>
-    invoke<CodexConnectResult>("codex_connect", { project }),
+  /** Write (or refresh) the Danbi MCP block into the selected code
+   *  project's `.codex/config.toml`. */
+  codexConnect: (project: string, targetDir: string) =>
+    invoke<CodexConnectResult>("codex_connect", { project, targetDir }),
   trashList: () => invoke<TrashEntry[]>("trash_list"),
   trashRestore: (id: string) =>
     invoke<TrashEntry>("trash_restore", { id }),

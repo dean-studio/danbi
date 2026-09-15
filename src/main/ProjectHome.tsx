@@ -30,6 +30,7 @@ import {
   X,
 } from "lucide-react";
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ipc,
   type AgentTarget,
@@ -373,7 +374,7 @@ function ProjectHero({
         {/* 에이전트별 연결 액션 — Codex / Claude Code 각각 한 줄씩,
          *  [연결] [Skill] [Skill 수정] 3버튼을 그대로 노출. 드롭다운을
          *  없애 한눈에 두 에이전트를 다 볼 수 있게 함 (사용자 요청).
-         *  - 연결: MCP 등록. Codex = ~/.codex/config.toml 에 직접 기록
+         *  - 연결: MCP 등록. Codex = 선택한 코드 폴더의 .codex/config.toml 에 기록
          *    (이미 있으면 그 자리를 교체, 중복 X). Claude Code =
          *    `claude mcp add` 명령 복사.
          *  - Skill: 자동 활성화 SKILL.md 설치/갱신 (~/.codex 또는 ~/.claude).
@@ -382,7 +383,7 @@ function ProjectHero({
           <AgentActionRow
             agentLabel="Codex"
             agentIcon={<CodexIcon size={13} />}
-            connectHint={`${project} → ~/.codex/config.toml 에 바로 연결 (이미 있으면 갱신)`}
+            connectHint={`${project} → 선택한 코드 폴더에만 연결`}
             onConnect={() => onCopyInstall("codex")}
             skillDone={skillInstalled.codex}
             onSkill={() => installSkill("codex")}
@@ -494,7 +495,7 @@ function AgentActionRow({
  *  연결이 끝나면 자동으로 사라진다. "연결" 한 번에 MCP 등록 + SKILL 설치를
  *  함께 해서 스텝을 줄이고(#2), 성공/재시작 안내로 결과를 확인시킨다.
  *
- *  Codex 는 ~/.codex/config.toml 이 전역이라 원클릭 직접 기록.
+ *  Codex 는 코드 폴더를 고른 뒤 그 안의 .codex/config.toml 에 기록.
  *  Claude 는 `claude mcp add` 가 cwd(프로젝트) 스코프라 완전 자동화가
  *  불가능 — 정직하게 명령을 복사해 "당신 프로젝트 폴더에서 실행" 하도록
  *  안내한다(프로젝트 격리 유지). */
@@ -551,7 +552,13 @@ function ConnectCard({ project }: { project: string }) {
         return;
       }
       if (agent === "codex") {
-        const res = await ipc.codexConnect(project);
+        const targetDir = await openDialog({
+          directory: true,
+          multiple: false,
+          title: `Codex 가 실행될 코드 폴더 선택 · ${project}`,
+        });
+        if (typeof targetDir !== "string") return;
+        const res = await ipc.codexConnect(project, targetDir);
         // MCP 등록과 함께 자동 활성화 SKILL 도 설치 — 두 스텝을 한 번에.
         await ipc.installSkill(project, "codex").catch(() => {});
         setInstalled((s) => ({ ...s, codex: true }));
@@ -560,8 +567,9 @@ function ConnectCard({ project }: { project: string }) {
           msg:
             (res.action === "updated"
               ? "Codex 연결을 갱신했어요"
-              : "~/.codex/config.toml 에 연결했어요") +
-            " · SKILL 설치 완료 — Codex 를 재시작하면 도구가 뜹니다.",
+              : "선택한 코드 폴더에 연결했어요") +
+            (res.global_removed ? " · 기존 전역 연결 제거" : "") +
+            " · SKILL 설치 완료 — Codex 에서 폴더를 신뢰하고 재시작하면 도구가 뜹니다.",
         });
       } else {
         const endpoint = await ipc.mcpProjectEndpoint(project);
@@ -607,7 +615,7 @@ function ConnectCard({ project }: { project: string }) {
       label: "Codex",
       icon: <CodexIcon size={16} />,
       cta: "지금 연결",
-      hint: "~/.codex/config.toml 에 바로 기록 (원클릭)",
+      hint: "코드 폴더를 선택해 해당 폴더에만 연결",
     },
     {
       key: "claude",
@@ -2849,4 +2857,3 @@ function WeeklySummaryButton({ project }: { project: string }) {
     </div>
   );
 }
-

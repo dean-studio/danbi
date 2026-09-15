@@ -8,6 +8,7 @@ import {
 import { Check, X } from "lucide-react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
+import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { Dialog } from "@/components/Dialog";
 import { ProjectIconPicker } from "@/components/ProjectIconPicker";
 import { ProjectColorPicker } from "@/components/ProjectColorPicker";
@@ -223,21 +224,21 @@ export function Workspace() {
       const serverName = slug ? `danbi-${slug}` : "danbi";
 
       if (agent === "codex") {
-        // Codex reads MCP servers from `~/.codex/config.toml`. Rather than
-        // hand the user a block to paste (and risk them stacking duplicate
-        // `[mcp_servers.…]` sections on repeat presses), write it straight
-        // into the file. The backend merge replaces an existing Danbi block
-        // in place — idempotent — and preserves everything else verbatim.
-        // Its schema rejects inline `bearer_token`, but `http_headers` is a
-        // supported inline header map, so the token rides along with no env
-        // var to wire up. (verified: codex-cli 0.149.1)
+        const targetDir = await openFolderDialog({
+          directory: true,
+          multiple: false,
+          title: `Codex 가 실행될 코드 폴더 선택 · ${project}`,
+        });
+        if (typeof targetDir !== "string") return;
         void serverName; // server name is derived identically on the backend
-        const res = await ipc.codexConnect(project);
+        const res = await ipc.codexConnect(project, targetDir);
         flash(
           "ok",
-          res.action === "updated"
-            ? `"${project}" Codex 연결을 갱신했어요 (${res.server_name}). Codex 를 재시작하세요.`
-            : `"${project}" 를 ~/.codex/config.toml 에 연결했어요 (${res.server_name}). Codex 를 재시작하세요.`,
+          (res.action === "updated"
+            ? `"${project}"의 폴더별 Codex 연결을 갱신했어요. Codex 를 재시작하세요.`
+            : `"${project}"를 ${res.path}에 연결했어요. Codex 를 재시작하세요.`) +
+            (res.global_removed ? " 기존 전역 연결도 제거했습니다." : "") +
+            " 처음 여는 폴더라면 Codex에서 프로젝트를 신뢰해 주세요.",
         );
         return;
       }

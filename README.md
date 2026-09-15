@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.5-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.5" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.6-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.6" />
   </a>
 </p>
 
@@ -29,8 +29,24 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.8.5-success" alt="version 0.8.5" />
+  <img src="https://img.shields.io/badge/version-0.8.6-success" alt="version 0.8.6" />
 </p>
+
+---
+
+## What's new in v0.8.6
+
+**Codex MCP도 이제 코드 폴더마다 독립적으로 연결됩니다.**
+
+- 📁 **폴더별 MCP 격리** — 단비 프로젝트에서 Codex의 `연결`을 누른 뒤 실제
+  코드 폴더를 고르면, 그 폴더의 `.codex/config.toml`에 해당 프로젝트 MCP만
+  기록합니다. A 프로젝트에서 연결을 바꿔도 B·C 프로젝트의 `/mcp` 목록에는
+  영향을 주지 않습니다.
+- 🧹 **기존 전역 연결 자동 정리** — 과거 단비가 `~/.codex/config.toml`에 만든
+  전역 MCP 블록은 첫 폴더별 연결 때 안전하게 제거합니다. 사용자가 직접 만든
+  MCP 설정은 그대로 유지합니다.
+- 🔒 **토큰 Git 유출 방지** — 로컬 MCP 설정은 `.git/info/exclude`로 자동
+  제외하며, 이미 Git에서 추적 중인 config에는 토큰을 기록하지 않습니다.
 
 ---
 

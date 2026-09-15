@@ -596,7 +596,7 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
           <AgentPreviewRow
             icon={<CodexIcon size={16} />}
             label="Codex"
-            desc="~/.codex/config.toml 에 바로 기록 — 원클릭. 연결 후 Codex 만 재시작하면 끝."
+            desc="코드 폴더를 선택하면 그 폴더에만 MCP를 연결합니다. 연결 후 Codex만 재시작하면 끝."
           />
           <AgentPreviewRow
             icon={<ClaudeIcon size={16} />}
