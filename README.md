@@ -7,8 +7,13 @@
 </p>
 
 <p align="center">
-  Claude Code · Codex 같은 AI 와 함께 자라는 나만의 연구실.<br/>
-  macOS 데스크톱 앱. 모든 데이터는 로컬에. AI 키 없이도 80%, 키 한 줄로 100%.
+  <b>AI 에이전트의 외장 메모리.</b><br/>
+  Claude Code · Codex가 새 세션을 열어도 프로젝트를 기억하도록, 노트를 대신 쌓고 필요한 만큼만 꺼내 줍니다.<br/>
+  macOS 앱 · MCP 서버 내장 · 데이터는 내 Mac에만
+</p>
+
+<p align="center">
+  <sub>Local-first external memory for AI coding agents. Built-in MCP server for Claude Code &amp; Codex — your notes never leave your Mac.</sub>
 </p>
 
 <p align="center">
@@ -34,128 +39,25 @@
 
 ---
 
-## What's new in v0.8.6
+![단비 홈 화면](readme_imgs/home-v041.png)
 
-**Codex MCP도 이제 코드 폴더마다 독립적으로 연결됩니다.**
+## 단비는 무엇인가요
 
-- 📁 **폴더별 MCP 격리** — 단비 프로젝트에서 Codex의 `연결`을 누른 뒤 실제
-  코드 폴더를 고르면, 그 폴더의 `.codex/config.toml`에 해당 프로젝트 MCP만
-  기록합니다. A 프로젝트에서 연결을 바꿔도 B·C 프로젝트의 `/mcp` 목록에는
-  영향을 주지 않습니다.
-- 🧹 **기존 전역 연결 자동 정리** — 과거 단비가 `~/.codex/config.toml`에 만든
-  전역 MCP 블록은 첫 폴더별 연결 때 안전하게 제거합니다. 사용자가 직접 만든
-  MCP 설정은 그대로 유지합니다.
-- 🔒 **토큰 Git 유출 방지** — 로컬 MCP 설정은 `.git/info/exclude`로 자동
-  제외하며, 이미 Git에서 추적 중인 config에는 토큰을 기록하지 않습니다.
+AI는 새 대화창을 열 때마다 어제 한 결정을 잊습니다. 그래서 매번 같은 설명을 다시 하고, 그 설명만큼 토큰을 씁니다.
 
----
+단비는 그 기억을 Mac 안의 Markdown 노트로 남겨 두는 앱입니다.
 
-## What's new in v0.8.5
+- **AI가 직접 기록합니다** — Claude Code · Codex가 MCP로 결정·TODO·작업 일지를 단비에 남깁니다.
+- **필요한 것만 꺼내 줍니다** — 다음 세션에서 브리핑·검색으로 관련 노트만 골라 AI에게 건넵니다.
+- **프로젝트끼리 섞이지 않습니다** — 프로젝트마다 연결이 따로라서, A 프로젝트 작업에 B의 노트가 끼어들지 않습니다.
 
-**커스텀 vault 를 써도 연결이 안 어긋나고, 첫 화면은 더 또렷하게.**
+## 최근 업데이트 — v0.8.6
 
-- 🧭 **커스텀 vault 폴더 split-brain 수정** — 온보딩에서 기본값이 아닌 폴더를
-  고르면 MCP·에이전트 연결이 엉뚱한(또는 예전) vault 를 보며 `project not found`
-  가 나던 문제를 잡았어요. 고정 포인터에 config 를 미러링해 읽기/쓰기 경로가
-  항상 같은 vault 를 가리킵니다.
-- 🧹 **새 vault 에 이전 프로젝트 그룹이 딸려오던 문제 수정** — vault 를 실제로
-  바꿀 때만 그룹·아이콘·색상 같은 vault 전용 메타를 초기화해, 빈 vault 에
-  유령 그룹이 보이지 않습니다.
-- ✨ **빈 vault 첫 화면 정리** — 프로젝트가 없을 땐 환영 문구만 보이고 분석
-  카드를 모두 숨겨, 첫 프로젝트를 만들기 전까지 깔끔한 빈 상태를 유지합니다.
-- 🔗 **온보딩 마지막 "에이전트 연결" 안내 스텝 추가** — 위저드 끝에서 Codex ·
-  Claude Code 를 브랜드 아이콘과 함께 미리 보여주고, 실제 연결은 홈 상단
-  **ConnectCard** 에서 원클릭으로 이어집니다.
+Codex MCP가 코드 폴더마다 따로 연결됩니다. 한 프로젝트의 연결을 바꿔도 다른 프로젝트의 `/mcp` 목록은 그대로입니다.
 
-## What's new in v0.8.4
-
-**Codex 연결이 한 번에, 그리고 중복 없이.**
-
-- 🔌 **Codex MCP 연결 실패(`failed (0 tools)`) 해결** — `notifications/initialized`
-  같은 notification 에 응답 객체를 돌려주던 규약 위반이 원인이었어요. Codex 는
-  이걸 프로토콜 오류로 보고 초기화 중 연결을 끊었습니다. 이제 id 없는 요청은
-  스펙대로 `202 Accepted` 빈 본문으로 응답합니다.
-- 🧩 **"연결" 이 `~/.codex/config.toml` 에 바로 기록** — 클립보드 복사 대신 파일에
-  직접 씁니다. **이미 있으면 그 블록을 제자리에서 교체** 해서, 여러 번 눌러도
-  설정이 아래로 중복 누적되지 않아요. 다른 서버 항목·주석은 그대로 둡니다.
-- 🎛 **프로젝트 홈 헤더 재구성** — 드롭다운을 없애고 **Codex** / **Claude Code**
-  를 각각 한 줄씩 `[연결] [Skill] [Skill 수정]` 로 펼쳐 두 에이전트를 한눈에.
-  두 행 사이엔 구분선, 라벨 앞엔 **OpenAI · Anthropic 브랜드 아이콘** 을 붙여
-  직관적으로 구분돼요. 주간 회고 버튼은 정리했습니다.
-- 🔢 **설정 → 정보 버전 표기 `v0.3.0` 잔존 수정** — 런타임 번들 버전을 읽도록
-  바꿔 실제 릴리즈 버전이 뜹니다.
-
-## What's new in v0.8.3
-
-**메뉴바 팝오버가 다시 즉각적으로.**
-
-- ⚡ **팝오버 버벅임 제거 — 활성 transcript 증분 파싱** — 팝오버를 열거나 창에
-  포커스가 갈 때마다 오늘치 Claude Code 사용량을 계산하느라 `~/.claude` 의
-  활성 세션 로그(하루 300M+ 토큰 쓰는 날엔 합계 400MB 이상)를 **매번 처음부터
-  다시 파싱**하던 게 원인이었어요. transcript 가 append-only 인 점을 이용해
-  마지막으로 읽은 지점 이후 **새로 추가된 부분만** 파싱하도록 바꿔, 450MB 재파싱을
-  수 KB 수준으로 줄였습니다. 본체의 Claude Code 사용량 카드도 함께 빨라져요.
-
-## What's new in v0.8.2
-
-**이제 Codex 도 한 번에 연결돼요.**
-
-- 🔌 **Codex 연결·Skill 지원** — 프로젝트 홈 헤더의 "연결"·"Skill" 버튼이 **에이전트 드롭다운**으로 바뀌어 Claude Code / Codex 를 골라서 붙일 수 있어요.
-  - **연결** — Claude Code 는 `claude mcp add …` 명령을, Codex 는 `~/.codex/config.toml` 에 붙여넣을 `[mcp_servers.danbi-…]` 블록(토큰 인라인)을 복사합니다. 환경변수 세팅 없이 한 번에 끝나요.
-  - **Skill** — Claude Code(`~/.claude/skills/`) / Codex(`~/.codex/skills/`) 별로 SKILL.md 를 설치·갱신. 원본(`<project>/SKILL.md`)은 공용이라 "Skill 수정" 은 한 곳만 편집하면 두 에이전트에 반영됩니다.
-
-## What's new in v0.8.1
-
-**Apple Silicon 네이티브 빌드 고정.**
-
-- 🍎 **"Intel 기반 앱 지원 종료" 경고 해결** — 릴리즈 빌드가 실수로 x86_64(Intel)로 컴파일돼 macOS 가 "미래 버전에서 못 연다"는 경고를 띄우던 문제. 빌드 파이프라인을 rustup arm64 툴체인으로 고정하고 `--target aarch64-apple-darwin` 을 명시해 재발을 막았어요. 이제 순수 Apple Silicon 네이티브 바이너리입니다.
-
-## What's new in v0.8.0
-
-**사용량 카드는 토큰 그대로, 앱은 더 가볍게.**
-
-- 🧹 **토큰 비용 계산 로직 전면 제거** — ₩/$ 금액, 단가표, USD→KRW 환율, 결제 모드 분기, 비용 추정을 모두 걷어냈어요. 단가는 provider·region·구독 형태마다 다 달라서 "정확한 비용"을 앱이 흉내 내는 게 오히려 오해를 낳았거든요. 이제 사용량 카드는 **토큰 수량만** 정직하게 보여줍니다 (일별 · 모델별 · input/output/cache 분해).
-- 🪶 **메모리 사용량 최적화** — 장시간 켜두면 RSS 가 ~1.6GB 까지 오르던 문제를 손봤어요.
-  - Claude Code 사용량 집계가 대시보드 열 때마다 8만+ 이벤트를 통째로 복제·정렬하던 걸 참조 전달(`with_events`)로 교체
-  - 검색 재인덱싱 시 새 인덱스를 만들기 **전에** 기존 인덱스를 먼저 해제 (메모리 2× 피크 제거)
-  - MCP inbound 집계도 호출마다 캐시 전체 복제하던 걸 참조 전달로
-  - 백업 워커 스레드가 vault 전환 때 정리되지 않고 쌓이던 것 수정
-  - 채팅 turn 로그를 최근 100개로 상한 (첨부 텍스트·plan diff 를 물고 있어 무한 증가하던 프론트 메모리)
-
-## What's new in v0.7.1
-
-**비용 정확도 ↑ + 카드 속도 ↑.**
-
-- 🩹 **단가표 전면 보정 (Bedrock cross-region 기준)** — v0.7.0 은 Anthropic API 단가($15/$75) 였지만 사용자 환경은 AWS Bedrock cross-region 이고 단가가 정확히 1/3 ($5/$25). Opus 4.x 비용이 약 3× 과대 계산되던 문제 해결. AWS 공식 가격표로 교체.
-- 🆕 **`claude-opus-4-8` 가격표 누락 수정** — v0.7.0 에서 4.8 호출이 무료(0원) 처리되던 버그.
-- ⏱ **5m vs 1h 캐시 분리 단가** — `cache_creation` breakdown 의 `ephemeral_5m` / `ephemeral_1h` 를 읽어 단가 다르게 적용. 1h 는 5m 보다 ~1.6× 비싸요.
-- 💾 **영속 비용 히스토리** — `~/.danbi/cc_billing_history.jsonl` 에 어제까지의 일별 합계를 한 번만 finalize. 다음부터 카드 갱신은 "오늘 분량만" 스캔 → 1년치 transcript 풀스캔 50MB+ 걷어냄.
-- 🔄 **Settings → "히스토리 초기화"** — 단가 바뀌었을 때 한 번 눌러 모든 과거 비용 재계산.
-
-## What's new in v0.7.0
-
-**Claude Code 사용량 + 단비 자체 LLM 비용 — 이제 한 화면에서 보여요.**
-
-- 💰 **Claude Code 사용량 카드 (홈)** — `~/.claude/projects/**/*.jsonl` 직독 → 일별 토큰 · 비용 · 세션 · 모델/프로젝트별 분포 · 시간대 히트맵. OAuth 호출 없이 자기 디스크의 자기 파일만 사용 (권한 이슈 0).
-- 🔀 **결제 모드별 UI 분기** — Bedrock / Anthropic API key 는 토큰 + USD/KRW 풀 노출. Pro/Max 구독은 비용 숨기고 토큰만. `message.id` 의 `msg_bdrk_` prefix 로 자동 감지.
-- 📅 **히스토리 탭** — 90일 sparkline · 1년 GitHub-잔디 · 12개월 추이 · 1년 전 오늘 비교 · 가장 비쌌던 날 Top 5.
-- 🛠 **단비 자체 LLM 사용량 카드** — 단비 본 앱이 라우팅/writer/embed 로 쏜 호출의 토큰. Claude Code 카드와 데이터 소스가 정확히 다름 (jsonl vs usage.jsonl).
-- 🍡 **메뉴바 popover 사용량 mini** — 메뉴바 클릭 시 오늘 토큰 + KRW + input/output/cache 3-bar 한 줄 글랜스.
-- 💱 **USD → KRW 환율 편집 + transcript 캐시 비우기** — Settings → "LLM 사용량".
-
-**제거**
-
-- ✏️ **메뉴바 popover 의 빠른 메모 입력** — popover 는 글랜스 + 본체 진입점에 집중. 메모는 본체 / Quick Capture 단축키로.
-
-**수정**
-
-- 🧮 `pricing.rs` 에 캐시 토큰 보정 단가 (cache_creation = input × 1.25, cache_read = input × 0.10) 적용 — Anthropic 공식 단가.
-
-이전 릴리즈 노트는 [Releases 페이지](https://github.com/dean-studio/danbi/releases) 에서 확인할 수 있어요.
+[전체 변경 기록 →](CHANGELOG.md)
 
 ---
-
-![Danbi v0.4.0 — MCP 저장 토큰 카드](readme_imgs/home-v041.png)
 
 ## 한 마디로
 세 가지 도구가 표면상 비슷해 보이지만 정체성이 다릅니다:
@@ -169,7 +71,7 @@
 ## 핵심 가치
 
 - 🟡 **LLM API 키가 필수가 아니에요** — 추론은 외부 AI 가 자기 환경에서. 단비는 의미 검색·자동 요약 같은 옵션 기능을 켤 때만 키를 받습니다.
-- 🔵 **MCP 서버 내장** — Claude Code · Cursor 가 vault 를 직접 읽고·씁니다. 단비가 외부 AI 의 공유 뇌가 됩니다.
+- 🔵 **MCP 서버 내장** — Claude Code · Codex · Cursor 가 vault 를 직접 읽고·씁니다. 단비가 외부 AI 의 공유 뇌가 됩니다.
 - 🟢 **데이터는 Mac 에만 머물러요** — 모든 vault 파일은 로컬에 저장되고, git 으로 자동 버전 관리됩니다.
 
 ---
