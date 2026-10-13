@@ -40,6 +40,13 @@
 //! }
 //! ```
 //!
+//! ## 중복 제거
+//!
+//! 응답 하나가 블록(thinking/text/tool_use)마다 한 줄씩 기록되고, 줄마다 같은
+//! `usage` 가 붙는다(예전 버전은 스트리밍 중 output 만 커지는 값). 재개한
+//! 세션은 다른 파일에 같은 응답을 다시 쓰기도 한다. 그래서 `message.id` +
+//! `requestId` 가 같은 줄은 응답 1건으로 보고 output 이 가장 큰 줄만 센다.
+//!
 //! ## 모드 감지
 //!
 //! - `message.id` 가 `msg_bdrk_` 로 시작 → Bedrock 모드 (종량형)
@@ -84,6 +91,9 @@ pub struct CcEvent {
     /// 1h 캐시는 5m 보다 단가가 ~1.6× 비싸서 분리.
     pub cache_1h_tokens: u64,
     pub cache_read_tokens: u64,
+    /// `message.id` + `requestId` 해시 — 같은 응답의 여러 줄을 묶는 키.
+    /// 0 이면 id 가 없어 묶지 않는다.
+    pub dedup_key: u64,
 }
 
 // ---------- jsonl 파싱 ----------
@@ -98,6 +108,8 @@ struct RawLine {
     cwd: Option<String>,
     #[serde(rename = "gitBranch")]
     git_branch: Option<String>,
+    #[serde(rename = "requestId")]
+    request_id: Option<String>,
     message: Option<RawMessage>,
 }
 
@@ -152,6 +164,15 @@ fn parse_line(line: &str, account: &'static str) -> Option<CcEvent> {
         .with_timezone(&Utc)
         .timestamp_millis();
     let bd = usage.cache_creation.unwrap_or_default();
+    let dedup_key = if id.is_empty() {
+        0
+    } else {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h);
+        raw.request_id.as_deref().unwrap_or("").hash(&mut h);
+        h.finish().max(1)
+    };
     Some(CcEvent {
         ts_ms,
         account,
@@ -166,6 +187,7 @@ fn parse_line(line: &str, account: &'static str) -> Option<CcEvent> {
         cache_5m_tokens: bd.ephemeral_5m_input_tokens.max(0) as u64,
         cache_1h_tokens: bd.ephemeral_1h_input_tokens.max(0) as u64,
         cache_read_tokens: usage.cache_read_input_tokens.max(0) as u64,
+        dedup_key,
     })
 }
 
@@ -182,6 +204,9 @@ struct AccountDir {
     /// 표시용 경로 (`~/.claude-hckim`).
     dir: String,
     projects: PathBuf,
+    /// 남아 있는 transcript 중 가장 오래된 mtime. Claude Code 는 mtime 이
+    /// 오래된 파일부터 지우므로, 지워진 파일은 모두 이보다 이전이다.
+    oldest_mtime_ms: Option<i64>,
 }
 
 /// 계정 이름을 `&'static str` 로 intern. 이벤트 수십만 건에 String 을
@@ -239,6 +264,7 @@ fn account_dirs() -> Vec<AccountDir> {
             account,
             dir: format!("~/{name}"),
             projects,
+            oldest_mtime_ms: None,
         });
     }
     out
@@ -369,7 +395,7 @@ enum CacheUpdate {
 /// 이후의 새 바이트만 파싱한다. 파일이 줄거나(size < parsed_bytes) 사라진
 /// 뒤 새로 생기면 전체 재파싱으로 안전하게 폴백.
 fn refresh_cache() {
-    let accounts = account_dirs();
+    let mut accounts = account_dirs();
     let files: Vec<(PathBuf, &'static str)> = accounts
         .iter()
         .flat_map(|a| {
@@ -391,11 +417,14 @@ fn refresh_cache() {
 
     // 2) 락 없이 변경분만 파싱.
     let mut work: Vec<(PathBuf, CacheUpdate)> = Vec::new();
+    let mut oldest: HashMap<&'static str, i64> = HashMap::new();
     for (path, account) in &files {
         let account = *account;
         let Ok(meta) = fs::metadata(path) else { continue };
         let m = mtime_ms(&meta);
         let s = meta.len();
+        let o = oldest.entry(account).or_insert(m);
+        *o = (*o).min(m);
         match prev.get(path) {
             // 변화 없음 → skip.
             Some(&(pm, ps, _)) if pm == m && ps == s => {}
@@ -429,6 +458,10 @@ fn refresh_cache() {
                 }
             }
         }
+    }
+
+    for a in &mut accounts {
+        a.oldest_mtime_ms = oldest.get(a.account).copied();
     }
 
     // 3) 짧게 write-lock 을 잡고 반영 + 죽은 파일 정리.
@@ -499,7 +532,33 @@ fn with_events<R>(f: impl FnOnce(&[&CcEvent], &[AccountDir]) -> R) -> R {
         accounts = &cache.accounts;
     }
     refs.sort_by_key(|e| e.ts_ms);
+    let refs = dedup_responses(refs);
     f(&refs, accounts)
+}
+
+/// 같은 응답(`dedup_key`)의 여러 줄 중 output 이 가장 큰 줄 하나만 남긴다.
+/// 시간순 입력의 순서를 유지한다.
+fn dedup_responses(events: Vec<&CcEvent>) -> Vec<&CcEvent> {
+    let mut slot: HashMap<u64, usize> = HashMap::with_capacity(events.len());
+    let mut out: Vec<&CcEvent> = Vec::with_capacity(events.len());
+    for ev in events {
+        if ev.dedup_key == 0 {
+            out.push(ev);
+            continue;
+        }
+        match slot.get(&ev.dedup_key) {
+            Some(&i) => {
+                if ev.output_tokens > out[i].output_tokens {
+                    out[i] = ev;
+                }
+            }
+            None => {
+                slot.insert(ev.dedup_key, out.len());
+                out.push(ev);
+            }
+        }
+    }
+    out
 }
 
 /// 캐시 강제 무효화 — Settings 의 "다시 인덱싱" 버튼 등에서 호출.
@@ -837,12 +896,15 @@ struct HistoryRow {
     totals: Totals,
     /// finalize 된 시각 (디버그용).
     finalized_at_ms: i64,
-    /// 모든 계정(`~/.claude-*`)을 합친 값인지. 이 필드가 없던 예전 행은
-    /// `~/.claude` 만 집계한 값이라, 남아 있는 다른 계정 transcript 를
-    /// 한 번 더해서 다시 finalize 한다.
+    /// 집계 방식 버전. [`HISTORY_SCHEMA`] 보다 낮은 예전 행(필드 없음 = 0)은
+    /// `~/.claude` 만, 응답 중복까지 더해 센 값이라 transcript 가 남아 있으면
+    /// 다시 finalize 한다.
     #[serde(default)]
-    all_accounts: bool,
+    schema: u32,
 }
+
+/// 1 = 모든 계정(`~/.claude` + `~/.claude-*`) + 응답 중복 제거.
+const HISTORY_SCHEMA: u32 = 1;
 
 fn history_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("danbi").join("cc_billing_history.jsonl"))
@@ -888,50 +950,20 @@ fn append_history(row: &HistoryRow) {
 
 /// 어제까지의 (날짜, Totals) 를 history 우선, 없으면 transcript 에서 한 번
 /// 계산 후 history 에 finalize. 오늘은 호출자가 따로 transcript 실시간 집계.
-fn finalized_daily(events: &[&CcEvent]) -> BTreeMap<String, Totals> {
+fn finalized_daily(events: &[&CcEvent], accounts: &[AccountDir]) -> BTreeMap<String, Totals> {
     let today = day_label(Utc::now().timestamp_millis());
     let mut history = load_history();
 
-    // transcript 에서 어제까지의 날짜만 집계 (오늘 제외)
-    let mut by_day: BTreeMap<String, Totals> = BTreeMap::new();
-    for &ev in events {
-        let day = day_label(ev.ts_ms);
-        if day == today {
-            continue;
-        }
-        match history.get(&day) {
-            // 이미 finalize 된 날짜 — transcript 재집계 스킵.
-            Some(row) if row.all_accounts => continue,
-            // 예전(~/.claude 만) 행 — 다른 계정분만 아래에서 더한다.
-            Some(_) if ev.account == DEFAULT_ACCOUNT => continue,
-            _ => {}
-        }
-        by_day.entry(day).or_default().add(ev);
-    }
-    // 예전 행은 다른 계정 사용량이 없어도 all_accounts 로 한 번 올려서
-    // 다음부터는 건너뛰게 한다.
-    for (date, row) in &history {
-        if !row.all_accounts && *date != today {
-            by_day.entry(date.clone()).or_default();
-        }
-    }
-
-    // 새로 계산된 날짜는 history 에 finalize (한 번만).
     let now_ms = Utc::now().timestamp_millis();
-    for (date, totals) in &by_day {
-        let mut merged = totals.clone();
-        if let Some(old) = history.get(date) {
-            // all_accounts 가 아닌 예전 행 = ~/.claude 분. 다른 계정분과 합친다.
-            merged.merge(&old.totals);
-        }
+    for (date, totals) in days_to_finalize(events, &history, &today, accounts) {
         let row = HistoryRow {
             date: date.clone(),
-            totals: merged,
+            totals,
             finalized_at_ms: now_ms,
-            all_accounts: true,
+            schema: HISTORY_SCHEMA,
         };
         append_history(&row);
-        history.insert(date.clone(), row);
+        history.insert(date, row);
     }
 
     // history 의 모든 날짜 (오늘 제외) 를 결과에 합침.
@@ -945,6 +977,78 @@ fn finalized_daily(events: &[&CcEvent]) -> BTreeMap<String, Totals> {
     out
 }
 
+/// 새로 finalize 할 (날짜, Totals).
+///
+/// - history 에 없는 날짜: transcript 로 센다.
+/// - 예전 schema 행: 예전 값은 `~/.claude` 만, 중복까지 더해 센 값이다.
+///   그날 `~/.claude` transcript 가 온전히 남아 있으면 모든 계정을 다시 센
+///   값으로 바꾼다. 일부라도 지워졌을 수 있으면 다시 세면 오히려 줄어들므로
+///   예전 값은 그대로 두고 다른 계정분만 더한다. 어느 쪽이든 schema 를 올려
+///   다음부터는 건너뛴다.
+fn days_to_finalize(
+    events: &[&CcEvent],
+    history: &HashMap<String, HistoryRow>,
+    today: &str,
+    accounts: &[AccountDir],
+) -> BTreeMap<String, Totals> {
+    // 지워진 `~/.claude` transcript 는 모두 남은 파일 중 가장 오래된 mtime
+    // 이전 것이므로, 그 다음 날부터는 그날 기록이 온전하다.
+    let complete_from: Option<String> = accounts
+        .iter()
+        .find(|a| a.account == DEFAULT_ACCOUNT)
+        .and_then(|a| a.oldest_mtime_ms)
+        .map(|ms| day_label(ms + DAY_MS));
+
+    #[derive(Default)]
+    struct Day {
+        all: Totals,
+        others: Totals,
+        has_default: bool,
+    }
+    let mut days: BTreeMap<String, Day> = BTreeMap::new();
+    for &ev in events {
+        let day = day_label(ev.ts_ms);
+        if day == today {
+            continue;
+        }
+        if history.get(&day).is_some_and(|r| r.schema >= HISTORY_SCHEMA) {
+            continue;
+        }
+        let d = days.entry(day).or_default();
+        d.all.add(ev);
+        if ev.account == DEFAULT_ACCOUNT {
+            d.has_default = true;
+        } else {
+            d.others.add(ev);
+        }
+    }
+
+    let mut out: BTreeMap<String, Totals> = BTreeMap::new();
+    for (date, d) in days {
+        let totals = match history.get(&date) {
+            None => d.all,
+            Some(_)
+                if d.has_default
+                    && complete_from.as_deref().is_some_and(|f| date.as_str() >= f) =>
+            {
+                d.all
+            }
+            Some(old) => {
+                let mut t = old.totals.clone();
+                t.merge(&d.others);
+                t
+            }
+        };
+        out.insert(date, totals);
+    }
+    for (date, row) in history {
+        if row.schema < HISTORY_SCHEMA && date != today && !out.contains_key(date) {
+            out.insert(date.clone(), row.totals.clone());
+        }
+    }
+    out
+}
+
 /// 일별 히스토리 (90일 sparkline / 달력 잔디용 — 빈 날짜 0 으로 채움).
 ///
 /// v0.7.1+: 어제까지 = history.jsonl 에서, 오늘 = transcript 실시간.
@@ -953,8 +1057,8 @@ pub fn daily_series(days: u32) -> Vec<DailyPoint> {
     let from = now - (days as i64) * DAY_MS;
     let today = day_label(now);
 
-    with_events(|events, _| {
-        let mut by_day = finalized_daily(events);
+    with_events(|events, accounts| {
+        let mut by_day = finalized_daily(events, accounts);
 
         // 오늘은 transcript 에서 실시간 집계.
         let mut today_totals = Totals::default();
@@ -989,8 +1093,8 @@ pub fn daily_series(days: u32) -> Vec<DailyPoint> {
 pub fn monthly_series() -> Vec<DailyPoint> {
     let today = day_label(Utc::now().timestamp_millis());
 
-    with_events(|events, _| {
-        let by_day = finalized_daily(events);
+    with_events(|events, accounts| {
+        let by_day = finalized_daily(events, accounts);
 
         // history 의 모든 어제까지 + 오늘 transcript.
         let mut by_month: BTreeMap<String, Totals> = BTreeMap::new();
@@ -1054,6 +1158,7 @@ mod tests {
             cache_5m_tokens: cc,
             cache_1h_tokens: 0,
             cache_read_tokens: cr,
+            dedup_key: 0,
         }
     }
 
@@ -1125,16 +1230,19 @@ mod tests {
                 account: DEFAULT_ACCOUNT,
                 dir: "~/.claude".into(),
                 projects: PathBuf::from("/x/.claude/projects"),
+                oldest_mtime_ms: None,
             },
             AccountDir {
                 account: intern("bomyi"),
                 dir: "~/.claude-bomyi".into(),
                 projects: PathBuf::from("/x/.claude-bomyi/projects"),
+                oldest_mtime_ms: None,
             },
             AccountDir {
                 account: intern("hckim"),
                 dir: "~/.claude-hckim".into(),
                 projects: PathBuf::from("/x/.claude-hckim/projects"),
+                oldest_mtime_ms: None,
             },
         ];
         let s = summarize_events(&refs, &dirs, 0, now + 1, "all");
@@ -1144,6 +1252,113 @@ mod tests {
         assert_eq!(s.by_account[0].dir, "~/.claude-hckim");
         assert_eq!(s.by_account[2].totals.calls, 0);
         assert_eq!(s.totals.total_tokens, 110);
+    }
+
+    #[test]
+    fn same_response_lines_share_dedup_key() {
+        let a = r#"{"type":"assistant","timestamp":"2026-10-13T01:00:00.000Z","requestId":"req_1","message":{"id":"msg_01a","model":"claude-opus-4-7","usage":{"input_tokens":2,"output_tokens":8}}}"#;
+        let b = r#"{"type":"assistant","timestamp":"2026-10-13T01:00:01.000Z","requestId":"req_1","message":{"id":"msg_01a","model":"claude-opus-4-7","usage":{"input_tokens":2,"output_tokens":225}}}"#;
+        let c = r#"{"type":"assistant","timestamp":"2026-10-13T01:00:02.000Z","requestId":"req_2","message":{"id":"msg_01b","model":"claude-opus-4-7","usage":{"input_tokens":2,"output_tokens":5}}}"#;
+        let (a, b, c) = (
+            parse_line(a, DEFAULT_ACCOUNT).unwrap(),
+            parse_line(b, DEFAULT_ACCOUNT).unwrap(),
+            parse_line(c, DEFAULT_ACCOUNT).unwrap(),
+        );
+        assert_ne!(a.dedup_key, 0);
+        assert_eq!(a.dedup_key, b.dedup_key);
+        assert_ne!(a.dedup_key, c.dedup_key);
+    }
+
+    #[test]
+    fn dedup_counts_each_response_once_with_largest_output() {
+        let mut a1 = ev(1, "m", "anthropic_api", 2, 8, 100, 1000);
+        let mut a2 = ev(2, "m", "anthropic_api", 2, 225, 100, 1000);
+        let mut a3 = ev(3, "m", "anthropic_api", 2, 225, 100, 1000);
+        let mut b = ev(4, "m", "anthropic_api", 2, 5, 0, 0);
+        a1.dedup_key = 7;
+        a2.dedup_key = 7;
+        a3.dedup_key = 7;
+        b.dedup_key = 9;
+        let no_id_1 = ev(5, "m", "anthropic_api", 1, 1, 0, 0);
+        let no_id_2 = ev(6, "m", "anthropic_api", 1, 1, 0, 0);
+        let events = vec![a1, a2, a3, b, no_id_1, no_id_2];
+        let refs = dedup_responses(events.iter().collect());
+        assert_eq!(refs.len(), 4);
+        assert_eq!(refs[0].output_tokens, 225);
+        let s = summarize_events(&refs, &[], 0, 100, "all");
+        assert_eq!(s.totals.calls, 4);
+        assert_eq!(s.totals.output_tokens, 225 + 5 + 1 + 1);
+        assert_eq!(s.totals.cache_read_tokens, 1000);
+    }
+
+    #[test]
+    fn days_to_finalize_recounts_only_fully_retained_old_rows() {
+        let day = |d: &str| {
+            Local
+                .from_local_datetime(
+                    &NaiveDate::parse_from_str(d, "%Y-%m-%d")
+                        .unwrap()
+                        .and_hms_opt(12, 0, 0)
+                        .unwrap(),
+                )
+                .unwrap()
+                .timestamp_millis()
+        };
+        let row = |date: &str, total: u64, schema: u32| HistoryRow {
+            date: date.into(),
+            totals: Totals {
+                total_tokens: total,
+                ..Default::default()
+            },
+            finalized_at_ms: 0,
+            schema,
+        };
+        let at = |d: &str, tokens: u64, account: &'static str| {
+            let mut e = ev(day(d), "m", "anthropic_api", tokens, 0, 0, 0);
+            e.account = account;
+            e
+        };
+        let hckim = intern("hckim");
+        let mut history = HashMap::new();
+        // 가장 오래된 ~/.claude 파일(09-10)보다 이전 → 일부만 남았을 수 있음.
+        history.insert("2026-09-05".to_string(), row("2026-09-05", 900, 0));
+        // 온전히 남은 날짜의 예전 행 → 다시 셈.
+        history.insert("2026-10-01".to_string(), row("2026-10-01", 999, 0));
+        // transcript 가 하나도 없는 예전 행 → 값 유지.
+        history.insert("2026-08-01".to_string(), row("2026-08-01", 555, 0));
+        // 최신 행 → 건드리지 않음.
+        history.insert("2026-10-02".to_string(), row("2026-10-02", 777, HISTORY_SCHEMA));
+
+        let events = vec![
+            at("2026-09-05", 5, DEFAULT_ACCOUNT),
+            at("2026-09-05", 7, hckim),
+            at("2026-10-01", 10, DEFAULT_ACCOUNT),
+            at("2026-10-01", 1, hckim),
+            at("2026-10-02", 20, DEFAULT_ACCOUNT),
+            at("2026-10-03", 30, hckim),
+            at("2026-10-13", 40, DEFAULT_ACCOUNT),
+        ];
+        let accounts = vec![AccountDir {
+            account: DEFAULT_ACCOUNT,
+            dir: "~/.claude".into(),
+            projects: PathBuf::from("/x/.claude/projects"),
+            oldest_mtime_ms: Some(day("2026-09-10")),
+        }];
+        let refs: Vec<&CcEvent> = events.iter().collect();
+        let out = days_to_finalize(&refs, &history, "2026-10-13", &accounts);
+        let got: Vec<(&str, u64)> = out
+            .iter()
+            .map(|(d, t)| (d.as_str(), t.total_tokens))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("2026-08-01", 555),
+                ("2026-09-05", 907),
+                ("2026-10-01", 11),
+                ("2026-10-03", 30),
+            ]
+        );
     }
 
     #[test]
