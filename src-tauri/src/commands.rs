@@ -3299,6 +3299,7 @@ pub fn dashboard_claude_code(range: String) -> DanbiResult<crate::claude_code_us
             totals: Default::default(),
             by_model: Vec::new(),
             by_project: Vec::new(),
+            by_account: Vec::new(),
             by_backend: std::collections::HashMap::new(),
             daily: Vec::new(),
             hourly: Vec::new(),
@@ -3744,6 +3745,25 @@ fn agent_skill_root(agent: Option<&str>) -> &'static str {
     }
 }
 
+/// Every `skills/` directory a skill should land in. The first entry is
+/// the primary one (`~/.claude/skills` / `~/.codex/skills`). For Claude
+/// Code, per-account config dirs (`CLAUDE_CONFIG_DIR=~/.claude-<계정>`)
+/// commonly symlink their `skills/` to `~/.claude-shared/skills`, so when
+/// that folder exists the skill is written there too and every account
+/// picks it up. Paths resolving to the same directory are written once.
+fn agent_skill_dirs(home: &std::path::Path, agent: Option<&str>) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![home.join(agent_skill_root(agent)).join("skills")];
+    if agent_skill_root(agent) == ".claude" {
+        let shared = home.join(".claude-shared").join("skills");
+        if shared.is_dir() {
+            dirs.push(shared);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|d| seen.insert(std::fs::canonicalize(d).unwrap_or_else(|_| d.clone())));
+    dirs
+}
+
 /// Resolve the project's scoped MCP URL using the running config + the
 /// project's stable `.danbi-id`. Falls back to a placeholder when MCP
 /// isn't configured yet so the skill still installs cleanly.
@@ -3760,8 +3780,9 @@ fn project_mcp_url(vault_path: &std::path::Path, project: &str) -> String {
 }
 
 /// Install (or refresh) a per-project Danbi skill at
-/// `~/.claude/skills/danbi-<slug>/SKILL.md`. Returns the absolute path
-/// so the UI can surface where it landed.
+/// `~/.claude/skills/danbi-<slug>/SKILL.md` (and `~/.claude-shared/skills/`
+/// when present — see [`agent_skill_dirs`]). Returns the primary absolute
+/// path so the UI can surface where it landed.
 ///
 /// Source of truth is `<vault>/Projects/<project>/SKILL.md`. If the
 /// user hasn't customised the skill yet that file is seeded with the
@@ -3792,16 +3813,19 @@ pub fn install_skill(project: String, agent: Option<String>) -> DanbiResult<Stri
 
     let home = dirs::home_dir()
         .ok_or_else(|| DanbiError::Other("home directory not found".into()))?;
-    let skill_dir = home
-        .join(agent_skill_root(agent.as_deref()))
-        .join("skills")
-        .join(skill_dir_for(&project));
-    std::fs::create_dir_all(&skill_dir)
-        .map_err(|e| DanbiError::Other(format!("create skill dir: {e}")))?;
-    let skill_md = skill_dir.join("SKILL.md");
-    std::fs::write(&skill_md, rendered)
-        .map_err(|e| DanbiError::Other(format!("write SKILL.md: {e}")))?;
-    Ok(skill_md.to_string_lossy().to_string())
+    let mut primary = None;
+    for root in agent_skill_dirs(&home, agent.as_deref()) {
+        let skill_dir = root.join(skill_dir_for(&project));
+        std::fs::create_dir_all(&skill_dir)
+            .map_err(|e| DanbiError::Other(format!("create skill dir: {e}")))?;
+        let skill_md = skill_dir.join("SKILL.md");
+        std::fs::write(&skill_md, &rendered)
+            .map_err(|e| DanbiError::Other(format!("write SKILL.md: {e}")))?;
+        primary.get_or_insert(skill_md);
+    }
+    Ok(primary
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default())
 }
 
 /// Whether THIS project's skill file exists. Used to swap the header
@@ -3812,12 +3836,10 @@ pub fn skill_status(project: String, agent: Option<String>) -> DanbiResult<bool>
         Some(p) => p,
         None => return Ok(false),
     };
-    let skill_md = home
-        .join(agent_skill_root(agent.as_deref()))
-        .join("skills")
-        .join(skill_dir_for(&project))
-        .join("SKILL.md");
-    Ok(skill_md.exists())
+    let dir = skill_dir_for(&project);
+    Ok(agent_skill_dirs(&home, agent.as_deref())
+        .iter()
+        .any(|root| root.join(&dir).join("SKILL.md").exists()))
 }
 
 #[derive(Serialize)]
@@ -4357,5 +4379,60 @@ mod codex_tests {
         drop(index);
         drop(repo);
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod skill_dir_tests {
+    use super::agent_skill_dirs;
+
+    fn temp_home(label: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "danbi-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn claude_skills_include_shared_dir_when_present() {
+        let home = temp_home("skills-shared");
+        assert_eq!(
+            agent_skill_dirs(&home, None),
+            vec![home.join(".claude/skills")]
+        );
+        std::fs::create_dir_all(home.join(".claude-shared/skills")).unwrap();
+        assert_eq!(
+            agent_skill_dirs(&home, Some("claude")),
+            vec![home.join(".claude/skills"), home.join(".claude-shared/skills")]
+        );
+        // Codex never writes into the Claude shared dir.
+        assert_eq!(
+            agent_skill_dirs(&home, Some("codex")),
+            vec![home.join(".codex/skills")]
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn symlinked_skill_dirs_are_written_once() {
+        let home = temp_home("skills-link");
+        std::fs::create_dir_all(home.join(".claude-shared/skills")).unwrap();
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(
+            home.join(".claude-shared/skills"),
+            home.join(".claude/skills"),
+        )
+        .unwrap();
+        assert_eq!(
+            agent_skill_dirs(&home, None),
+            vec![home.join(".claude/skills")]
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

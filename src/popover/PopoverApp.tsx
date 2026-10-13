@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, ChevronRight, Coins, Power } from "lucide-react";
 import {
+  ccAccountLabel,
   ipc,
   type ActivityOverview,
   type CcSummary,
@@ -203,6 +204,11 @@ function ProjectQuickRow({
 
 function UsageMini({ summary }: { summary: CcSummary }) {
   const t = summary.totals;
+  // 계정(~/.claude-<계정>)이 둘 이상이면 오늘 쓴 계정만 작게 나열.
+  const accounts =
+    summary.by_account.length > 1
+      ? summary.by_account.filter((a) => a.totals.total_tokens > 0)
+      : [];
   return (
     <div className="rounded-md border border-hairline bg-surface-elevated px-2.5 py-2">
       <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.4px] text-stone">
@@ -227,6 +233,24 @@ function UsageMini({ summary }: { summary: CcSummary }) {
           tone="yellow"
         />
       </div>
+      {accounts.length > 0 && (
+        <ul className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 border-t border-hairline pt-1.5 text-[10px]">
+          {accounts.map((a) => (
+            <li
+              key={a.account}
+              className="flex items-baseline justify-between gap-1"
+              title={a.dir}
+            >
+              <span className="truncate text-stone">
+                {ccAccountLabel(a.account)}
+              </span>
+              <span className="shrink-0 font-mono tabular-nums text-on-dark">
+                {fmtToks(a.totals.total_tokens)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

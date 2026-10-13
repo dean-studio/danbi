@@ -10,8 +10,10 @@ import {
   ScrollText,
   Sparkles,
   TrendingUp,
+  Users,
 } from "lucide-react";
 import {
+  ccAccountLabel,
   ipc,
   type CcDailyPoint,
   type CcRange,
@@ -23,7 +25,7 @@ import { cn } from "@/lib/utils";
 /**
  * Claude Code 사용량 카드 (v0.7.0).
  *
- * `~/.claude/projects/**\/*.jsonl` transcript 를 직접 읽어 토큰·세션·
+ * `~/.claude` · `~/.claude-*` 의 `projects/**\/*.jsonl` transcript 를 직접 읽어 토큰·세션·
  * 모델/프로젝트별 분포·히트맵·히스토리를 보여준다. agentcat connectors
  * 와 달리 OAuth endpoint 호출 없이 자기 디스크의 자기 파일만 사용 — 권한
  * 이슈/유지보수 부담 0.
@@ -160,6 +162,21 @@ function CurrentTab({
 
       {/* 일별 sparkline */}
       <Sparkline daily={summary.daily} className="mt-4" />
+
+      {/* 계정별 — ~/.claude-<계정> 이 둘 이상일 때만 */}
+      {summary.by_account.length > 1 && (
+        <div className="mt-4">
+          <BreakdownPanel
+            title="계정별"
+            icon={<Users size={11} className="text-accent-yellow" />}
+            rows={summary.by_account.map((a) => ({
+              label: ccAccountLabel(a.account),
+              extra: a.dir,
+              tokens: a.totals.total_tokens,
+            }))}
+          />
+        </div>
+      )}
 
       {/* 모델별 + 프로젝트별 — 2열 */}
       <div className="mt-4 grid gap-3 lg:grid-cols-2">

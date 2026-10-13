@@ -325,7 +325,7 @@ pub fn run() {
                         tray_badge::clear_and_sync(app);
                     }
                     "popover" => {
-                        if let Err(e) = toggle_popover_window(app, None) {
+                        if let Err(e) = toggle_popover_window(app) {
                             eprintln!("tray popover toggle failed: {e}");
                         }
                         tray_badge::clear_and_sync(app);
@@ -359,27 +359,14 @@ pub fn run() {
                     if let TrayIconEvent::Click {
                         button: MouseButton::Left,
                         button_state: MouseButtonState::Up,
-                        rect,
                         ..
                     } = event
                     {
-                        // `rect.position` and `rect.size` are `Position` /
-                        // `Size` enums holding either Physical or Logical
-                        // variants. Convert both to physical pixels — the
-                        // popover window positioner expects physical x.
-                        let scale = tray
-                            .app_handle()
-                            .primary_monitor()
-                            .ok()
-                            .flatten()
-                            .map(|m| m.scale_factor())
-                            .unwrap_or(1.0);
-                        let pos = rect.position.to_physical::<f64>(scale);
-                        let sz = rect.size.to_physical::<f64>(scale);
-                        let center_x = pos.x + sz.width / 2.0;
-                        if let Err(e) =
-                            toggle_popover_window(tray.app_handle(), Some(center_x))
-                        {
+                        // Placement anchors to the cursor, not `rect` — on
+                        // macOS 27 with multiple displays the icon rect can
+                        // come back in another display's coordinates (see
+                        // popover.rs).
+                        if let Err(e) = toggle_popover_window(tray.app_handle()) {
                             eprintln!("tray popover toggle failed: {e}");
                         }
                         tray_badge::clear_and_sync(tray.app_handle());

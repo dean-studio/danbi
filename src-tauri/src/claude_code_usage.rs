@@ -1,5 +1,9 @@
 //! Claude Code 사용량 — `~/.claude/projects/**/*.jsonl` 파서 + 집계.
 //!
+//! 여러 계정: `CLAUDE_CONFIG_DIR=~/.claude-<계정>` 으로 계정별 폴더를 나눠
+//! 쓰는 경우가 있어 `~/.claude` 와 `~/.claude-*` 중 `projects/` 가 있는
+//! 폴더를 모두 읽고, 이벤트마다 계정(폴더 이름)을 붙여 계정별로도 집계한다.
+//!
 //! Claude Code 가 매 어시스턴트 응답마다 jsonl 한 줄을 자기 디스크에
 //! 기록한다. 그 안의 `message.usage` 필드에는 input/output/cache 토큰이
 //! 정확히 박혀 있어, 우리는 OAuth endpoint 호출 없이도 사용량을
@@ -61,6 +65,8 @@ const DAY_MS: i64 = 86_400_000;
 #[derive(Debug, Clone, Serialize)]
 pub struct CcEvent {
     pub ts_ms: i64,
+    /// 계정 id — `~/.claude` 는 [`DEFAULT_ACCOUNT`], `~/.claude-hckim` 은 `hckim`.
+    pub account: &'static str,
     pub session_id: String,
     /// cwd 디렉토리 절대 경로 (e.g. `/Users/hazbola/works/agent/danbi`).
     pub cwd: String,
@@ -126,7 +132,7 @@ struct RawCacheBreakdown {
     ephemeral_1h_input_tokens: i64,
 }
 
-fn parse_line(line: &str) -> Option<CcEvent> {
+fn parse_line(line: &str, account: &'static str) -> Option<CcEvent> {
     let raw: RawLine = serde_json::from_str(line).ok()?;
     if raw.ty.as_deref() != Some("assistant") {
         return None;
@@ -148,6 +154,7 @@ fn parse_line(line: &str) -> Option<CcEvent> {
     let bd = usage.cache_creation.unwrap_or_default();
     Some(CcEvent {
         ts_ms,
+        account,
         session_id: raw.session_id.unwrap_or_default(),
         cwd: raw.cwd.unwrap_or_default(),
         git_branch: raw.git_branch,
@@ -164,8 +171,77 @@ fn parse_line(line: &str) -> Option<CcEvent> {
 
 // ---------- 디스크 walk + 캐시 ----------
 
-fn projects_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".claude").join("projects"))
+/// `~/.claude` 의 계정 id. 빈 문자열이라 `~/.claude-<이름>` 과 겹치지 않는다
+/// (빈 접미사 `~/.claude-` 는 건너뜀).
+pub const DEFAULT_ACCOUNT: &str = "";
+
+/// Claude Code 설정 폴더 하나 = 계정 하나.
+#[derive(Debug, Clone)]
+struct AccountDir {
+    account: &'static str,
+    /// 표시용 경로 (`~/.claude-hckim`).
+    dir: String,
+    projects: PathBuf,
+}
+
+/// 계정 이름을 `&'static str` 로 intern. 이벤트 수십만 건에 String 을
+/// 하나씩 붙이지 않으려는 것 — 계정 수만큼(한 자릿수)만 leak 된다.
+fn intern(name: &str) -> &'static str {
+    static NAMES: OnceLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
+        OnceLock::new();
+    let mut set = NAMES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(&n) = set.get(name) {
+        return n;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    set.insert(leaked);
+    leaked
+}
+
+/// `~/.claude` + `~/.claude-*` 중 `projects/` 가 있는 폴더. `~/.claude-shared`
+/// 처럼 projects 가 없는 공용 폴더는 자연히 빠진다. 심볼릭 링크로 같은
+/// projects 를 가리키면 한 번만 센다.
+fn account_dirs() -> Vec<AccountDir> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&home) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == ".claude" || name.starts_with(".claude-") {
+                names.push(name);
+            }
+        }
+    }
+    names.sort();
+
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for name in names {
+        let projects = home.join(&name).join("projects");
+        if !projects.is_dir() {
+            continue;
+        }
+        let canon = fs::canonicalize(&projects).unwrap_or_else(|_| projects.clone());
+        if !seen.insert(canon) {
+            continue;
+        }
+        let account = match name.strip_prefix(".claude-") {
+            Some("") => continue,
+            Some(suffix) => intern(suffix),
+            None => DEFAULT_ACCOUNT,
+        };
+        out.push(AccountDir {
+            account,
+            dir: format!("~/{name}"),
+            projects,
+        });
+    }
+    out
 }
 
 #[derive(Default)]
@@ -182,6 +258,8 @@ struct FileEntry {
 #[derive(Default)]
 struct Cache {
     files: HashMap<PathBuf, FileEntry>,
+    /// 마지막 refresh 때 발견한 계정 폴더 — 사용량 0 인 계정도 목록에 보이게.
+    accounts: Vec<AccountDir>,
 }
 
 fn cache() -> &'static RwLock<Cache> {
@@ -225,7 +303,11 @@ fn list_jsonl_files(root: &Path) -> Vec<PathBuf> {
 /// 줄)만** 파싱한다. 반환값의 두 번째 요소는 마지막 개행 다음 절대
 /// 오프셋 — 다음 tail 파싱의 시작점이 된다. 아직 개행으로 끝나지 않은
 /// 꼬리(쓰는 중인 부분 줄)는 소비하지 않고 남겨둔다.
-fn parse_from(path: &Path, start: u64) -> std::io::Result<(Vec<CcEvent>, u64)> {
+fn parse_from(
+    path: &Path,
+    start: u64,
+    account: &'static str,
+) -> std::io::Result<(Vec<CcEvent>, u64)> {
     let mut f = fs::File::open(path)?;
     if start > 0 {
         f.seek(SeekFrom::Start(start))?;
@@ -246,7 +328,7 @@ fn parse_from(path: &Path, start: u64) -> std::io::Result<(Vec<CcEvent>, u64)> {
             if let Ok(s) = std::str::from_utf8(&buf[line_start..i]) {
                 let t = s.trim();
                 if !t.is_empty() {
-                    if let Some(ev) = parse_line(t) {
+                    if let Some(ev) = parse_line(t, account) {
                         events.push(ev);
                     }
                 }
@@ -287,15 +369,20 @@ enum CacheUpdate {
 /// 이후의 새 바이트만 파싱한다. 파일이 줄거나(size < parsed_bytes) 사라진
 /// 뒤 새로 생기면 전체 재파싱으로 안전하게 폴백.
 fn refresh_cache() {
-    let Some(root) = projects_dir() else {
-        return;
-    };
-    let files = list_jsonl_files(&root);
+    let accounts = account_dirs();
+    let files: Vec<(PathBuf, &'static str)> = accounts
+        .iter()
+        .flat_map(|a| {
+            list_jsonl_files(&a.projects)
+                .into_iter()
+                .map(move |p| (p, a.account))
+        })
+        .collect();
 
     // 1) read-lock 으로 이전 상태 스냅샷만 확보 (파싱은 락 밖에서).
     let mut prev: HashMap<PathBuf, (i64, u64, u64)> = HashMap::new();
     if let Ok(cache) = cache().read() {
-        for path in &files {
+        for (path, _) in &files {
             if let Some(e) = cache.files.get(path) {
                 prev.insert(path.clone(), (e.mtime_ms, e.size, e.parsed_bytes));
             }
@@ -304,7 +391,8 @@ fn refresh_cache() {
 
     // 2) 락 없이 변경분만 파싱.
     let mut work: Vec<(PathBuf, CacheUpdate)> = Vec::new();
-    for path in &files {
+    for (path, account) in &files {
+        let account = *account;
         let Ok(meta) = fs::metadata(path) else { continue };
         let m = mtime_ms(&meta);
         let s = meta.len();
@@ -313,7 +401,7 @@ fn refresh_cache() {
             Some(&(pm, ps, _)) if pm == m && ps == s => {}
             // append-only 성장(또는 mtime 만 갱신) → tail 만.
             Some(&(_, _, parsed)) if s >= parsed => {
-                if let Ok((events, new_parsed)) = parse_from(path, parsed) {
+                if let Ok((events, new_parsed)) = parse_from(path, parsed, account) {
                     work.push((
                         path.clone(),
                         CacheUpdate::Append {
@@ -328,7 +416,7 @@ fn refresh_cache() {
             }
             // 신규 or 잘림/회전 → 전체.
             _ => {
-                if let Ok((events, new_parsed)) = parse_from(path, 0) {
+                if let Ok((events, new_parsed)) = parse_from(path, 0, account) {
                     work.push((
                         path.clone(),
                         CacheUpdate::Replace {
@@ -386,8 +474,9 @@ fn refresh_cache() {
         }
         // 사라진 파일은 캐시에서 제거.
         let alive: std::collections::HashSet<&Path> =
-            files.iter().map(|p| p.as_path()).collect();
+            files.iter().map(|(p, _)| p.as_path()).collect();
         cache.files.retain(|p, _| alive.contains(p.as_path()));
+        cache.accounts = accounts;
     }
 }
 
@@ -398,17 +487,19 @@ fn refresh_cache() {
 /// 통째 clone + sort 했다. Claude Code 대시보드 한 번 열면 summarize/daily/monthly
 /// 세 경로가 각각 clone → 수십 MB 임시 할당이 반복되며 allocator RSS 고수위를
 /// 밀어올렸다. 이제 struct 는 복사하지 않고 포인터(`&CcEvent`)만 모아 정렬한다.
-fn with_events<R>(f: impl FnOnce(&[&CcEvent]) -> R) -> R {
+fn with_events<R>(f: impl FnOnce(&[&CcEvent], &[AccountDir]) -> R) -> R {
     refresh_cache();
     let guard = cache().read();
     let mut refs: Vec<&CcEvent> = Vec::new();
+    let mut accounts: &[AccountDir] = &[];
     if let Ok(cache) = guard.as_ref() {
         for entry in cache.files.values() {
             refs.extend(entry.events.iter());
         }
+        accounts = &cache.accounts;
     }
     refs.sort_by_key(|e| e.ts_ms);
-    f(&refs)
+    f(&refs, accounts)
 }
 
 /// 캐시 강제 무효화 — Settings 의 "다시 인덱싱" 버튼 등에서 호출.
@@ -534,6 +625,15 @@ pub struct ProjectBreakdown {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AccountBreakdown {
+    /// 계정 id — 빈 문자열 (= `~/.claude`) 또는 `~/.claude-<id>` 의 `<id>`.
+    pub account: String,
+    /// 설정 폴더 표시 경로 (`~/.claude-hckim`).
+    pub dir: String,
+    pub totals: Totals,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DailyPoint {
     pub date: String,
     pub totals: Totals,
@@ -556,6 +656,8 @@ pub struct CcSummary {
     pub totals: Totals,
     pub by_model: Vec<ModelBreakdown>,
     pub by_project: Vec<ProjectBreakdown>,
+    /// 발견된 모든 계정 (range 내 사용량 0 인 계정 포함), 토큰 많은 순.
+    pub by_account: Vec<AccountBreakdown>,
     pub by_backend: HashMap<String, Totals>,
     pub daily: Vec<DailyPoint>,
     pub hourly: Vec<HourlyHeatPoint>,
@@ -568,15 +670,18 @@ pub struct CcSummary {
 }
 
 const DISCLAIMER_TOKENS: &str =
-    "이 숫자는 ~/.claude/projects 의 transcript 를 직접 읽어 집계한 토큰량입니다. OAuth endpoint 호출 없이 자기 디스크의 자기 파일만 사용합니다.";
+    "이 숫자는 ~/.claude · ~/.claude-* 의 projects transcript 를 직접 읽어 집계한 토큰량입니다. OAuth endpoint 호출 없이 자기 디스크의 자기 파일만 사용합니다.";
 
 pub fn summarize(range: Range) -> CcSummary {
     let (from_ms, to_ms) = range.window();
-    with_events(|events| summarize_events(events, from_ms, to_ms, range.label()))
+    with_events(|events, accounts| {
+        summarize_events(events, accounts, from_ms, to_ms, range.label())
+    })
 }
 
 fn summarize_events(
     events: &[&CcEvent],
+    accounts: &[AccountDir],
     from_ms: i64,
     to_ms: i64,
     range_label: &str,
@@ -585,6 +690,7 @@ fn summarize_events(
     let mut by_model: HashMap<(String, String), Totals> = HashMap::new();
     let mut by_project: HashMap<String, Totals> = HashMap::new();
     let mut by_backend: HashMap<String, Totals> = HashMap::new();
+    let mut by_account: HashMap<&'static str, Totals> = HashMap::new();
     let mut by_day: BTreeMap<String, Totals> = BTreeMap::new();
     let mut by_hour: HashMap<(u8, u8), u64> = HashMap::new();
     let mut sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -601,6 +707,7 @@ fn summarize_events(
 
         by_project.entry(ev.cwd.clone()).or_default().add(ev);
         by_backend.entry(ev.backend.clone()).or_default().add(ev);
+        by_account.entry(ev.account).or_default().add(ev);
 
         let day = day_label(ev.ts_ms);
         by_day.entry(day).or_default().add(ev);
@@ -639,6 +746,29 @@ fn summarize_events(
     by_project_vec.sort_by(|a, b| b.totals.total_tokens.cmp(&a.totals.total_tokens));
     by_project_vec.truncate(10);
 
+    let mut by_account_vec: Vec<AccountBreakdown> = accounts
+        .iter()
+        .map(|a| AccountBreakdown {
+            account: a.account.to_string(),
+            dir: a.dir.clone(),
+            totals: by_account.remove(a.account).unwrap_or_default(),
+        })
+        .collect();
+    // 폴더가 사라졌지만 캐시에 이벤트가 남은 계정 (다음 refresh 전까지).
+    for (account, totals) in by_account {
+        by_account_vec.push(AccountBreakdown {
+            account: account.to_string(),
+            dir: String::new(),
+            totals,
+        });
+    }
+    by_account_vec.sort_by(|a, b| {
+        b.totals
+            .total_tokens
+            .cmp(&a.totals.total_tokens)
+            .then_with(|| a.account.cmp(&b.account))
+    });
+
     let daily: Vec<DailyPoint> = by_day
         .into_iter()
         .map(|(date, totals)| DailyPoint { date, totals })
@@ -663,6 +793,7 @@ fn summarize_events(
         totals,
         by_model: by_model_vec,
         by_project: by_project_vec,
+        by_account: by_account_vec,
         by_backend,
         daily,
         hourly,
@@ -706,6 +837,11 @@ struct HistoryRow {
     totals: Totals,
     /// finalize 된 시각 (디버그용).
     finalized_at_ms: i64,
+    /// 모든 계정(`~/.claude-*`)을 합친 값인지. 이 필드가 없던 예전 행은
+    /// `~/.claude` 만 집계한 값이라, 남아 있는 다른 계정 transcript 를
+    /// 한 번 더해서 다시 finalize 한다.
+    #[serde(default)]
+    all_accounts: bool,
 }
 
 fn history_path() -> Option<PathBuf> {
@@ -763,20 +899,36 @@ fn finalized_daily(events: &[&CcEvent]) -> BTreeMap<String, Totals> {
         if day == today {
             continue;
         }
-        if history.contains_key(&day) {
+        match history.get(&day) {
             // 이미 finalize 된 날짜 — transcript 재집계 스킵.
-            continue;
+            Some(row) if row.all_accounts => continue,
+            // 예전(~/.claude 만) 행 — 다른 계정분만 아래에서 더한다.
+            Some(_) if ev.account == DEFAULT_ACCOUNT => continue,
+            _ => {}
         }
         by_day.entry(day).or_default().add(ev);
+    }
+    // 예전 행은 다른 계정 사용량이 없어도 all_accounts 로 한 번 올려서
+    // 다음부터는 건너뛰게 한다.
+    for (date, row) in &history {
+        if !row.all_accounts && *date != today {
+            by_day.entry(date.clone()).or_default();
+        }
     }
 
     // 새로 계산된 날짜는 history 에 finalize (한 번만).
     let now_ms = Utc::now().timestamp_millis();
     for (date, totals) in &by_day {
+        let mut merged = totals.clone();
+        if let Some(old) = history.get(date) {
+            // all_accounts 가 아닌 예전 행 = ~/.claude 분. 다른 계정분과 합친다.
+            merged.merge(&old.totals);
+        }
         let row = HistoryRow {
             date: date.clone(),
-            totals: totals.clone(),
+            totals: merged,
             finalized_at_ms: now_ms,
+            all_accounts: true,
         };
         append_history(&row);
         history.insert(date.clone(), row);
@@ -801,7 +953,7 @@ pub fn daily_series(days: u32) -> Vec<DailyPoint> {
     let from = now - (days as i64) * DAY_MS;
     let today = day_label(now);
 
-    with_events(|events| {
+    with_events(|events, _| {
         let mut by_day = finalized_daily(events);
 
         // 오늘은 transcript 에서 실시간 집계.
@@ -837,7 +989,7 @@ pub fn daily_series(days: u32) -> Vec<DailyPoint> {
 pub fn monthly_series() -> Vec<DailyPoint> {
     let today = day_label(Utc::now().timestamp_millis());
 
-    with_events(|events| {
+    with_events(|events, _| {
         let by_day = finalized_daily(events);
 
         // history 의 모든 어제까지 + 오늘 transcript.
@@ -890,6 +1042,7 @@ mod tests {
     ) -> CcEvent {
         CcEvent {
             ts_ms,
+            account: DEFAULT_ACCOUNT,
             session_id: "s".to_string(),
             cwd: "/x/danbi".to_string(),
             git_branch: None,
@@ -907,7 +1060,7 @@ mod tests {
     #[test]
     fn parse_assistant_with_bedrock_id() {
         let line = r#"{"type":"assistant","timestamp":"2026-06-08T13:24:10.753Z","sessionId":"s1","cwd":"/x","gitBranch":"main","message":{"id":"msg_bdrk_abc","model":"claude-opus-4-7","usage":{"input_tokens":6,"output_tokens":204,"cache_creation_input_tokens":22745,"cache_read_input_tokens":20251}}}"#;
-        let e = parse_line(line).unwrap();
+        let e = parse_line(line, DEFAULT_ACCOUNT).unwrap();
         assert_eq!(e.backend, "bedrock");
         assert_eq!(e.input_tokens, 6);
         assert_eq!(e.cache_creation_tokens, 22745);
@@ -916,14 +1069,14 @@ mod tests {
     #[test]
     fn parse_assistant_with_anthropic_api_id() {
         let line = r#"{"type":"assistant","timestamp":"2026-06-08T13:24:10.753Z","message":{"id":"msg_01abc","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":50}}}"#;
-        let e = parse_line(line).unwrap();
+        let e = parse_line(line, DEFAULT_ACCOUNT).unwrap();
         assert_eq!(e.backend, "anthropic_api");
     }
 
     #[test]
     fn parse_skips_user_and_mode_lines() {
-        assert!(parse_line(r#"{"type":"user","message":{}}"#).is_none());
-        assert!(parse_line(r#"{"type":"mode","mode":"normal"}"#).is_none());
+        assert!(parse_line(r#"{"type":"user","message":{}}"#, DEFAULT_ACCOUNT).is_none());
+        assert!(parse_line(r#"{"type":"mode","mode":"normal"}"#, DEFAULT_ACCOUNT).is_none());
     }
 
     #[test]
@@ -948,7 +1101,7 @@ mod tests {
             ev(now - 3000, "claude-opus-4-7", "anthropic_api", 100, 50, 0, 0),
         ];
         let refs: Vec<&CcEvent> = events.iter().collect();
-        let s = summarize_events(&refs, 0, now + 1, "all");
+        let s = summarize_events(&refs, &[], 0, now + 1, "all");
         assert_eq!(s.totals.calls, 3);
         assert!(s.by_model.len() >= 2);
         assert!(s.by_backend.contains_key("bedrock"));
@@ -957,5 +1110,46 @@ mod tests {
         assert!(
             s.by_model[0].totals.total_tokens >= s.by_model[1].totals.total_tokens
         );
+    }
+
+    #[test]
+    fn summarize_lists_every_account_including_idle_ones() {
+        let now = Utc::now().timestamp_millis();
+        let mut a = ev(now - 1000, "claude-opus-4-7", "anthropic_api", 100, 0, 0, 0);
+        a.account = intern("hckim");
+        let b = ev(now - 2000, "claude-opus-4-7", "anthropic_api", 10, 0, 0, 0);
+        let events = vec![a, b];
+        let refs: Vec<&CcEvent> = events.iter().collect();
+        let dirs = vec![
+            AccountDir {
+                account: DEFAULT_ACCOUNT,
+                dir: "~/.claude".into(),
+                projects: PathBuf::from("/x/.claude/projects"),
+            },
+            AccountDir {
+                account: intern("bomyi"),
+                dir: "~/.claude-bomyi".into(),
+                projects: PathBuf::from("/x/.claude-bomyi/projects"),
+            },
+            AccountDir {
+                account: intern("hckim"),
+                dir: "~/.claude-hckim".into(),
+                projects: PathBuf::from("/x/.claude-hckim/projects"),
+            },
+        ];
+        let s = summarize_events(&refs, &dirs, 0, now + 1, "all");
+        let names: Vec<&str> = s.by_account.iter().map(|a| a.account.as_str()).collect();
+        assert_eq!(names, vec!["hckim", "", "bomyi"]);
+        assert_eq!(s.by_account[0].totals.total_tokens, 100);
+        assert_eq!(s.by_account[0].dir, "~/.claude-hckim");
+        assert_eq!(s.by_account[2].totals.calls, 0);
+        assert_eq!(s.totals.total_tokens, 110);
+    }
+
+    #[test]
+    fn intern_returns_same_pointer() {
+        let a = intern("junseo");
+        let b = intern(&String::from("junseo"));
+        assert!(std::ptr::eq(a, b));
     }
 }

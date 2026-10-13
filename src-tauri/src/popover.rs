@@ -1,6 +1,5 @@
 use tauri::{
-    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewUrl,
-    WebviewWindowBuilder,
+    AppHandle, LogicalPosition, LogicalSize, Manager, Monitor, WebviewUrl, WebviewWindowBuilder,
 };
 
 pub const POPOVER_LABEL: &str = "popover";
@@ -14,21 +13,22 @@ const POPOVER_WIDTH: f64 = 300.0;
 // 사용량 카드는 유지하되 quickInput textarea 슬롯 100px 가 사라져서
 // 다시 줄임. 사용량이 0 이면 카드 자체를 안 그려서 바닥이 비어있는
 // 형태가 되지만, 한 번 마운트되면 같은 height 라 layout shift 없음.
-const POPOVER_HEIGHT: f64 = 315.0;
+// 365: v0.8.7 에 사용량 카드 아래 계정별(~/.claude-<계정>) 2열 목록이
+// 붙으면서 +50 (계정 6개 = 3줄 기준).
+const POPOVER_HEIGHT: f64 = 365.0;
 /// Gap between the top of the screen (menu bar) and the top of the popover.
 const MENUBAR_GAP: f64 = 32.0;
-/// Horizontal nudge from the tray icon's x position so the popover's right
-/// edge doesn't overshoot the screen.
+/// Minimum gap between the popover and the left/right edge of the screen.
 const RIGHT_EDGE_PADDING: f64 = 12.0;
 
-/// Opens the tray popover near the menu bar tray icon, or hides it if already
-/// visible. Creates the window on first invocation.
-pub fn toggle_popover_window(app: &AppHandle, tray_x: Option<f64>) -> tauri::Result<()> {
+/// Opens the tray popover under the mouse cursor on the menu bar, or hides it
+/// if already visible. Creates the window on first invocation.
+pub fn toggle_popover_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
         if win.is_visible().unwrap_or(false) {
             let _ = win.hide();
         } else {
-            position_near_tray(&win, tray_x);
+            position_near_cursor(&win);
             let _ = win.show();
             let _ = win.set_focus();
         }
@@ -50,7 +50,7 @@ pub fn toggle_popover_window(app: &AppHandle, tray_x: Option<f64>) -> tauri::Res
         .visible(false)
         .build()?;
 
-    position_near_tray(&win, tray_x);
+    position_near_cursor(&win);
     let _ = win.show();
     let _ = win.set_focus();
 
@@ -72,31 +72,67 @@ pub fn hide_popover_window(app: &AppHandle) {
     }
 }
 
-fn position_near_tray(win: &tauri::WebviewWindow, tray_x: Option<f64>) {
-    let Some(monitor) = win.current_monitor().ok().flatten() else {
-        return;
-    };
-    let size = monitor.size();
-    let scale = monitor.scale_factor();
-    let screen_w = size.width as f64 / scale;
+/// Logical (point) bounds of a monitor: `(x, y, width, height)`.
+///
+/// tao reports each monitor's position/size as logical points multiplied by
+/// *that monitor's own* scale factor, so dividing by the same factor gives
+/// back the global point-space rectangle macOS uses for window placement.
+fn logical_bounds(m: &Monitor) -> (f64, f64, f64, f64) {
+    let s = m.scale_factor();
+    let pos = m.position();
+    let size = m.size();
+    (
+        pos.x as f64 / s,
+        pos.y as f64 / s,
+        size.width as f64 / s,
+        size.height as f64 / s,
+    )
+}
 
-    let (monitor_origin_x, monitor_origin_y) = {
-        let pos: PhysicalPosition<i32> = *monitor.position();
-        (pos.x as f64 / scale, pos.y as f64 / scale)
-    };
+/// Finds the monitor under the mouse cursor and returns it with the cursor x
+/// in logical points.
+///
+/// tao's `cursor_position()` is `NSEvent mouseLocation` (global points)
+/// scaled by the *primary* monitor's factor, so dividing by that factor
+/// gives exact points regardless of each display's own scale. (The tray
+/// event's `position` is scaled by the clicked menu bar's factor instead,
+/// which is ambiguous with mixed-scale displays.)
+fn locate_cursor(win: &tauri::WebviewWindow) -> Option<(Monitor, f64)> {
+    let cursor = win.cursor_position().ok()?;
+    let s = win.primary_monitor().ok().flatten()?.scale_factor();
+    let (x, y) = (cursor.x / s, cursor.y / s);
+    win.available_monitors().ok()?.into_iter().find_map(|m| {
+        let (mx, my, mw, mh) = logical_bounds(&m);
+        (x >= mx && x < mx + mw && y >= my && y < my + mh).then_some((m, x))
+    })
+}
 
-    // Center below tray icon if we have its x; otherwise right-align.
-    let x = match tray_x {
-        Some(tx) => {
-            // `tx` is a physical-pixel x on the menu bar.
-            let logical_tx = tx / scale;
-            let centered = logical_tx - POPOVER_WIDTH / 2.0;
-            let max_x = monitor_origin_x + screen_w - POPOVER_WIDTH - RIGHT_EDGE_PADDING;
-            centered.min(max_x).max(monitor_origin_x + RIGHT_EDGE_PADDING)
-        }
-        None => monitor_origin_x + screen_w - POPOVER_WIDTH - RIGHT_EDGE_PADDING,
+/// Places the popover under the cursor, on the monitor that was clicked.
+///
+/// macOS 27 + multiple displays: the tray icon rect from the click event can
+/// come back in another display's coordinates (the icon x flipped between
+/// 2053 and 4613 on a 3-monitor setup), which pushed the popover against the
+/// right edge of the wrong screen. The cursor (`NSEvent mouseLocation`) is
+/// global and reliable, so we anchor to it instead.
+fn position_near_cursor(win: &tauri::WebviewWindow) {
+    let (monitor, cursor_x) = match locate_cursor(win) {
+        Some((m, x)) => (m, Some(x)),
+        None => match win.current_monitor().ok().flatten() {
+            Some(m) => (m, None),
+            None => return,
+        },
     };
-    let y = monitor_origin_y + MENUBAR_GAP;
+    let (mx, my, mw, _) = logical_bounds(&monitor);
+
+    // Center below the click if we have it; otherwise right-align.
+    let max_x = mx + mw - POPOVER_WIDTH - RIGHT_EDGE_PADDING;
+    let x = match cursor_x {
+        Some(cx) => (cx - POPOVER_WIDTH / 2.0)
+            .min(max_x)
+            .max(mx + RIGHT_EDGE_PADDING),
+        None => max_x,
+    };
+    let y = my + MENUBAR_GAP;
 
     let _ = win.set_size(LogicalSize::new(POPOVER_WIDTH, POPOVER_HEIGHT));
     let _ = win.set_position(LogicalPosition::new(x, y));

@@ -538,6 +538,14 @@ export type CcProjectBreakdown = {
   label: string;
   totals: CcTotals;
 };
+export type CcAccountBreakdown = {
+  /** 빈 문자열 = ~/.claude, 그 외 = ~/.claude-<account> */
+  account: string;
+  dir: string;
+  totals: CcTotals;
+};
+/** 표시용 계정 이름 — 빈 문자열 (= ~/.claude) 은 "기본". */
+export const ccAccountLabel = (account: string) => account || "기본";
 export type CcHourlyHeatPoint = { dow: number; hour: number; tokens: number };
 
 export type CcSummary = {
@@ -548,6 +556,7 @@ export type CcSummary = {
   totals: CcTotals;
   by_model: CcModelBreakdown[];
   by_project: CcProjectBreakdown[];
+  by_account: CcAccountBreakdown[];
   by_backend: Record<string, CcTotals>;
   daily: CcDailyPoint[];
   hourly: CcHourlyHeatPoint[];
