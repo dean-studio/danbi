@@ -49,6 +49,16 @@ if [[ "${1:-}" != "--skip-build" ]]; then
     exit 1
   fi
 
+  # 이전 실행이 실패하면 bundle_dmg.sh 의 임시 RW 이미지(rw.*.dmg)가
+  # /Volumes/dmg.* 로 마운트된 채 남아 다음 DMG 빌드가 실패한다
+  # (v0.8.1·v0.8.7 등 반복 재발). 빌드 전에 떼고 지운다.
+  for vol in /Volumes/dmg.*; do
+    [[ -d "$vol" ]] || continue
+    echo "→ detaching stale DMG volume $vol"
+    hdiutil detach "$vol" -force >/dev/null 2>&1 || true
+  done
+  find "$BUNDLE" -maxdepth 2 -name 'rw.*.dmg' -print -delete 2>/dev/null || true
+
   echo "→ building signed release v$VERSION (target=$TARGET_TRIPLE)"
   echo "  using cargo: $(which cargo)"
   echo "  host triple: $(rustc -vV | awk '/^host:/ {print $2}')"
