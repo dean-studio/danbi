@@ -786,6 +786,7 @@ function McpPanel() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  const [writeProject, setWriteProject] = useState<string>("");
 
   useEffect(() => {
     ipc.mcpStatus().then(setStatus).catch((e) => setErr(String(e)));
@@ -846,6 +847,20 @@ function McpPanel() {
   const cliCommand = status
     ? `claude mcp add --transport http danbi "${status.url}" --header "Authorization: Bearer ${status.token}"`
     : "";
+
+  // 권장 연결: 읽기 서버는 전역(user) 1개, 쓰기 서버는 코드 폴더마다
+  // (local) 그 프로젝트로만. 프로젝트마다 전체 서버를 붙이던 방식보다
+  // 세션에 뜨는 도구 수가 크게 줄어든다.
+  const writeEndpoint =
+    status?.projects.find((p) => p.project === writeProject) ??
+    status?.projects[0];
+  const readCommand = status
+    ? `claude mcp add --transport http -s user danbi_read "${status.url}/read" --header "Authorization: Bearer ${status.token}"`
+    : "";
+  const writeCommand =
+    status && writeEndpoint
+      ? `claude mcp add --transport http -s local danbi "${writeEndpoint.url}/write" --header "Authorization: Bearer ${status.token}"`
+      : "";
 
   const claudeMdTemplate = `<!--
   단비(Danbi) vault 연동 블록. 이 마커 사이는 단비가 관리한다.
@@ -1065,10 +1080,71 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
             </div>
           </Row>
 
+          <div className="mt-4 rounded-md border border-accent-blue/40 bg-surface-elevated p-3">
+            <div className="text-[13px] font-medium text-on-dark">
+              권장 연결 · 도구 수 줄이기
+            </div>
+            <div className="mt-1 text-caption-sm leading-[1.6] text-mute">
+              프로젝트마다 단비 서버를 통째로 붙이면 세션마다 도구가 수십
+              개씩 늘어나요. 읽기는 전역으로 한 번, 쓰기는 코드 폴더마다 그
+              프로젝트로만 붙이세요.
+            </div>
+
+            <div className="mt-3 mb-1 flex items-center justify-between">
+              <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
+                1. 읽기 · 한 번만 (모든 폴더)
+              </span>
+              <button
+                onClick={() => copy("read", readCommand)}
+                className="inline-flex h-6 items-center gap-1 rounded-sm border border-accent-blue bg-accent-blue-soft px-2 text-[11px] font-medium text-accent-blue"
+              >
+                <Copy size={10} /> 명령 복사
+              </button>
+            </div>
+            <pre className="rounded-md border border-hairline bg-surface p-3 font-mono text-[11px] leading-[1.6] text-body whitespace-pre-wrap break-all">
+              {readCommand}
+            </pre>
+
+            <div className="mt-3 mb-1 flex items-center justify-between gap-2">
+              <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
+                2. 쓰기 · 코드 폴더에서 실행
+              </span>
+              <div className="flex items-center gap-2">
+                <select
+                  value={writeEndpoint?.project ?? ""}
+                  onChange={(e) => setWriteProject(e.target.value)}
+                  className="h-6 max-w-[180px] rounded-sm border border-hairline bg-surface px-1 text-[11px] text-body"
+                >
+                  {status.projects.map((p) => (
+                    <option key={p.id} value={p.project}>
+                      {p.project}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  onClick={() => copy("write", writeCommand)}
+                  disabled={!writeCommand}
+                  className="inline-flex h-6 items-center gap-1 rounded-sm border border-accent-blue bg-accent-blue-soft px-2 text-[11px] font-medium text-accent-blue disabled:opacity-50"
+                >
+                  <Copy size={10} /> 명령 복사
+                </button>
+              </div>
+            </div>
+            <pre className="rounded-md border border-hairline bg-surface p-3 font-mono text-[11px] leading-[1.6] text-body whitespace-pre-wrap break-all">
+              {writeCommand || "프로젝트가 없어요."}
+            </pre>
+            <div className="mt-2 text-caption-sm leading-[1.6] text-mute">
+              쓰기 연결은 고른 프로젝트에만 기록돼요. 예전에 붙인{" "}
+              <code>danbi-…</code> 프로젝트 서버나 전체 <code>danbi</code>{" "}
+              서버는 <code>claude mcp remove &lt;이름&gt;</code> 로 지워야
+              도구 수가 줄어요 (<code>claude mcp list</code> 로 확인).
+            </div>
+          </div>
+
           <div className="mt-4">
             <div className="mb-1 flex items-center justify-between">
               <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
-                Claude Code · 한 줄 설치
+                Claude Code · 한 줄 설치 (전체 도구)
               </span>
               <button
                 onClick={() => copy("cli", cliCommand)}

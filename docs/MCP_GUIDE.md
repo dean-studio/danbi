@@ -105,6 +105,30 @@ servers
 
 Claude가 `danbi_list_projects` 를 호출하고 결과를 요약해서 답해야 정상입니다.
 
+### 권장: 읽기·쓰기 분리 연결 (도구 수 줄이기)
+
+프로젝트마다 `/mcp/<project-id>` 서버를 따로 붙이면 한 세션에 같은 도구가 서버 수만큼 겹쳐 뜹니다 (예: 9개 프로젝트 × 12개 도구). v0.8.8 부터는 연결을 둘로 나눌 수 있어요.
+
+| 엔드포인트 | 노출 도구 | 범위 | 붙이는 곳 |
+|---|---|---|---|
+| `/mcp/read` | 읽기 도구만 (`danbi_search` · `danbi_context` · `danbi_read` · `danbi_related` …) | vault 전체 | 전역(user) 한 번 |
+| `/mcp/<project-id>/write` | 쓰기 도구만 (`danbi_log` · `danbi_append` …) | 그 프로젝트로 자동 clamp | 코드 폴더마다(local) |
+
+단비 설정 → MCP → **권장 연결** 에서 두 명령을 복사할 수 있어요.
+
+```bash
+# 1. 읽기 — 한 번만 (모든 폴더에서 보임)
+claude mcp add --transport http -s user danbi_read "http://127.0.0.1:47921/mcp/read" \
+  --header "Authorization: Bearer <토큰>"
+
+# 2. 쓰기 — 각 코드 폴더 안에서 실행 (그 폴더에서만 보임)
+claude mcp add --transport http -s local danbi "http://127.0.0.1:47921/mcp/<project-id>/write" \
+  --header "Authorization: Bearer <토큰>"
+```
+
+- 읽기 연결에서 쓰기 도구를 부르면 거절되고, 어느 연결을 써야 하는지 알려줍니다 (반대도 같음).
+- 기존 `/mcp` · `/mcp/<project-id>` 는 그대로 동작합니다. 다만 도구 수를 줄이려면 예전에 붙인 `danbi-…` 프로젝트 서버를 `claude mcp list` 로 확인하고 `claude mcp remove <이름>` 으로 지워야 해요.
+
 ---
 
 ## 4. Cursor 연결

@@ -86,6 +86,11 @@ impl McpServer {
             .route("/mcp", post(handle_rpc))
             .route("/mcp/health", post(handle_health).get(handle_health))
             .route("/mcp/:project_id", post(handle_rpc_scoped))
+            // 세션당 도구 수를 줄이는 분리 연결. /mcp/read 는 읽기 도구만
+            // (전역 1개), /mcp/<id>/write 는 그 프로젝트로 clamp 된 쓰기
+            // 도구만 (코드 폴더마다). 기존 /mcp · /mcp/<id> 는 그대로.
+            .route("/mcp/read", post(handle_rpc_read))
+            .route("/mcp/:project_id/write", post(handle_rpc_scoped_write))
             // Plain REST endpoints — same auth (Bearer token) and same
             // dispatcher as the JSON-RPC routes, but no envelope. Made
             // for external callers (Paperclip, cron jobs, shell scripts)
@@ -620,7 +625,7 @@ async fn handle_rpc(
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
 ) -> axum::response::Response {
-    run_rpc(&state, &headers, req, None).await
+    run_rpc(&state, &headers, req, None, ToolScope::All).await
 }
 
 async fn handle_rpc_scoped(
@@ -629,7 +634,68 @@ async fn handle_rpc_scoped(
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
 ) -> axum::response::Response {
-    run_rpc(&state, &headers, req, Some(project_id)).await
+    run_rpc(&state, &headers, req, Some(project_id), ToolScope::All).await
+}
+
+async fn handle_rpc_read(
+    State(state): State<McpState>,
+    headers: HeaderMap,
+    Json(req): Json<RpcRequest>,
+) -> axum::response::Response {
+    run_rpc(&state, &headers, req, None, ToolScope::ReadOnly).await
+}
+
+async fn handle_rpc_scoped_write(
+    State(state): State<McpState>,
+    AxumPath(project_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(req): Json<RpcRequest>,
+) -> axum::response::Response {
+    run_rpc(&state, &headers, req, Some(project_id), ToolScope::WriteOnly).await
+}
+
+/// Which tools a JSON-RPC endpoint exposes. `All` is what `/mcp` and
+/// `/mcp/<id>` have always served; the split endpoints let a machine
+/// attach one read server globally plus one write server per code folder
+/// instead of N full servers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ToolScope {
+    All,
+    ReadOnly,
+    WriteOnly,
+}
+
+impl ToolScope {
+    fn allows(self, tool: &str) -> bool {
+        match self {
+            ToolScope::All => true,
+            ToolScope::ReadOnly => !is_write_tool(tool),
+            ToolScope::WriteOnly => is_write_tool(tool),
+        }
+    }
+
+    /// Error text for a tool this endpoint doesn't serve — tells the agent
+    /// which endpoint to use instead.
+    fn rejection(self, tool: &str) -> Option<String> {
+        if self.allows(tool) {
+            return None;
+        }
+        Some(match self {
+            ToolScope::ReadOnly => format!(
+                "{tool} 은(는) 쓰기 도구라 읽기 전용 연결(/mcp/read)에서는 쓸 수 없어요. 프로젝트별 쓰기 연결(/mcp/<project-id>/write)의 같은 도구로 호출하세요."
+            ),
+            _ => format!(
+                "{tool} 은(는) 읽기 도구라 이 쓰기 전용 연결(/mcp/<project-id>/write)에는 없어요. 읽기 전용 연결(/mcp/read)의 같은 도구로 호출하세요."
+            ),
+        })
+    }
+}
+
+fn catalog_for(scope: ToolScope) -> Vec<Value> {
+    tool_catalog()
+        .into_iter()
+        .filter(|t| scope.allows(t.get("name").and_then(|n| n.as_str()).unwrap_or("")))
+        .collect()
 }
 
 async fn run_rpc(
@@ -637,6 +703,7 @@ async fn run_rpc(
     headers: &HeaderMap,
     req: RpcRequest,
     scoped_project_id: Option<String>,
+    scope: ToolScope,
 ) -> axum::response::Response {
     if req.jsonrpc != "2.0" {
         return (
@@ -699,9 +766,11 @@ async fn run_rpc(
 
     let (status, body) = match req.method.as_str() {
         "initialize" => {
-            let server_name = match scoped_project.as_ref() {
-                Some(p) => format!("{SERVER_NAME} · {p}"),
-                None => SERVER_NAME.to_string(),
+            let server_name = match (scoped_project.as_ref(), scope) {
+                (Some(p), ToolScope::WriteOnly) => format!("{SERVER_NAME} · {p} · write"),
+                (Some(p), _) => format!("{SERVER_NAME} · {p}"),
+                (None, ToolScope::ReadOnly) => format!("{SERVER_NAME} · read"),
+                (None, _) => SERVER_NAME.to_string(),
             };
             (
                 StatusCode::OK,
@@ -723,7 +792,7 @@ async fn run_rpc(
         ),
         "tools/list" => (
             StatusCode::OK,
-            Json(rpc_ok(req.id, json!({ "tools": tool_catalog() }))),
+            Json(rpc_ok(req.id, json!({ "tools": catalog_for(scope) }))),
         ),
         "tools/call" => {
             let name = req
@@ -736,6 +805,19 @@ async fn run_rpc(
                 .get("arguments")
                 .cloned()
                 .unwrap_or(Value::Null);
+            if let Some(msg) = scope.rejection(name) {
+                return (
+                    StatusCode::OK,
+                    Json(rpc_ok(
+                        req.id,
+                        json!({
+                            "content": [ { "type": "text", "text": format!("error: {msg}") } ],
+                            "isError": true,
+                        }),
+                    )),
+                )
+                    .into_response();
+            }
             // Project-scoped URLs only clamp WRITE tools to the owning
             // project — read tools are left free so an agent attached to
             // project A can still cross-reference project B. This preserves
@@ -1775,5 +1857,95 @@ pub fn ensure_token(cfg: &DanbiConfig) -> String {
         generate_token()
     } else {
         cfg.mcp.token.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(scope: ToolScope) -> Vec<String> {
+        catalog_for(scope)
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn read_scope_lists_only_read_tools() {
+        let read = names(ToolScope::ReadOnly);
+        assert!(read.iter().all(|n| !is_write_tool(n)));
+        for n in ["danbi_search", "danbi_context", "danbi_read", "danbi_related"] {
+            assert!(read.iter().any(|r| r == n), "{n} missing");
+        }
+    }
+
+    #[test]
+    fn write_scope_lists_exactly_the_write_tools() {
+        let mut write = names(ToolScope::WriteOnly);
+        let mut expected: Vec<String> = WRITE_TOOLS.iter().map(|s| s.to_string()).collect();
+        write.sort();
+        expected.sort();
+        assert_eq!(write, expected);
+    }
+
+    #[test]
+    fn all_scope_is_unchanged_and_partitions_into_read_plus_write() {
+        assert_eq!(names(ToolScope::All).len(), tool_catalog().len());
+        assert_eq!(
+            names(ToolScope::ReadOnly).len() + names(ToolScope::WriteOnly).len(),
+            tool_catalog().len()
+        );
+        assert!(ToolScope::All.rejection("danbi_log").is_none());
+        assert!(ToolScope::All.rejection("danbi_search").is_none());
+    }
+
+    #[test]
+    fn rejections_point_to_the_other_endpoint() {
+        let r = ToolScope::ReadOnly.rejection("danbi_log").unwrap();
+        assert!(r.contains("/write"));
+        assert!(ToolScope::ReadOnly.rejection("danbi_search").is_none());
+        let w = ToolScope::WriteOnly.rejection("danbi_search").unwrap();
+        assert!(w.contains("/mcp/read"));
+        assert!(ToolScope::WriteOnly.rejection("danbi_append").is_none());
+    }
+
+    async fn call(scope: ToolScope, body: Value) -> Value {
+        let state = McpState { token: Arc::new("t".into()) };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer t".parse().unwrap());
+        let req: RpcRequest = serde_json::from_value(body).unwrap();
+        let resp = run_rpc(&state, &headers, req, None, scope).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn read_endpoint_filters_list_and_rejects_writes_before_dispatch() {
+        let list = call(
+            ToolScope::ReadOnly,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+        )
+        .await;
+        let tools = list["result"]["tools"].as_array().unwrap();
+        assert!(!tools.is_empty());
+        assert!(tools.iter().all(|t| !is_write_tool(t["name"].as_str().unwrap())));
+
+        let rejected = call(
+            ToolScope::ReadOnly,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": { "name": "danbi_log", "arguments": { "project": "p", "content": "x" } } }),
+        )
+        .await;
+        assert_eq!(rejected["result"]["isError"], true);
+        let text = rejected["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("/mcp/<project-id>/write"), "{text}");
+
+        let init = call(
+            ToolScope::ReadOnly,
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "initialize" }),
+        )
+        .await;
+        assert_eq!(init["result"]["serverInfo"]["name"], "danbi · read");
     }
 }
