@@ -254,6 +254,308 @@ fn clip_lines(s: &str, max: usize) -> String {
     out.trim_end_matches('\n').to_string()
 }
 
+// ---------- Session end ----------
+
+/// Only the tail of a long transcript is read — enough to see recent
+/// writes and to build the summary excerpt.
+const TRANSCRIPT_TAIL_BYTES: u64 = 16 * 1024 * 1024;
+const EXCERPT_CHARS: usize = 24_000;
+const TURN_CHARS: usize = 1_500;
+const SEEN_FILE: &str = ".danbi/session-end-seen.json";
+const SEEN_CAP: usize = 500;
+const MAX_BULLETS: usize = 5;
+
+/// What the session-end logger needs to know about a transcript.
+#[derive(Debug, Default)]
+pub struct TranscriptDigest {
+    /// The session already called a Danbi write tool (MCP or REST).
+    pub wrote_danbi: bool,
+    /// Prompts the user actually typed (tool results / meta excluded).
+    pub user_turns: usize,
+    pub tool_uses: usize,
+    /// Characters of user + assistant prose.
+    pub text_chars: usize,
+    /// Latest turns, oldest first, within `EXCERPT_CHARS`.
+    pub excerpt: String,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum SessionEndDecision {
+    /// The agent already wrote to Danbi itself — don't double-log.
+    AlreadyLogged,
+    /// Too short to be worth a note.
+    Trivial,
+    Summarize,
+}
+
+pub fn decide(d: &TranscriptDigest) -> SessionEndDecision {
+    if d.wrote_danbi {
+        SessionEndDecision::AlreadyLogged
+    } else if d.user_turns == 0 || (d.text_chars < 500 && d.tool_uses < 3) {
+        SessionEndDecision::Trivial
+    } else {
+        SessionEndDecision::Summarize
+    }
+}
+
+/// A tool call that writes into Danbi: an MCP write tool on any danbi
+/// server (`mcp__danbi_x__danbi_log`), or a shell call hitting the local
+/// REST write endpoints.
+fn is_danbi_write_call(name: &str, input: &Value) -> bool {
+    if let Some(rest) = name.strip_prefix("mcp__") {
+        let mut parts = rest.rsplitn(2, "__");
+        let tool = parts.next().unwrap_or("");
+        let server = parts.next().unwrap_or("");
+        return server.contains("danbi") && crate::mcp::is_write_tool(tool);
+    }
+    if name == "Bash" {
+        let cmd = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
+        let local = cmd.contains("127.0.0.1") || cmd.contains("localhost");
+        let rest_write = cmd.contains("/v1/vault/")
+            || (cmd.contains("/call/")
+                && crate::mcp::WRITE_TOOLS.iter().any(|t| cmd.contains(t)));
+        return local && rest_write;
+    }
+    false
+}
+
+/// Reads a Claude Code transcript (JSONL). Unknown or malformed lines
+/// are skipped.
+pub fn digest_transcript(jsonl: &str) -> TranscriptDigest {
+    let mut d = TranscriptDigest::default();
+    let mut turns: Vec<(&'static str, String)> = Vec::new();
+    for line in jsonl.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let sidechain = v.get("isSidechain").and_then(|b| b.as_bool()).unwrap_or(false);
+        let content = v.get("message").and_then(|m| m.get("content"));
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("user") => {
+                if sidechain || v.get("isMeta").and_then(|b| b.as_bool()).unwrap_or(false) {
+                    continue;
+                }
+                let texts: Vec<&str> = match content {
+                    Some(Value::String(s)) => vec![s.as_str()],
+                    Some(Value::Array(items)) => items
+                        .iter()
+                        .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("text"))
+                        .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                // Slash-command echoes, local command output and injected
+                // reminders all start with a tag — not typed prompts.
+                let typed: Vec<&str> = texts
+                    .into_iter()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty() && !t.starts_with('<'))
+                    .collect();
+                if !typed.is_empty() {
+                    let text = typed.join("\n");
+                    d.user_turns += 1;
+                    d.text_chars += text.chars().count();
+                    turns.push(("사용자", text));
+                }
+            }
+            Some("assistant") => {
+                let Some(Value::Array(items)) = content else {
+                    continue;
+                };
+                for item in items {
+                    match item.get("type").and_then(|t| t.as_str()) {
+                        Some("tool_use") => {
+                            d.tool_uses += 1;
+                            let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                            let input = item.get("input").cloned().unwrap_or(Value::Null);
+                            if is_danbi_write_call(name, &input) {
+                                d.wrote_danbi = true;
+                            }
+                        }
+                        Some("text") if !sidechain => {
+                            let text = item.get("text").and_then(|t| t.as_str()).unwrap_or("").trim();
+                            if !text.is_empty() {
+                                d.text_chars += text.chars().count();
+                                turns.push(("AI", text.to_string()));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut picked: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for (role, text) in turns.iter().rev() {
+        let block = format!("[{role}] {}", clip_chars(text, TURN_CHARS));
+        let n = block.chars().count() + 2;
+        if used + n > EXCERPT_CHARS {
+            break;
+        }
+        used += n;
+        picked.push(block);
+    }
+    picked.reverse();
+    d.excerpt = picked.join("\n\n");
+    d
+}
+
+/// Accepts only Claude Code transcript files: an existing `.jsonl` under
+/// the user's home inside a `.claude*/projects/` tree. The endpoint is
+/// token-protected, but it should still never read arbitrary files.
+fn allowed_transcript_path(raw: &str) -> Option<std::path::PathBuf> {
+    let home = dirs::home_dir()?;
+    let path = std::fs::canonicalize(raw).ok()?;
+    let home = std::fs::canonicalize(home).ok()?;
+    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") || !path.is_file() {
+        return None;
+    }
+    let rel = path.strip_prefix(&home).ok()?;
+    let mut comps = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string());
+    let first = comps.next()?;
+    if !first.starts_with(".claude") || !comps.any(|c| c == "projects") {
+        return None;
+    }
+    Some(path)
+}
+
+fn read_tail(path: &Path, max: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path)?;
+    let len = f.metadata()?.len();
+    if len > max {
+        f.seek(SeekFrom::Start(len - max))?;
+    }
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    // A cut in the middle of a line just becomes one unparsable line.
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn load_seen(vault: &Path) -> Vec<String> {
+    std::fs::read_to_string(vault.join(SEEN_FILE))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_seen(vault: &Path, session_id: &str) -> DanbiResult<()> {
+    let mut seen = load_seen(vault);
+    if !seen.iter().any(|s| s == session_id) {
+        seen.push(session_id.to_string());
+    }
+    let skip = seen.len().saturating_sub(SEEN_CAP);
+    let path = vault.join(SEEN_FILE);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, serde_json::to_string(&seen[skip..])?)?;
+    Ok(())
+}
+
+/// Sessions currently being summarised — guards against the same
+/// SessionEnd arriving twice before the first run has finished.
+fn in_flight() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+/// Keeps only well-formed bullets from the model's answer.
+fn clean_bullets(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("- ") && l.len() > 2)
+        .take(MAX_BULLETS)
+        .map(str::to_string)
+        .collect()
+}
+
+const SESSION_END_SYSTEM: &str = "Claude Code 코딩 세션 대화를 받아 단비 daily 노트에 남길 기록을 씁니다.\n\n규칙:\n- 한국어, bullet 최대 5개, 각 한 줄.\n- 각 bullet 은 '- 결정: ', '- 완료: ', '- 다음 할 일: ' 중 하나로 시작.\n- 대화에 실제로 나온 사실만. 추측·인사·감상 금지.\n- 코드명·파일명은 backtick.\n- 남길 만한 내용이 없으면 '없음' 한 단어만.\n- bullet 외 다른 말은 쓰지 않습니다.";
+
+/// Background half of `POST /api/session-end`. Never surfaces errors to
+/// the hook (it has already returned); failures only go to the log.
+pub async fn run_session_end(project_hint: String, payload: Value) {
+    if let Err(e) = session_end_inner(&project_hint, &payload).await {
+        eprintln!("[session-end] {e}");
+    }
+}
+
+async fn session_end_inner(project_hint: &str, payload: &Value) -> DanbiResult<()> {
+    let vault = crate::mcp::current_vault_path()?;
+    let project = vault::project_by_id(&vault, project_hint)?
+        .unwrap_or_else(|| project_hint.to_string());
+    if !vault::list_tree(&vault)?.projects.iter().any(|p| p.name == project) {
+        return Ok(());
+    }
+    let session_id = payload
+        .get("session_id")
+        .and_then(|s| s.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if session_id.is_empty() || load_seen(&vault).contains(&session_id) {
+        return Ok(());
+    }
+    let Some(path) = payload
+        .get("transcript_path")
+        .and_then(|p| p.as_str())
+        .and_then(allowed_transcript_path)
+    else {
+        return Ok(());
+    };
+    let digest = digest_transcript(&read_tail(&path, TRANSCRIPT_TAIL_BYTES)?);
+    if decide(&digest) != SessionEndDecision::Summarize {
+        return Ok(());
+    }
+
+    // No LLM configured → nothing to do, silently.
+    let Some(cfg) = crate::config::load_config(&vault)? else {
+        return Ok(());
+    };
+    let Some((model, _)) = crate::commands::resolve_summarize_model(&cfg) else {
+        return Ok(());
+    };
+    let Ok(provider) = crate::commands::resolve_embed_provider(&cfg) else {
+        return Ok(());
+    };
+
+    if !in_flight().lock().map(|mut s| s.insert(session_id.clone())).unwrap_or(false) {
+        return Ok(());
+    }
+    let user = format!(
+        "프로젝트: {project}\n다음 세션 대화를 규칙대로 정리해줘.\n\n---\n{}\n---",
+        digest.excerpt
+    );
+    let answer = crate::usage::with_role(
+        "session_end",
+        provider.converse_text(&model, Some(SESSION_END_SYSTEM), &user, 600, 0.2),
+    )
+    .await;
+    let result = answer.and_then(|raw| {
+        let bullets = clean_bullets(&raw);
+        // Recorded before the write so the same commit carries it.
+        save_seen(&vault, &session_id)?;
+        if bullets.is_empty() {
+            return Ok(());
+        }
+        let content = format!(
+            "### 세션 자동 기록 · {}\n{}\n<!-- danbi:session-end {session_id} -->",
+            chrono::Local::now().format("%H:%M"),
+            bullets.join("\n"),
+        );
+        crate::mcp::dispatch("danbi_log", json!({ "project": project, "content": content }))
+            .map(|_| ())
+    });
+    if let Ok(mut s) = in_flight().lock() {
+        s.remove(&session_id);
+    }
+    result
+}
+
 // ---------- Hook installer ----------
 
 /// The helper script. It holds no secret: every run reads the port and
@@ -503,6 +805,105 @@ mod tests {
 
         assert!(session_brief(&vault, Some("없는프로젝트"), 2500).is_err());
         let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    fn user(text: &str) -> String {
+        json!({ "type": "user", "message": { "role": "user", "content": text } }).to_string()
+    }
+    fn assistant(items: Value) -> String {
+        json!({ "type": "assistant", "message": { "role": "assistant", "content": items } })
+            .to_string()
+    }
+    fn long(n: usize) -> String {
+        "가".repeat(n)
+    }
+
+    #[test]
+    fn session_end_skips_when_danbi_write_tool_was_called() {
+        let t = [
+            user("로그인 버그 고쳐줘"),
+            assistant(json!([{ "type": "text", "text": long(800) }])),
+            assistant(json!([{ "type": "tool_use", "name": "mcp__danbi_bonny__danbi_log", "input": {} }])),
+        ]
+        .join("\n");
+        let d = digest_transcript(&t);
+        assert!(d.wrote_danbi);
+        assert_eq!(decide(&d), SessionEndDecision::AlreadyLogged);
+
+        // REST write through the shell counts too; a read does not.
+        let rest = assistant(json!([{ "type": "tool_use", "name": "Bash",
+            "input": { "command": "curl -X POST http://127.0.0.1:47921/api/call/danbi_append -d @x" } }]));
+        assert!(digest_transcript(&rest).wrote_danbi);
+        let read = assistant(json!([{ "type": "tool_use", "name": "mcp__danbi__danbi_search", "input": {} }]));
+        assert!(!digest_transcript(&read).wrote_danbi);
+        let other = assistant(json!([{ "type": "tool_use", "name": "mcp__notes__danbi_log", "input": {} }]));
+        assert!(!digest_transcript(&other).wrote_danbi, "only danbi servers count");
+    }
+
+    #[test]
+    fn session_end_skips_trivial_sessions() {
+        let t = [user("안녕"), assistant(json!([{ "type": "text", "text": "안녕하세요" }]))].join("\n");
+        assert_eq!(decide(&digest_transcript(&t)), SessionEndDecision::Trivial);
+
+        // Only meta / command echoes / tool results → no typed prompt at all.
+        let meta = [
+            json!({ "type": "user", "isMeta": true, "message": { "content": long(900) } }).to_string(),
+            user("<command-name>/clear</command-name>"),
+            json!({ "type": "user", "message": { "content": [{ "type": "tool_result", "content": long(900) }] } }).to_string(),
+            "not json".to_string(),
+        ]
+        .join("\n");
+        let d = digest_transcript(&meta);
+        assert_eq!(d.user_turns, 0);
+        assert_eq!(decide(&d), SessionEndDecision::Trivial);
+    }
+
+    #[test]
+    fn session_end_summarizes_real_sessions_with_recent_excerpt() {
+        let mut lines = vec![user("결제 모듈 리팩터링 하자")];
+        for i in 0..40 {
+            lines.push(assistant(json!([
+                { "type": "text", "text": format!("단계 {i} {}", long(900)) },
+                { "type": "tool_use", "name": "Edit", "input": {} }
+            ])));
+        }
+        lines.push(user("좋아 마무리하자"));
+        let d = digest_transcript(&lines.join("\n"));
+        assert_eq!(decide(&d), SessionEndDecision::Summarize);
+        assert_eq!(d.user_turns, 2);
+        assert_eq!(d.tool_uses, 40);
+        assert!(d.excerpt.chars().count() <= EXCERPT_CHARS);
+        assert!(d.excerpt.ends_with("[사용자] 좋아 마무리하자"), "latest turns are kept");
+        assert!(!d.excerpt.contains("단계 0 "), "oldest turns drop out first");
+    }
+
+    #[test]
+    fn clean_bullets_keeps_at_most_five_bullets() {
+        let raw = "요약입니다\n- 결정: a\n- 완료: b\n-\n- 완료: c\n- 다음 할 일: d\n- 완료: e\n- 완료: f";
+        assert_eq!(clean_bullets(raw).len(), 5);
+        assert!(clean_bullets("없음").is_empty());
+    }
+
+    #[test]
+    fn transcript_path_must_be_claude_jsonl_under_home() {
+        assert!(allowed_transcript_path("/etc/passwd").is_none());
+        let tmp = temp_vault("transcript").join("x.jsonl");
+        std::fs::write(&tmp, "{}").unwrap();
+        assert!(allowed_transcript_path(tmp.to_str().unwrap()).is_none(), "outside ~/.claude*/projects");
+        let _ = std::fs::remove_dir_all(tmp.parent().unwrap());
+    }
+
+    #[test]
+    fn merge_adds_and_drops_session_end() {
+        let end = "\"/Users/x/.danbi/bin/danbi-hook\" session-end abc";
+        let (with_end, _) = merge_hook_settings("", Some(START), Some(end)).unwrap();
+        let v: Value = serde_json::from_str(&with_end).unwrap();
+        assert_eq!(v["hooks"]["SessionEnd"][0]["hooks"][0]["command"], end);
+        let (without, replaced) = merge_hook_settings(&with_end, Some(START), None).unwrap();
+        assert!(replaced);
+        let v: Value = serde_json::from_str(&without).unwrap();
+        assert!(v["hooks"].get("SessionEnd").is_none());
+        assert_eq!(v["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
     }
 
     #[test]

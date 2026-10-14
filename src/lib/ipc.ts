@@ -137,6 +137,8 @@ export type ClaudeHooksResult = {
   helper_path: string;
   /** "added" (first install) | "updated" (Danbi hooks replaced). */
   action: "added" | "updated";
+  /** Whether the SessionEnd auto-log hook is installed. */
+  session_end: boolean;
 };
 
 export type McpProjectEndpoint = {
@@ -974,10 +976,15 @@ export const ipc = {
    *  project's `.codex/config.toml`. */
   codexConnect: (project: string, targetDir: string) =>
     invoke<CodexConnectResult>("codex_connect", { project, targetDir }),
-  /** Install (or refresh) the Claude Code SessionStart hook into the
-   *  selected code folder's `.claude/settings.local.json`. */
-  claudeHooksInstall: (project: string, targetDir: string) =>
-    invoke<ClaudeHooksResult>("claude_hooks_install", { project, targetDir }),
+  /** Install (or refresh) the Claude Code SessionStart hook — plus the
+   *  SessionEnd auto-log hook when `sessionEnd` — into the selected code
+   *  folder's `.claude/settings.local.json`. */
+  claudeHooksInstall: (project: string, targetDir: string, sessionEnd: boolean) =>
+    invoke<ClaudeHooksResult>("claude_hooks_install", {
+      project,
+      targetDir,
+      sessionEnd,
+    }),
   trashList: () => invoke<TrashEntry[]>("trash_list"),
   trashRestore: (id: string) =>
     invoke<TrashEntry>("trash_restore", { id }),

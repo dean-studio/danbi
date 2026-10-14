@@ -2098,7 +2098,7 @@ pub fn resize_capture(app: AppHandle, height: f64) -> DanbiResult<()> {
 /// AI 연동 (cfg.embed_provider) 이 켜져있을 때, 자동화 (요약·purpose 작성·
 /// ghost 제안) 에 쓸 LLM 모델 id 를 결정. cfg.automation_model 이 명시돼
 /// 있으면 그것을 우선, 없으면 provider 별 가벼운 디폴트.
-fn resolve_summarize_model(cfg: &DanbiConfig) -> Option<(String, &'static str)> {
+pub(crate) fn resolve_summarize_model(cfg: &DanbiConfig) -> Option<(String, &'static str)> {
     let kind = cfg.embed_provider.as_ref()?.kind_str();
     let kind_static: &'static str = match kind {
         "google" => "google",
@@ -4153,10 +4153,13 @@ pub struct ClaudeHooksResult {
     pub helper_path: String,
     /// "added" on first install, "updated" when Danbi hooks were replaced.
     pub action: String,
+    /// Whether the SessionEnd auto-log hook is now installed.
+    pub session_end: bool,
 }
 
-/// Install (or refresh) Danbi's Claude Code SessionStart hook for one code
-/// folder. The hook lives in `<folder>/.claude/settings.local.json` (local,
+/// Install (or refresh) Danbi's Claude Code hooks for one code folder:
+/// SessionStart (brief) always, SessionEnd (auto log) when `session_end`
+/// is on — turning it off on a re-install removes it. The hooks live in `<folder>/.claude/settings.local.json` (local,
 /// never committed) and runs `~/.danbi/bin/danbi-hook`, which reads the
 /// port and token from Danbi's config at run time — no token is written
 /// into the folder.
@@ -4164,6 +4167,7 @@ pub struct ClaudeHooksResult {
 pub fn claude_hooks_install(
     project: String,
     target_dir: String,
+    session_end: bool,
 ) -> DanbiResult<ClaudeHooksResult> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -4199,8 +4203,13 @@ pub fn claude_hooks_install(
         Err(e) => return Err(DanbiError::Other(format!("read settings.local.json: {e}"))),
     };
     let start_cmd = crate::session_hooks::hook_command(&helper, "session-start", &project_id);
-    let (merged, replaced) =
-        crate::session_hooks::merge_hook_settings(&existing, Some(&start_cmd), None)?;
+    let end_cmd = session_end
+        .then(|| crate::session_hooks::hook_command(&helper, "session-end", &project_id));
+    let (merged, replaced) = crate::session_hooks::merge_hook_settings(
+        &existing,
+        Some(&start_cmd),
+        end_cmd.as_deref(),
+    )?;
     std::fs::create_dir_all(&claude_dir)
         .map_err(|e| DanbiError::Other(format!("create .claude: {e}")))?;
     std::fs::write(&settings_path, merged)
@@ -4210,6 +4219,7 @@ pub fn claude_hooks_install(
         path: settings_path.to_string_lossy().to_string(),
         helper_path: helper.to_string_lossy().to_string(),
         action: if replaced { "updated" } else { "added" }.to_string(),
+        session_end,
     })
 }
 

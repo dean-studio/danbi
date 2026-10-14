@@ -99,6 +99,8 @@ impl McpServer {
                 "/api/session-brief",
                 get(handle_session_brief).post(handle_session_brief),
             )
+            // SessionEnd 훅 — 바로 202 를 돌려주고 요약·기록은 백그라운드.
+            .route("/api/session-end", post(handle_session_end))
             // Plain PUT for raw markdown — Obsidian Local REST API style.
             // Lets Paperclip / cron / curl pipe a prebuilt report file in
             // without JSON wrapping (emoji, special punctuation, multi-MB
@@ -252,6 +254,33 @@ async fn handle_session_brief(
             .into_response(),
         Err(e) => (StatusCode::NOT_FOUND, format!("{e}")).into_response(),
     }
+}
+
+/// `POST /api/session-end?project=<name|uuid>` — body is the SessionEnd
+/// hook's stdin JSON (`session_id`, `transcript_path`, `cwd`, …). Answers
+/// 202 at once so Claude Code can exit; the transcript is read, skipped
+/// or summarised and logged in the background (see `session_hooks`).
+async fn handle_session_end(
+    State(state): State<McpState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<SessionBriefQuery>,
+    body: String,
+) -> (StatusCode, Json<Value>) {
+    if !auth_ok(&headers, &state.token) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "ok": false, "error": "invalid or missing bearer token" })),
+        );
+    }
+    let Some(project) = query.project.filter(|p| !p.trim().is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "project required" })),
+        );
+    };
+    let payload: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    tokio::spawn(crate::session_hooks::run_session_end(project, payload));
+    (StatusCode::ACCEPTED, Json(json!({ "ok": true, "queued": true })))
 }
 
 // ---------- REST handlers ----------
@@ -1236,7 +1265,7 @@ async fn context_dispatch(args: Value) -> Result<String, DanbiError> {
     }))?)
 }
 
-fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
+pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
     let vault_path = current_vault_path()?;
 
     match name {
@@ -1599,17 +1628,18 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
 /// Write tools mutate vault state and must stay clamped to the scoped
 /// project. Read tools return information only and are safe to cross
 /// project boundaries.
-fn is_write_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "danbi_log"
-            | "danbi_append"
-            | "danbi_create_folder"
-            | "danbi_create_file"
-            | "danbi_replace_section"
-            | "danbi_upsert_item"
-    )
+pub(crate) fn is_write_tool(name: &str) -> bool {
+    WRITE_TOOLS.contains(&name)
 }
+
+pub(crate) const WRITE_TOOLS: [&str; 6] = [
+    "danbi_log",
+    "danbi_append",
+    "danbi_create_folder",
+    "danbi_create_file",
+    "danbi_replace_section",
+    "danbi_upsert_item",
+];
 
 /// Snapshot of a write-tool invocation that we'll need *after* dispatch
 /// has consumed `args`. We pull these out before dispatch so the post-
@@ -1717,7 +1747,7 @@ fn string_arg(args: &Value, key: &str) -> Result<String, DanbiError> {
         .ok_or_else(|| DanbiError::Config(format!("{key} required")))
 }
 
-fn current_vault_path() -> Result<PathBuf, DanbiError> {
+pub(crate) fn current_vault_path() -> Result<PathBuf, DanbiError> {
     let vault = config::default_vault_path()?;
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("vault not configured".into()))?;

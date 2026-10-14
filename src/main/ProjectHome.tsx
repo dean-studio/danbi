@@ -515,6 +515,7 @@ function AgentActionRow({
  *  부르고, 단비가 꺼져 있으면 조용히 넘어가 세션을 막지 않는다. */
 function ClaudeHookPanel({ project }: { project: string }) {
   const [busy, setBusy] = useState(false);
+  const [sessionEnd, setSessionEnd] = useState(false);
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; msg: string } | null>(
     null,
   );
@@ -529,10 +530,10 @@ function ClaudeHookPanel({ project }: { project: string }) {
     setBusy(true);
     setFlash(null);
     try {
-      const res = await ipc.claudeHooksInstall(project, targetDir);
+      const res = await ipc.claudeHooksInstall(project, targetDir, sessionEnd);
       setFlash({
         kind: "ok",
-        msg: `${res.action === "updated" ? "훅을 갱신했어요" : "훅을 설치했어요"} · ${res.path} — 다음 세션부터 적용돼요.`,
+        msg: `${res.action === "updated" ? "훅을 갱신했어요" : "훅을 설치했어요"}${res.session_end ? " (종료 기록 포함)" : ""} · ${res.path} — 다음 세션부터 적용돼요.`,
       });
     } catch (e) {
       setFlash({ kind: "err", msg: `설치 실패: ${e}` });
@@ -544,7 +545,7 @@ function ClaudeHookPanel({ project }: { project: string }) {
   return (
     <div className="mt-2 rounded-md border border-hairline bg-surface-elevated p-3">
       <div className="text-[13px] font-medium text-on-dark">
-        세션 시작 브리핑 훅
+        Claude Code 세션 훅
       </div>
       <p className="mt-1 text-[12px] leading-[1.6] text-body">
         Claude Code 세션을 열 때마다 <span className="text-on-dark">{project}</span>
@@ -552,7 +553,18 @@ function ClaudeHookPanel({ project }: { project: string }) {
         <code>.claude/settings.local.json</code> 에만 기록하고 Git 에서는 빼둡니다.
         토큰은 파일에 남기지 않아요.
       </p>
-      <div className="mt-2 flex items-center justify-end gap-3">
+      <div className="mt-2 flex items-center justify-between gap-3">
+        <label
+          className="flex items-center gap-2 text-[12px] text-body"
+          title="세션이 끝나면 대화를 AI 로 요약해 오늘 daily 노트에 남겨요. 세션 중에 이미 단비에 기록했거나 아주 짧은 세션은 건너뛰어요. AI 연동이 꺼져 있으면 아무것도 하지 않아요."
+        >
+          <input
+            type="checkbox"
+            checked={sessionEnd}
+            onChange={(e) => setSessionEnd(e.target.checked)}
+          />
+          세션이 끝나면 자동으로 기록
+        </label>
         <button
           type="button"
           disabled={busy}
