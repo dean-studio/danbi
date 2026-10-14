@@ -21,9 +21,9 @@
 //! project's accumulated Wiki-LLM knowledge. The more it fills in, the
 //! richer every subsequent grounding-augmented edit becomes.
 
-use crate::error::DanbiResult;
+use crate::error::{DanbiError, DanbiResult};
 use crate::ghost_links::{self, GhostStatus};
-use crate::links::build_index;
+use crate::links::{build_index, WikiLink};
 use crate::vault::{list_tree, PROJECTS_DIRNAME};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -250,6 +250,157 @@ pub fn build_graph(vault: &Path, project_filter: Option<&str>) -> DanbiResult<Gr
         nodes,
         edges,
         insights,
+    })
+}
+
+// ---- Neighbourhood query (MCP `danbi_related`) ----
+
+#[derive(Debug, Serialize, Clone)]
+pub struct DocRef {
+    pub project: String,
+    pub domain: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct RelatedDoc {
+    pub project: String,
+    pub domain: String,
+    /// "soft" (relevance-inferred) or "ghost" (pending AI suggestion).
+    pub kind: &'static str,
+    pub score: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct RelatedDocs {
+    pub project: String,
+    pub domain: String,
+    /// Confirmed `[[wiki links]]` this document makes (any project).
+    pub links_out: Vec<DocRef>,
+    /// Documents that link to this one (any project).
+    pub links_in: Vec<DocRef>,
+    /// Unlinked but related documents in the same project, strongest first.
+    pub related: Vec<RelatedDoc>,
+    /// Other members of this document's Louvain community ("project/domain").
+    pub community: Vec<String>,
+}
+
+const MAX_COMMUNITY_MEMBERS: usize = 12;
+
+/// Every document in the vault as "project/domain" (sub-folder docs as
+/// "project/folder/file.md"), for filtering out dangling wiki links.
+pub fn existing_doc_ids(vault: &Path) -> DanbiResult<HashSet<String>> {
+    Ok(list_tree(vault)?
+        .projects
+        .iter()
+        .flat_map(|p| {
+            p.domains
+                .iter()
+                .chain(p.subfolders.iter().flat_map(|s| s.domains.iter()))
+                .map(move |d| format!("{}/{}", p.name, d.name))
+        })
+        .collect())
+}
+
+/// Everything connected to one document, so an agent can widen its
+/// context in a single call instead of chaining search → read → read.
+/// Wiki links come from the vault-wide index (cross-project links count);
+/// soft/ghost edges and communities come from the project's graph.
+pub fn related(
+    vault: &Path,
+    project: &str,
+    domain: &str,
+    limit: usize,
+) -> DanbiResult<RelatedDocs> {
+    let id = format!("{project}/{domain}");
+    let graph = build_graph(vault, Some(project))?;
+    let Some(me) = graph.nodes.iter().find(|n| n.id == id) else {
+        return Err(DanbiError::Config(format!("document not found: {id}")));
+    };
+
+    // Only report links that resolve to a real file — guides full of
+    // `[[example.md]]` placeholders would otherwise send agents to reads
+    // that come back empty.
+    let existing = existing_doc_ids(vault)?;
+    let index = build_index(vault)?;
+    let to_refs = |links: Option<&Vec<WikiLink>>| -> Vec<DocRef> {
+        let mut seen: HashSet<String> = HashSet::new();
+        links
+            .into_iter()
+            .flatten()
+            .filter(|l| {
+                let k = format!("{}/{}", l.project, l.domain);
+                k != id && existing.contains(&k) && seen.insert(k)
+            })
+            .map(|l| DocRef {
+                project: l.project.clone(),
+                domain: l.domain.clone(),
+            })
+            .collect()
+    };
+    let links_out = to_refs(index.outgoing.get(&id));
+    let links_in = to_refs(index.incoming.get(&id));
+
+    let mut linked: HashSet<String> = links_out
+        .iter()
+        .chain(links_in.iter())
+        .map(|r| format!("{}/{}", r.project, r.domain))
+        .collect();
+    linked.insert(id.clone());
+
+    let mut candidates: Vec<&GraphEdge> = graph
+        .edges
+        .iter()
+        .filter(|e| e.kind != "confirmed" && (e.source == id || e.target == id))
+        .collect();
+    candidates.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let by_id: HashMap<&str, &GraphNode> =
+        graph.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut related = Vec::new();
+    for e in candidates {
+        let other = if e.source == id { &e.target } else { &e.source };
+        if !linked.insert(other.clone()) {
+            continue;
+        }
+        let Some(node) = by_id.get(other.as_str()) else {
+            continue;
+        };
+        related.push(RelatedDoc {
+            project: node.project.clone(),
+            domain: node.domain.clone(),
+            kind: e.kind,
+            score: e.score,
+            reason: e.reason.clone(),
+        });
+        if related.len() >= limit {
+            break;
+        }
+    }
+
+    let community = if me.community >= 0 {
+        graph
+            .nodes
+            .iter()
+            .filter(|n| n.community == me.community && n.id != id)
+            .map(|n| n.id.clone())
+            .take(MAX_COMMUNITY_MEMBERS)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(RelatedDocs {
+        project: project.to_string(),
+        domain: domain.to_string(),
+        links_out,
+        links_in,
+        related,
+        community,
     })
 }
 
@@ -744,5 +895,42 @@ fn normalize_id(project: &str, raw: &str) -> String {
         raw.to_string()
     } else {
         format!("{project}/{raw}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn related_lists_links_backlinks_and_skips_dangling() {
+        let unique = format!(
+            "danbi-graph-related-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let v = std::env::temp_dir().join(unique);
+        let write = |rel: &str, body: &str| {
+            let path = v.join(PROJECTS_DIRNAME).join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        };
+        write("A/hub.md", "# hub\n[[notes/auth.md]] [[missing-example.md]]");
+        write("A/notes/auth.md", "# auth\nJWT refresh token");
+        write("B/plan.md", "see [[A/hub.md]]");
+
+        let r = related(&v, "A", "hub.md", 10).unwrap();
+        let ids = |refs: &[DocRef]| -> Vec<String> {
+            refs.iter().map(|d| format!("{}/{}", d.project, d.domain)).collect()
+        };
+        assert_eq!(ids(&r.links_out), vec!["A/notes/auth.md"]);
+        assert_eq!(ids(&r.links_in), vec!["B/plan.md"]);
+        assert!(r.related.iter().all(|d| d.domain != "notes/auth.md"));
+
+        assert!(related(&v, "A", "nope.md", 10).is_err());
+        std::fs::remove_dir_all(v).ok();
     }
 }

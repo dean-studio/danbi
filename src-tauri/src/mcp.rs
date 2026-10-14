@@ -238,7 +238,7 @@ async fn handle_api_call(
     body: Option<Json<Value>>,
 ) -> (StatusCode, Json<Value>) {
     let args = body.map(|j| j.0).unwrap_or(Value::Null);
-    run_api_call(&state, &headers, tool, args, None)
+    run_api_call(&state, &headers, tool, args, None).await
 }
 
 /// `POST /api/projects/:project/call/:tool` — scoped variant.
@@ -252,7 +252,7 @@ async fn handle_api_call_scoped(
     body: Option<Json<Value>>,
 ) -> (StatusCode, Json<Value>) {
     let args = body.map(|j| j.0).unwrap_or(Value::Null);
-    run_api_call(&state, &headers, tool, args, Some(project))
+    run_api_call(&state, &headers, tool, args, Some(project)).await
 }
 
 /// `PUT /v1/vault/{project}/{path...}` — Obsidian Local REST API style.
@@ -445,7 +445,7 @@ struct V1VaultQuery {
     mode: Option<String>,
 }
 
-fn run_api_call(
+async fn run_api_call(
     state: &McpState,
     headers: &HeaderMap,
     tool: String,
@@ -503,13 +503,9 @@ fn run_api_call(
     // dispatch() 직호출 (BM25 only) 보다 자연어 쿼리 정확도가 훨씬 높아서
     // REST 호출자도 같은 품질을 받게.
     let tool_owned = tool.clone();
-    let dispatch_result: Result<String, DanbiError> = if tool == "danbi_search" {
-        // 같은 tokio runtime context 안에서 비동기 호출 — REST handler
-        // 는 이미 axum tokio task 안이라 안전하다.
-        tauri::async_runtime::block_on(search_hybrid_dispatch(args))
-    } else {
-        dispatch(&tool, args)
-    };
+    // REST handler 는 이미 axum tokio task 안이라 block_on 하면
+    // "Cannot start a runtime from within a runtime" panic — await 로.
+    let dispatch_result: Result<String, DanbiError> = dispatch_any(&tool, args).await;
     match dispatch_result {
         Ok(text) => {
             let tool = &tool_owned;
@@ -694,15 +690,11 @@ async fn run_rpc(
             // injection later needs the project hint from the args.
             let args_for_banner = args.clone();
 
-            // danbi_search 만 RRF 하이브리드 fast-path 로 분기. 임베딩
+            // danbi_search·danbi_context 는 RRF 하이브리드 경로로. 임베딩
             // provider 가 cfg 에 있으면 BM25 + 벡터 결과를 RRF 로 병합해서
             // 외부 AI 의 자연어 쿼리도 정확히 잡아낸다. 임베딩 없으면
             // 기존 BM25 만으로 동작.
-            let result: Result<String, DanbiError> = if name == "danbi_search" {
-                search_hybrid_dispatch(args).await
-            } else {
-                dispatch(name, args)
-            };
+            let result: Result<String, DanbiError> = dispatch_any(name, args).await;
             match result {
                 Ok(text) => {
                     // Token-track *only* on success — failed writes
@@ -780,6 +772,34 @@ fn tool_catalog() -> Vec<Value> {
                     "limit": { "type": "integer", "default": 8 }
                 },
                 "required": ["query"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_context",
+            "description": "질문 하나로 답에 필요한 맥락을 한 번에 가져옵니다. 하이브리드 검색 상위 문서에서 질문과 관련된 섹션만 글자 예산 안에서 잘라 주고, 그 문서들에 [[위키링크]]로 연결된 문서 목록도 같이 줍니다. search → read 를 여러 번 반복하는 대신 먼저 이걸 부르세요. 전체 본문이 필요하면 그다음 danbi_read.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "질문 또는 키워드" },
+                    "limit": { "type": "integer", "default": 4, "description": "가져올 문서 수 (1~10)" },
+                    "max_chars": { "type": "integer", "default": 8000, "description": "본문 발췌 총 글자 예산 (1000~40000)" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_related",
+            "description": "문서 하나와 연결된 모든 것을 돌려줍니다: 이 문서가 거는 [[링크]], 이 문서를 거는 백링크(다른 프로젝트 포함), 링크는 없지만 내용상 가까운 문서(soft·ghost, 점수순), 같은 주제 묶음(community) 문서. 읽은 문서에서 맥락을 넓힐 때 쓰세요.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "domain": { "type": "string", "description": ".md로 끝나는 파일명 (하위 폴더면 notes/x.md 형태)" },
+                    "limit": { "type": "integer", "default": 10, "description": "related 최대 개수" }
+                },
+                "required": ["project", "domain"],
                 "additionalProperties": false
             }
         }),
@@ -1059,16 +1079,111 @@ async fn search_hybrid_dispatch(args: Value) -> Result<String, DanbiError> {
         .and_then(|v| v.as_u64())
         .unwrap_or(8) as usize;
 
-    // cfg 의 embed provider 로 query 를 임베딩한다. 키 없거나 호출 실패
-    // 면 None — `full_search_hybrid` 가 BM25 only 로 graceful fallback.
-    let embedding: Option<Vec<f32>> = match crate::config::load_config(&vault_path)? {
-        Some(c) => crate::commands::embed_query_for_search(&c, &query).await,
-        None => None,
-    };
-
+    let embedding = query_embedding(&vault_path, &query).await?;
     let hits =
         search::full_search_hybrid(&vault_path, &query, limit, embedding.as_deref())?;
     Ok(serde_json::to_string_pretty(&hits)?)
+}
+
+/// Routes the tools that need async work (query embedding) and falls
+/// through to the sync `dispatch` for everything else. Both the JSON-RPC
+/// and REST paths call this so they can't drift apart.
+async fn dispatch_any(name: &str, args: Value) -> Result<String, DanbiError> {
+    match name {
+        "danbi_search" => search_hybrid_dispatch(args).await,
+        "danbi_context" => context_dispatch(args).await,
+        _ => dispatch(name, args),
+    }
+}
+
+/// cfg 의 embed provider 로 query 를 임베딩한다. 키 없거나 호출 실패
+/// 면 None — `full_search_hybrid` 가 BM25 only 로 graceful fallback.
+async fn query_embedding(
+    vault_path: &std::path::Path,
+    query: &str,
+) -> Result<Option<Vec<f32>>, DanbiError> {
+    Ok(match crate::config::load_config(vault_path)? {
+        Some(c) => crate::commands::embed_query_for_search(&c, query).await,
+        None => None,
+    })
+}
+
+const CONTEXT_MAX_LINKED: usize = 10;
+
+/// `danbi_context`: hybrid search → per-hit focused excerpt within a char
+/// budget → wiki-link neighbours of the hits. One call replaces the usual
+/// search → read → read chain.
+async fn context_dispatch(args: Value) -> Result<String, DanbiError> {
+    let vault_path = current_vault_path()?;
+    let query = string_arg(&args, "query")?;
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(4)
+        .clamp(1, 10) as usize;
+    let budget = args
+        .get("max_chars")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8000)
+        .clamp(1000, 40000) as usize;
+
+    let embedding = query_embedding(&vault_path, &query).await?;
+    let hits =
+        search::full_search_hybrid(&vault_path, &query, limit, embedding.as_deref())?;
+
+    let per_doc = budget / hits.len().max(1);
+    let mut used = 0usize;
+    let mut docs = Vec::with_capacity(hits.len());
+    for hit in &hits {
+        let md = vault::read_doc(&vault_path, &hit.project, &hit.domain)?;
+        let (excerpt, complete) = search::focused_excerpt(&md, &query, per_doc);
+        used += excerpt.chars().count();
+        docs.push(json!({
+            "project": hit.project,
+            "domain": hit.domain,
+            "matched": hit.matched,
+            "relevance": hit.relevance,
+            "total_chars": md.chars().count(),
+            "complete": complete,
+            "excerpt": excerpt,
+        }));
+    }
+
+    let hit_keys: std::collections::HashSet<String> = hits
+        .iter()
+        .map(|h| format!("{}/{}", h.project, h.domain))
+        .collect();
+    let index = crate::links::build_index(&vault_path)?;
+    let existing = crate::graph::existing_doc_ids(&vault_path)?;
+    let mut seen = hit_keys.clone();
+    let mut linked = Vec::new();
+    'outer: for key in hits.iter().map(|h| format!("{}/{}", h.project, h.domain)) {
+        let out = index.outgoing.get(&key).into_iter().flatten();
+        let inc = index.incoming.get(&key).into_iter().flatten();
+        for (dir, l) in out.map(|l| ("links_to", l)).chain(inc.map(|l| ("linked_from", l))) {
+            let k = format!("{}/{}", l.project, l.domain);
+            if !existing.contains(&k) || !seen.insert(k) {
+                continue;
+            }
+            linked.push(json!({
+                "project": l.project,
+                "domain": l.domain,
+                "via": key,
+                "direction": dir,
+            }));
+            if linked.len() >= CONTEXT_MAX_LINKED {
+                break 'outer;
+            }
+        }
+    }
+
+    Ok(serde_json::to_string_pretty(&json!({
+        "query": query,
+        "used_chars": used,
+        "docs": docs,
+        "linked": linked,
+        "hint": "전체 본문은 danbi_read, 한 문서의 주변 연결은 danbi_related",
+    }))?)
 }
 
 fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
@@ -1096,6 +1211,20 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             let project = string_arg(&args, "project")?;
             let domain = string_arg(&args, "domain")?;
             Ok(vault::read_doc(&vault_path, &project, &domain)?)
+        }
+        "danbi_related" => {
+            let project = string_arg(&args, "project")?;
+            let mut domain = string_arg(&args, "domain")?;
+            if !domain.to_lowercase().ends_with(".md") {
+                domain.push_str(".md");
+            }
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10)
+                .clamp(1, 50) as usize;
+            let out = crate::graph::related(&vault_path, &project, &domain, limit)?;
+            Ok(serde_json::to_string_pretty(&out)?)
         }
         "danbi_log" => {
             let project = string_arg(&args, "project")?;

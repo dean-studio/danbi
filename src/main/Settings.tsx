@@ -874,6 +874,8 @@ function McpPanel() {
 - \`danbi_briefing\` — 최근 활동·ghost 제안·고아 파일·daily 노트를 한 JSON으로 반환
 - \`danbi_recent\` — 최근 수정된 문서 목록
 - \`danbi_search\` — tantivy 전문 검색 (한국어 n-gram 지원)
+- \`danbi_context\` — 질문 하나로 관련 문서의 해당 섹션 + 연결 문서 목록을 글자 예산 안에서 한 번에. **search → read 반복 대신 먼저**
+- \`danbi_related\` — 문서 하나의 링크·백링크·내용상 가까운 문서·같은 주제 묶음
 - \`danbi_read\` — 특정 프로젝트/도메인 파일의 전체 내용
 - \`danbi_daily\` — 오늘 + 1주/1달/1년 전 daily 노트
 - \`danbi_list_projects\` — vault 전체 프로젝트·도메인 트리
@@ -899,7 +901,8 @@ function McpPanel() {
 
 | 사용자가 이런 뉘앙스로 물으면 | 이 도구를 먼저 |
 |---|---|
-| "예전에 이거 어떻게 정했지?" | \`danbi_search\` → \`danbi_read\` |
+| "예전에 이거 어떻게 정했지?" | \`danbi_context\` (부족하면 \`danbi_read\`) |
+| "이 문서랑 관련된 건?" | \`danbi_related\` |
 | "지난주/어제 뭐 했지?" | \`danbi_briefing\` activity |
 | "1년 전 오늘" / "비슷한 작업 한 적 있나" | \`danbi_daily\` |
 | "X 관련 기존 노트" | \`danbi_search\` 쿼리 |

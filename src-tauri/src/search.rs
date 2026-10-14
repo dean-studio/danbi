@@ -28,6 +28,11 @@ pub struct SearchHit {
     pub relevance: f32,
     #[serde(default)]
     pub snippet: String,
+    /// Which retriever found this hit: "keyword", "semantic", or
+    /// "keyword+semantic". Lets MCP callers tell a literal match from a
+    /// loose embedding neighbour. Empty for non-hybrid paths.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub matched: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -494,6 +499,7 @@ pub fn full_search(
             domain,
             relevance: (score / max_score).min(1.0),
             snippet,
+            matched: String::new(),
         });
     }
 
@@ -501,16 +507,122 @@ pub fn full_search(
 }
 
 fn excerpt_for_query(body: &str, query: &str) -> String {
-    let lower = body.to_lowercase();
+    excerpt_match(body, query).unwrap_or_else(|| body.chars().take(80).collect())
+}
+
+/// Excerpt around the first case-insensitive occurrence of any whitespace
+/// token in `query`: 20 chars before, 60 after. `find` returns a *byte*
+/// offset, so the window is cut on char boundaries — slicing by byte
+/// count would land far past the match in Korean (3 bytes per char).
+fn excerpt_match(text: &str, query: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    // Lowercasing can change byte lengths for a few scripts; only reuse
+    // offsets from `lower` when the two strings still line up.
+    let aligned = lower.len() == text.len();
     for token in query.to_lowercase().split_whitespace() {
-        if let Some(idx) = lower.find(token) {
-            let start = idx.saturating_sub(20);
-            let end = (idx + token.len() + 60).min(body.len());
-            let slice: String = body.chars().skip(start).take(end - start).collect();
-            return format!("… {slice} …");
+        let found = if aligned { lower.find(token) } else { text.find(token) };
+        let Some(idx) = found else { continue };
+        if !text.is_char_boundary(idx) {
+            continue;
         }
+        let mut head: Vec<char> = text[..idx].chars().rev().take(20).collect();
+        head.reverse();
+        let head: String = head.into_iter().collect();
+        let tail: String = text[idx..]
+            .chars()
+            .take(token.chars().count() + 60)
+            .collect();
+        return Some(format!("… {head}{tail} …"));
     }
-    body.chars().take(80).collect()
+    None
+}
+
+/// Budgeted excerpt for `danbi_context`. Returns the markdown sections
+/// that mention a query token (document order) cut to `max_chars`, plus
+/// whether that excerpt is the whole document. A matching section longer
+/// than the budget is windowed around its first match so the hit itself
+/// is never cut off. With no matching section (e.g. a semantic-only hit)
+/// it falls back to the top of the document.
+pub fn focused_excerpt(md: &str, query: &str, max_chars: usize) -> (String, bool) {
+    let tokens: Vec<String> = query
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|t| t.chars().count() >= 2)
+        .map(|t| t.to_string())
+        .collect();
+
+    // Split on ATX headings ("# ", "## " …) outside fenced code blocks —
+    // `# comment` lines in code and `#tag` lines are not section breaks.
+    let mut sections: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_fence = false;
+    for line in md.split_inclusive('\n') {
+        let t = line.trim_start();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_fence = !in_fence;
+        }
+        let hashes = t.chars().take_while(|c| *c == '#').count();
+        let is_heading = !in_fence
+            && (1..=6).contains(&hashes)
+            && t[hashes..].starts_with(|c: char| c == ' ' || c == '\t');
+        if is_heading && !current.trim().is_empty() {
+            sections.push(std::mem::take(&mut current));
+        }
+        current.push_str(line);
+    }
+    if !current.trim().is_empty() {
+        sections.push(current);
+    }
+
+    let first_match = |sec: &str| -> Option<usize> {
+        let lc = sec.to_lowercase();
+        let aligned = lc.len() == sec.len();
+        tokens
+            .iter()
+            .filter_map(|t| if aligned { lc.find(t.as_str()) } else { sec.find(t.as_str()) })
+            .filter(|i| sec.is_char_boundary(*i))
+            .min()
+    };
+    let matching: Vec<(&String, Option<usize>)> = sections
+        .iter()
+        .filter_map(|sec| first_match(sec).map(|i| (sec, Some(i))))
+        .collect();
+    let picked: Vec<(&String, Option<usize>)> = if matching.is_empty() {
+        sections.iter().map(|sec| (sec, None)).collect()
+    } else {
+        matching
+    };
+    let mut complete = picked.len() == sections.len();
+
+    let mut out = String::new();
+    let mut used = 0usize;
+    for (sec, hit) in picked {
+        let n = sec.chars().count();
+        if used + n <= max_chars {
+            out.push_str(sec);
+            used += n;
+            continue;
+        }
+        complete = false;
+        let room = max_chars.saturating_sub(used);
+        if room > 0 {
+            // Keep the window's start a little before the match so the
+            // matched text lands inside it.
+            let hit_char = hit.map(|i| sec[..i].chars().count()).unwrap_or(0);
+            let skip = if hit_char + 80 > room {
+                hit_char.saturating_sub(room / 4)
+            } else {
+                0
+            };
+            if skip > 0 {
+                out.push_str("…");
+            }
+            out.extend(sec.chars().skip(skip).take(room));
+        }
+        out.push_str("\n…(생략)");
+        break;
+    }
+    (out, complete)
 }
 
 /// Tier-1 instant search — preview-only substring match. Kept because it's
@@ -581,20 +693,13 @@ pub fn local_search(
             domain: doc.domain.clone(),
             relevance: (score as f32 / 20.0).min(1.0),
             snippet,
+            matched: String::new(),
         })
         .collect()
 }
 
 fn excerpt_around(text: &str, needle: &str) -> String {
-    let lower = text.to_lowercase();
-    if let Some(idx) = lower.find(needle) {
-        let start = idx.saturating_sub(20);
-        let end = (idx + needle.len() + 60).min(text.len());
-        let slice: String = text.chars().skip(start).take(end - start).collect();
-        format!("… {slice} …")
-    } else {
-        text.chars().take(80).collect()
-    }
+    excerpt_match(text, needle).unwrap_or_else(|| text.chars().take(80).collect())
 }
 
 // ---------- Tier-3: Haiku reranker ----------
@@ -717,18 +822,30 @@ pub fn rrf_merge(
         let key = (hit.project.clone(), hit.domain.clone());
         *scores.entry(key.clone()).or_insert(0.0) +=
             1.0 / (RRF_K + (rank + 1) as f64);
-        seed.entry(key).or_insert_with(|| hit.clone());
+        seed.entry(key).or_insert_with(|| SearchHit {
+            matched: "keyword".into(),
+            ..hit.clone()
+        });
     }
     for (rank, hit) in vector_hits.iter().enumerate() {
         let key = (hit.project.clone(), hit.domain.clone());
-        *scores.entry(key.clone()).or_insert(0.0) +=
-            1.0 / (RRF_K + (rank + 1) as f64);
-        seed.entry(key).or_insert_with(|| SearchHit {
-            project: hit.project.clone(),
-            domain: hit.domain.clone(),
-            relevance: 0.0,
-            snippet: String::new(),
-        });
+        if let Some(existing) = seed.get_mut(&key) {
+            if existing.matched == "keyword" {
+                existing.matched = "keyword+semantic".into();
+            }
+        } else {
+            seed.insert(
+                key.clone(),
+                SearchHit {
+                    project: hit.project.clone(),
+                    domain: hit.domain.clone(),
+                    relevance: 0.0,
+                    snippet: String::new(),
+                    matched: "semantic".into(),
+                },
+            );
+        }
+        *scores.entry(key).or_insert(0.0) += 1.0 / (RRF_K + (rank + 1) as f64);
     }
 
     let mut ranked: Vec<((String, String), f64)> = scores.into_iter().collect();
@@ -771,5 +888,119 @@ pub fn full_search_hybrid(
         }
         None => Vec::new(),
     };
-    Ok(rrf_merge(&bm25, &vector_hits, limit))
+    let mut hits = rrf_merge(&bm25, &vector_hits, limit);
+    // Semantic-only hits carry no BM25 excerpt; fill one from the file so
+    // callers never get an empty snippet to judge the hit by.
+    for hit in hits.iter_mut().filter(|h| h.snippet.is_empty()) {
+        if let Ok(md) = crate::vault::read_doc(vault, &hit.project, &hit.domain) {
+            hit.snippet = excerpt_for_query(&md, query);
+        }
+    }
+    Ok(hits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vector::VectorHit;
+
+    fn bm25(project: &str, domain: &str) -> SearchHit {
+        SearchHit {
+            project: project.into(),
+            domain: domain.into(),
+            relevance: 1.0,
+            snippet: "… hit …".into(),
+            matched: String::new(),
+        }
+    }
+
+    fn vec_hit(project: &str, domain: &str, score: f32) -> VectorHit {
+        VectorHit {
+            project: project.into(),
+            domain: domain.into(),
+            score,
+        }
+    }
+
+    #[test]
+    fn excerpt_centers_on_korean_match() {
+        let body = "가".repeat(100) + "리프레시 토큰은 7일로 정했다" + &"나".repeat(100);
+        let ex = excerpt_for_query(&body, "리프레시");
+        assert!(ex.contains("리프레시 토큰은 7일로 정했다"), "{ex}");
+        // 20 chars of lead-in, not hundreds of bytes' worth.
+        assert!(ex.starts_with(&format!("… {}리프레시", "가".repeat(20))), "{ex}");
+    }
+
+    #[test]
+    fn excerpt_falls_back_to_head_without_match() {
+        let ex = excerpt_for_query("첫 줄입니다\n둘째 줄", "없는단어");
+        assert_eq!(ex, "첫 줄입니다\n둘째 줄");
+    }
+
+    #[test]
+    fn rrf_labels_semantic_only_hits() {
+        let merged = rrf_merge(&[], &[vec_hit("A", "close.md", 0.55)], 8);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].matched, "semantic");
+        assert!(merged[0].snippet.is_empty(), "filled later from the file");
+    }
+
+    #[test]
+    fn rrf_keeps_keyword_hits_and_labels_overlap() {
+        let merged = rrf_merge(
+            &[bm25("A", "both.md"), bm25("A", "kw.md")],
+            // A weak vector score never removes a keyword hit.
+            &[vec_hit("A", "both.md", 0.05)],
+            8,
+        );
+        let both = merged.iter().find(|h| h.domain == "both.md").unwrap();
+        let kw = merged.iter().find(|h| h.domain == "kw.md").unwrap();
+        assert_eq!(both.matched, "keyword+semantic");
+        assert_eq!(kw.matched, "keyword");
+        assert_eq!(merged[0].domain, "both.md");
+    }
+
+    #[test]
+    fn focused_excerpt_picks_matching_sections() {
+        let md = "# 제목\n소개\n## 인증\nJWT refresh 7일\n## 배포\n릴리스 절차\n";
+        let (ex, complete) = focused_excerpt(md, "refresh", 1000);
+        assert!(ex.contains("## 인증"));
+        assert!(!ex.contains("## 배포"));
+        assert!(!complete);
+    }
+
+    #[test]
+    fn focused_excerpt_whole_doc_is_complete() {
+        let md = "# 제목\r\n본문\r\n";
+        let (ex, complete) = focused_excerpt(md, "없음", 1000);
+        assert_eq!(ex, md);
+        assert!(complete);
+    }
+
+    #[test]
+    fn focused_excerpt_windows_long_section_around_match() {
+        let md = format!("{}refresh token 7일{}", "가".repeat(3000), "나".repeat(3000));
+        let (ex, complete) = focused_excerpt(&md, "refresh", 500);
+        assert!(ex.contains("refresh token 7일"), "{ex}");
+        assert!(ex.ends_with("…(생략)"));
+        assert!(!complete);
+    }
+
+    #[test]
+    fn focused_excerpt_ignores_code_comments_and_tags() {
+        let md = "## 설치\n```sh\n# refresh cache\nrun\n```\n#태그\n## 기타\n없음\n";
+        let (ex, _) = focused_excerpt(md, "refresh", 1000);
+        assert!(ex.starts_with("## 설치"), "{ex}");
+        assert!(ex.contains("run\n```"));
+        assert!(!ex.contains("## 기타"));
+    }
+
+    #[test]
+    fn focused_excerpt_respects_budget() {
+        let md = format!("# A\n{}\n", "가".repeat(500));
+        let (ex, complete) = focused_excerpt(&md, "없음", 100);
+        assert!(ex.ends_with("…(생략)"));
+        assert!(ex.chars().count() <= 100 + "\n…(생략)".chars().count());
+        assert!(!complete);
+    }
 }

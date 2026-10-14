@@ -90,6 +90,13 @@ pub fn build_index(vault: &Path) -> DanbiResult<LinkIndex> {
     if !projects_root.exists() {
         return Ok(index);
     }
+    // `[[notes/x.md]]` parses as project "notes"; when no such project
+    // exists it is really a sub-folder doc of the linking project.
+    let project_names: std::collections::HashSet<String> = std::fs::read_dir(&projects_root)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .collect();
     for entry in std::fs::read_dir(&projects_root)? {
         let entry = entry?;
         let p = entry.path();
@@ -121,7 +128,19 @@ pub fn build_index(vault: &Path) -> DanbiResult<LinkIndex> {
             let Ok(md) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let outgoing = extract_links(&md, &project);
+            let outgoing: Vec<WikiLink> = extract_links(&md, &project)
+                .into_iter()
+                .map(|l| {
+                    if project_names.contains(&l.project) {
+                        l
+                    } else {
+                        WikiLink {
+                            domain: format!("{}/{}", l.project, l.domain),
+                            project: project.clone(),
+                        }
+                    }
+                })
+                .collect();
             let src = key(&project, &fname);
             for target in &outgoing {
                 index
@@ -167,4 +186,47 @@ fn walk_md_for_links(
         out.push((full, path));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_vault(label: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "danbi-links-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(root.join(PROJECTS_DIRNAME)).unwrap();
+        root
+    }
+
+    fn write(vault: &Path, rel: &str, body: &str) {
+        let path = vault.join(PROJECTS_DIRNAME).join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn subfolder_link_resolves_to_linking_project() {
+        let v = temp_vault("subfolder");
+        write(&v, "A/index.md", "[[notes/x.md]] and [[B/y.md]]");
+        write(&v, "A/notes/x.md", "x");
+        write(&v, "B/y.md", "y");
+
+        let idx = build_index(&v).unwrap();
+        let out: Vec<String> = idx.outgoing["A/index.md"]
+            .iter()
+            .map(|l| format!("{}/{}", l.project, l.domain))
+            .collect();
+        assert_eq!(out, vec!["A/notes/x.md", "B/y.md"]);
+        assert!(idx.incoming.contains_key("A/notes/x.md"));
+        assert!(!idx.incoming.contains_key("notes/x.md"));
+        std::fs::remove_dir_all(v).ok();
+    }
 }
