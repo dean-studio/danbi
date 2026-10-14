@@ -129,6 +129,16 @@ export type CodexConnectResult = {
   action: "added" | "updated";
 };
 
+/** Result of installing Danbi's Claude Code hooks into a code folder. */
+export type ClaudeHooksResult = {
+  /** The `.claude/settings.local.json` that was written. */
+  path: string;
+  /** `~/.danbi/bin/danbi-hook` — the helper every hook runs. */
+  helper_path: string;
+  /** "added" (first install) | "updated" (Danbi hooks replaced). */
+  action: "added" | "updated";
+};
+
 export type McpProjectEndpoint = {
   project: string;
   id: string;
@@ -964,6 +974,10 @@ export const ipc = {
    *  project's `.codex/config.toml`. */
   codexConnect: (project: string, targetDir: string) =>
     invoke<CodexConnectResult>("codex_connect", { project, targetDir }),
+  /** Install (or refresh) the Claude Code SessionStart hook into the
+   *  selected code folder's `.claude/settings.local.json`. */
+  claudeHooksInstall: (project: string, targetDir: string) =>
+    invoke<ClaudeHooksResult>("claude_hooks_install", { project, targetDir }),
   trashList: () => invoke<TrashEntry[]>("trash_list"),
   trashRestore: (id: string) =>
     invoke<TrashEntry>("trash_restore", { id }),

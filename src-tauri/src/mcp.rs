@@ -94,6 +94,11 @@ impl McpServer {
             .route("/api/tools", get(handle_api_tools))
             .route("/api/call/:tool", post(handle_api_call))
             .route("/api/projects/:project/call/:tool", post(handle_api_call_scoped))
+            // Claude Code SessionStart 훅이 부르는 짧은 Markdown 브리핑.
+            .route(
+                "/api/session-brief",
+                get(handle_session_brief).post(handle_session_brief),
+            )
             // Plain PUT for raw markdown — Obsidian Local REST API style.
             // Lets Paperclip / cron / curl pipe a prebuilt report file in
             // without JSON wrapping (emoji, special punctuation, multi-MB
@@ -202,6 +207,51 @@ fn auth_ok(headers: &HeaderMap, token: &str) -> bool {
 
 async fn handle_health() -> impl IntoResponse {
     (StatusCode::OK, "danbi-mcp")
+}
+
+#[derive(Deserialize, Default)]
+struct SessionBriefQuery {
+    /// Project name or UUID. Missing → vault-wide brief.
+    project: Option<String>,
+    max_chars: Option<usize>,
+}
+
+/// `GET|POST /api/session-brief?project=<name|uuid>&max_chars=N` — plain
+/// Markdown (not JSON) because Claude Code pastes a SessionStart hook's
+/// stdout straight into the session. No LLM call, so it stays fast.
+async fn handle_session_brief(
+    State(state): State<McpState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<SessionBriefQuery>,
+) -> axum::response::Response {
+    if !auth_ok(&headers, &state.token) {
+        return (StatusCode::UNAUTHORIZED, "invalid or missing bearer token").into_response();
+    }
+    let max_chars = query
+        .max_chars
+        .unwrap_or(crate::session_hooks::DEFAULT_BRIEF_CHARS)
+        .clamp(500, 20_000);
+    let result = current_vault_path().and_then(|vault| {
+        let project = match query.project.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(p) => Some(
+                crate::vault::project_by_id(&vault, p)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| p.to_string()),
+            ),
+        };
+        crate::session_hooks::session_brief(&vault, project.as_deref(), max_chars)
+    });
+    match result {
+        Ok(text) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+            text,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, format!("{e}")).into_response(),
+    }
 }
 
 // ---------- REST handlers ----------

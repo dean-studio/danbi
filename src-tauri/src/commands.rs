@@ -3965,8 +3965,27 @@ fn exclude_codex_config_from_git(
     target: &std::path::Path,
     config_path: &std::path::Path,
 ) -> DanbiResult<()> {
+    exclude_local_file_from_git(
+        target,
+        config_path,
+        "Codex 설정",
+        "MCP 토큰을 기록하지 않았습니다",
+        "# Danbi project-local MCP credentials",
+    )
+}
+
+/// Keeps a Danbi-written, machine-local file out of Git: refuses when the
+/// file is already tracked, otherwise adds it to `.git/info/exclude` (works
+/// for nested folders and worktrees). No-op outside a Git repository.
+fn exclude_local_file_from_git(
+    target: &std::path::Path,
+    config_path: &std::path::Path,
+    label: &str,
+    refused: &str,
+    comment: &str,
+) -> DanbiResult<()> {
     let config_suffix = config_path.strip_prefix(target).map_err(|_| {
-        DanbiError::Other("Codex 설정 경로가 선택한 폴더 밖에 있습니다.".into())
+        DanbiError::Other(format!("{label} 경로가 선택한 폴더 밖에 있습니다."))
     })?;
     let canonical_target = std::fs::canonicalize(target)
         .map_err(|e| DanbiError::Other(format!("resolve Git project folder: {e}")))?;
@@ -3980,7 +3999,7 @@ fn exclude_codex_config_from_git(
     let canonical_workdir = std::fs::canonicalize(workdir)
         .map_err(|e| DanbiError::Other(format!("resolve Git worktree: {e}")))?;
     let relative = canonical_config.strip_prefix(&canonical_workdir).map_err(|_| {
-        DanbiError::Other("선택한 폴더의 Codex 설정 경로를 Git 저장소 안에서 확인할 수 없습니다.".into())
+        DanbiError::Other(format!("선택한 폴더의 {label} 경로를 Git 저장소 안에서 확인할 수 없습니다."))
     })?;
     let relative_git = relative.to_string_lossy().replace('\\', "/");
     let index = repo
@@ -3991,7 +4010,7 @@ fn exclude_codex_config_from_git(
         .is_some()
     {
         return Err(DanbiError::Other(format!(
-            "{} 파일이 Git에서 이미 추적 중이라 MCP 토큰을 기록하지 않았습니다. 먼저 추적을 해제한 뒤 다시 연결하세요.",
+            "{} 파일이 Git에서 이미 추적 중이라 {refused}. 먼저 추적을 해제한 뒤 다시 연결하세요.",
             config_path.display()
         )));
     }
@@ -4013,7 +4032,9 @@ fn exclude_codex_config_from_git(
     if !next.is_empty() && !next.ends_with('\n') {
         next.push('\n');
     }
-    next.push_str("\n# Danbi project-local MCP credentials\n");
+    next.push('\n');
+    next.push_str(comment);
+    next.push('\n');
     next.push_str(&rule);
     next.push('\n');
     std::fs::write(&exclude_path, next)
@@ -4120,6 +4141,95 @@ fn remove_codex_block(existing: &str, server_name: &str) -> (String, bool) {
         body.push('\n');
     }
     (body, replaced)
+}
+
+// ---------- Claude Code session hooks --------------------------------------
+
+#[derive(Serialize)]
+pub struct ClaudeHooksResult {
+    /// The `.claude/settings.local.json` that was written.
+    pub path: String,
+    /// The helper script every hook command runs.
+    pub helper_path: String,
+    /// "added" on first install, "updated" when Danbi hooks were replaced.
+    pub action: String,
+}
+
+/// Install (or refresh) Danbi's Claude Code SessionStart hook for one code
+/// folder. The hook lives in `<folder>/.claude/settings.local.json` (local,
+/// never committed) and runs `~/.danbi/bin/danbi-hook`, which reads the
+/// port and token from Danbi's config at run time — no token is written
+/// into the folder.
+#[tauri::command]
+pub fn claude_hooks_install(
+    project: String,
+    target_dir: String,
+) -> DanbiResult<ClaudeHooksResult> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let project_id = vault::ensure_project_id(&vault_path, &project)?;
+
+    let target = std::path::PathBuf::from(&target_dir);
+    if !target.is_absolute() || !target.is_dir() {
+        return Err(DanbiError::Other(
+            "코드 폴더가 존재하는 절대 경로여야 합니다.".into(),
+        ));
+    }
+    let target = std::fs::canonicalize(&target)
+        .map_err(|e| DanbiError::Other(format!("resolve code folder: {e}")))?;
+    let claude_dir = target.join(".claude");
+    let settings_path = claude_dir.join("settings.local.json");
+    exclude_local_file_from_git(
+        &target,
+        &settings_path,
+        "Claude Code 설정",
+        "훅을 기록하지 않았습니다",
+        "# Danbi Claude Code hooks (machine-local)",
+    )?;
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| DanbiError::Other("home directory not found".into()))?;
+    let helper = write_hook_helper(&home)?;
+
+    let existing = match std::fs::read_to_string(&settings_path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(DanbiError::Other(format!("read settings.local.json: {e}"))),
+    };
+    let start_cmd = crate::session_hooks::hook_command(&helper, "session-start", &project_id);
+    let (merged, replaced) =
+        crate::session_hooks::merge_hook_settings(&existing, Some(&start_cmd), None)?;
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| DanbiError::Other(format!("create .claude: {e}")))?;
+    std::fs::write(&settings_path, merged)
+        .map_err(|e| DanbiError::Other(format!("write settings.local.json: {e}")))?;
+
+    Ok(ClaudeHooksResult {
+        path: settings_path.to_string_lossy().to_string(),
+        helper_path: helper.to_string_lossy().to_string(),
+        action: if replaced { "updated" } else { "added" }.to_string(),
+    })
+}
+
+/// (Re)writes `~/.danbi/bin/danbi-hook` with mode 755. Always rewritten so
+/// an app update can fix the helper in place.
+fn write_hook_helper(home: &std::path::Path) -> DanbiResult<std::path::PathBuf> {
+    let bin = home.join(".danbi").join("bin");
+    std::fs::create_dir_all(&bin)
+        .map_err(|e| DanbiError::Other(format!("create ~/.danbi/bin: {e}")))?;
+    let helper = bin.join(crate::session_hooks::HOOK_HELPER_NAME);
+    let config_path = config::config_path(&default_vault_path()?);
+    std::fs::write(&helper, crate::session_hooks::helper_script(&config_path))
+        .map_err(|e| DanbiError::Other(format!("write danbi-hook: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| DanbiError::Other(format!("chmod danbi-hook: {e}")))?;
+    }
+    Ok(helper)
 }
 
 // ---------- Goals ----------------------------------------------------------

@@ -322,6 +322,7 @@ function ProjectHero({
     Record<AgentTarget, boolean>
   >({ claude: false, codex: false });
   const [skillFlash, setSkillFlash] = useState<string | null>(null);
+  const [hookOpen, setHookOpen] = useState(false);
   useEffect(() => {
     let alive = true;
     (["claude", "codex"] as const).forEach((agent) => {
@@ -400,9 +401,25 @@ function ProjectHero({
             onSkill={() => installSkill("claude")}
             onEditSkill={onEditSkill}
             project={project}
+            extra={
+              <button
+                type="button"
+                onClick={() => setHookOpen((v) => !v)}
+                title="새 세션을 열 때 단비 브리핑을 자동으로 넣는 훅"
+                className={cn(
+                  "inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-[12px] transition-colors",
+                  hookOpen
+                    ? "border-accent-blue bg-accent-blue-soft text-accent-blue"
+                    : "border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark",
+                )}
+              >
+                <Clock4 size={12} /> 훅
+              </button>
+            }
           />
         </div>
       </div>
+      {hookOpen && <ClaudeHookPanel project={project} />}
       {skillFlash && (
         <div
           className={cn(
@@ -434,6 +451,7 @@ function AgentActionRow({
   onSkill,
   onEditSkill,
   project,
+  extra,
 }: {
   agentLabel: string;
   agentIcon: ReactNode;
@@ -443,6 +461,8 @@ function AgentActionRow({
   onSkill: () => void;
   onEditSkill: () => void;
   project: string;
+  /** Agent-specific trailing button (Claude Code: 세션 훅). */
+  extra?: ReactNode;
 }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -484,6 +504,75 @@ function AgentActionRow({
       >
         <Edit3 size={12} /> Skill 수정
       </button>
+      {extra}
+    </div>
+  );
+}
+
+/** Claude Code 세션 훅 설치 패널. 코드 폴더를 고르면 그 폴더의
+ *  `.claude/settings.local.json` (Git 에 안 올라가는 로컬 설정) 에
+ *  SessionStart 훅을 넣는다. 훅은 토큰 없이 `~/.danbi/bin/danbi-hook` 을
+ *  부르고, 단비가 꺼져 있으면 조용히 넘어가 세션을 막지 않는다. */
+function ClaudeHookPanel({ project }: { project: string }) {
+  const [busy, setBusy] = useState(false);
+  const [flash, setFlash] = useState<{ kind: "ok" | "err"; msg: string } | null>(
+    null,
+  );
+
+  async function install() {
+    const targetDir = await openDialog({
+      directory: true,
+      multiple: false,
+      title: `Claude Code 를 실행할 코드 폴더 선택 · ${project}`,
+    });
+    if (typeof targetDir !== "string") return;
+    setBusy(true);
+    setFlash(null);
+    try {
+      const res = await ipc.claudeHooksInstall(project, targetDir);
+      setFlash({
+        kind: "ok",
+        msg: `${res.action === "updated" ? "훅을 갱신했어요" : "훅을 설치했어요"} · ${res.path} — 다음 세션부터 적용돼요.`,
+      });
+    } catch (e) {
+      setFlash({ kind: "err", msg: `설치 실패: ${e}` });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 rounded-md border border-hairline bg-surface-elevated p-3">
+      <div className="text-[13px] font-medium text-on-dark">
+        세션 시작 브리핑 훅
+      </div>
+      <p className="mt-1 text-[12px] leading-[1.6] text-body">
+        Claude Code 세션을 열 때마다 <span className="text-on-dark">{project}</span>
+        {" "}의 최근 문서·daily 노트·할 일을 짧게 넣어줘요. 고른 폴더의{" "}
+        <code>.claude/settings.local.json</code> 에만 기록하고 Git 에서는 빼둡니다.
+        토큰은 파일에 남기지 않아요.
+      </p>
+      <div className="mt-2 flex items-center justify-end gap-3">
+        <button
+          type="button"
+          disabled={busy}
+          onClick={install}
+          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-card px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark disabled:opacity-50"
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Server size={12} />}
+          폴더 선택 후 설치
+        </button>
+      </div>
+      {flash && (
+        <div
+          className={cn(
+            "mt-2 break-all text-[12px]",
+            flash.kind === "err" ? "text-accent-red" : "text-accent-green",
+          )}
+        >
+          {flash.kind === "err" ? "✕" : "✓"} {flash.msg}
+        </div>
+      )}
     </div>
   );
 }

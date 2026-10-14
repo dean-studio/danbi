@@ -34,6 +34,7 @@ mod providers;
 mod routing;
 mod search;
 mod secrets;
+mod session_hooks;
 mod shortcuts;
 mod skill;
 mod pricing;
@@ -545,6 +546,7 @@ pub fn run() {
             commands::install_skill,
             commands::skill_status,
             commands::codex_connect,
+            commands::claude_hooks_install,
             commands::trash_list,
             commands::trash_restore,
             commands::trash_purge,
