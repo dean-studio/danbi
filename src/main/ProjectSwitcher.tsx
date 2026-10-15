@@ -88,6 +88,8 @@ export function ProjectSwitcher({
       return;
     }
     if (e.key === "Enter") {
+      // 한글 조합 중 Enter 는 IME 몫 (CommandBar 와 동일).
+      if (e.nativeEvent.isComposing || e.keyCode === 229) return;
       e.preventDefault();
       const name = filtered[active];
       if (name) commit(name);

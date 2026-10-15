@@ -7,6 +7,7 @@ import type {
   PlanPreview,
   ProjectGroup,
   ProjectJournalView,
+  ProjectNode,
   RoutingResult,
   VaultTree,
 } from "@/lib/ipc";
@@ -42,6 +43,9 @@ export type AppStore = {
 
   tree: VaultTree | null;
   setTree: (t: VaultTree) => void;
+  /** 프로젝트 하나만 교체/추가(`node`) 또는 제거(`null`). 워처가 바뀐
+   *  프로젝트를 알려줄 때 vault 전체를 다시 긁지 않기 위한 부분 갱신. */
+  patchTreeProject: (name: string, node: ProjectNode | null) => void;
 
   selection: Selection;
   selectProject: (project: string | null) => void;
@@ -289,6 +293,17 @@ export const useApp = create<AppStore>((set) => ({
   setCfg: (cfg) => set({ cfg }),
   tree: null,
   setTree: (t) => set({ tree: t }),
+  patchTreeProject: (name, node) =>
+    set((s) => {
+      if (!s.tree) return {};
+      const rest = s.tree.projects.filter((p) => p.name !== name);
+      if (!node) return { tree: { ...s.tree, projects: rest } };
+      // list_tree 와 같은 정렬 (소문자 이름순) 을 유지한다.
+      const projects = [...rest, node].sort((a, b) =>
+        a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+      );
+      return { tree: { ...s.tree, projects } };
+    }),
   selection: { project: null, domain: null },
   selectProject: (project) => set({ selection: { project, domain: null } }),
   selectDomain: (project, domain) => set({ selection: { project, domain } }),

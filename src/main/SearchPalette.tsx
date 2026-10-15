@@ -109,15 +109,21 @@ export function SearchPalette({
         e.preventDefault();
         setActiveIdx((i) => Math.max(0, i - 1));
       }
-      if (e.key === "Enter" && hits[activeIdx]) {
+      if (e.key === "Enter") {
+        // 한글 조합 중 Enter 는 IME 가 소비한다 — 항목을 열어버리지 않게
+        // (CommandBar 와 같은 처리). WebKit 은 조합 확정 Enter 를 keyCode
+        // 229 로 한 번 더 보낸다.
+        if (e.isComposing || e.keyCode === 229) return;
         e.preventDefault();
+        // ⌘↵ = AI 재정렬. 일반 Enter 분기보다 먼저 봐야 도달한다.
+        if (e.metaKey || e.ctrlKey) {
+          reRankWithAi();
+          return;
+        }
         const h = hits[activeIdx];
+        if (!h) return;
         selectDomain(h.project, h.domain);
         onClose();
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-        e.preventDefault();
-        reRankWithAi();
       }
     }
     window.addEventListener("keydown", onKey);
