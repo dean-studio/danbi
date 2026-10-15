@@ -112,17 +112,13 @@ fn is_pending(link: &GhostLink) -> bool {
 }
 
 fn rolling_activity(vault: &Path, days: i64) -> DanbiResult<ActivityWindow> {
-    // Window: [now - days * 86400, now]. We use vcs::recent_commits and then
-    // filter by timestamp locally; this avoids adding a new "since" argument
-    // to the commit iterator.
+    // Window: [now - days * 86400, now]. `commits_since` walks by time (no
+    // 200-commit ceiling) and already drops the `(pre)` snapshots that
+    // used to double every write.
     let now = Local::now().timestamp();
     let since = now - days * 86_400;
 
-    let commits = match vcs::recent_commits(vault, 200) {
-        Ok(c) => c,
-        Err(_) => Vec::new(),
-    };
-    let windowed: Vec<_> = commits.into_iter().filter(|c| c.ts >= since).collect();
+    let windowed = vcs::commits_since(vault, since).unwrap_or_default();
 
     // Changed-file enumeration needs repo access — recent_commits doesn't
     // include file lists. For the UI we only need a sampled set, so we just
@@ -295,6 +291,9 @@ fn compute_project_activity_overview(
         for c in commits {
             if c.ts < from_s {
                 break;
+            }
+            if vcs::is_pre_snapshot(&c.summary) {
+                continue;
             }
             // commit summary format: "danbi: <verb> · <project>/<domain>"
             // — extract project from the segment after `· `.
