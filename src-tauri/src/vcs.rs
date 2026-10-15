@@ -1505,10 +1505,14 @@ pub fn doc_restore(
     let short7: String = target.id().to_string().chars().take(7).collect();
     drop(target);
     drop(repo);
+    // Same lock and origin token as every other writer — the feed shows
+    // a restore as a human row.
+    let _guard = write_guard();
     crate::vault::write_doc(vault, project, domain, &content)?;
-    snapshot(
+    snapshot_as(
         vault,
         &format!("danbi: restore {mode} · {project}/{domain} ← {short7}"),
+        CLIENT_HUMAN,
     )
 }
 
@@ -1593,6 +1597,9 @@ mod doc_restore_tests {
         let head = recent_commits(&v, 1).unwrap().remove(0);
         assert_eq!(head.id, new_commit.unwrap());
         assert!(head.summary.starts_with("danbi: restore before · A/ui.md ← "));
+        assert!(head.summary.ends_with(" [human]"), "{}", head.summary);
+        let row = &activity_feed(&v, None, None, 1).unwrap()[0];
+        assert_eq!((row.op.as_str(), row.actor.as_str()), ("restore", "human"));
         let _ = std::fs::remove_dir_all(&v);
     }
 

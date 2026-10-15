@@ -17,6 +17,11 @@ export type Selection = {
   domain: string | null;
 };
 
+/** 메인 영역 화면. "home" 은 selection 에 따라 오늘(홈)/프로젝트 홈/문서로
+ *  갈라지고, 검토함·사용량은 selection 과 무관한 전용 화면. 사이드바
+ *  내비 행과 ⌘⇧R / ⌘⇧U 가 바꾼다. */
+export type MainView = "home" | "review" | "usage";
+
 export type ChatTurn = {
   id: string;
   user: string;
@@ -51,6 +56,18 @@ export type AppStore = {
   selectProject: (project: string | null) => void;
   selectDomain: (project: string, domain: string) => void;
   clearSelection: () => void;
+
+  view: MainView;
+  /** 검토함·사용량으로 전환. selection 은 유지(검토함의 프로젝트 범위 칩에
+   *  쓰임). 홈으로 돌아올 땐 selectProject/selectDomain/clearSelection 이
+   *  view 를 "home" 으로 되돌린다. */
+  setView: (v: MainView) => void;
+
+  /** 연결 시트 — 프로젝트 홈 상태 띠·사이드바 푸터·설정·컨텍스트 메뉴
+   *  어디서든 연다. project=null 이면 vault 전역(서버·토큰·고급만). */
+  connectSheet: { open: boolean; project: string | null };
+  openConnectSheet: (project: string | null) => void;
+  closeConnectSheet: () => void;
 
   turns: ChatTurn[];
   addTurn: (t: ChatTurn) => void;
@@ -305,9 +322,20 @@ export const useApp = create<AppStore>((set) => ({
       return { tree: { ...s.tree, projects } };
     }),
   selection: { project: null, domain: null },
-  selectProject: (project) => set({ selection: { project, domain: null } }),
-  selectDomain: (project, domain) => set({ selection: { project, domain } }),
-  clearSelection: () => set({ selection: { project: null, domain: null } }),
+  selectProject: (project) =>
+    set({ selection: { project, domain: null }, view: "home" }),
+  selectDomain: (project, domain) =>
+    set({ selection: { project, domain }, view: "home" }),
+  clearSelection: () =>
+    set({ selection: { project: null, domain: null }, view: "home" }),
+
+  view: "home",
+  setView: (v) => set({ view: v }),
+
+  connectSheet: { open: false, project: null },
+  openConnectSheet: (project) => set({ connectSheet: { open: true, project } }),
+  closeConnectSheet: () =>
+    set((s) => ({ connectSheet: { ...s.connectSheet, open: false } })),
 
   turns: [],
   // v0.8.0: cap the chat log. Each turn can pin heavy payloads —

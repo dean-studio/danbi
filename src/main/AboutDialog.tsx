@@ -39,7 +39,7 @@ export function AboutDialog({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="relative w-[380px] overflow-hidden rounded-xl border border-hairline bg-surface shadow-2xl shadow-black/50">
+      <div className="relative w-[380px] overflow-hidden rounded-xl border border-hairline-strong bg-surface-card">
         <button
           onClick={onClose}
           className="absolute right-3 top-3 grid h-6 w-6 place-items-center rounded-sm text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
@@ -53,7 +53,7 @@ export function AboutDialog({
             src={appIconUrl}
             alt="Danbi"
             draggable={false}
-            className="h-24 w-24 select-none rounded-2xl shadow-lg shadow-black/30"
+            className="h-24 w-24 select-none rounded-2xl"
           />
           <div className="text-center">
             <div className="text-[18px] font-medium text-ink">단비 (Danbi)</div>
