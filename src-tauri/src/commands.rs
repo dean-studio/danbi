@@ -1153,8 +1153,25 @@ pub fn mcp_project_endpoint(project: String) -> DanbiResult<McpProjectEndpoint> 
     })
 }
 
+#[derive(Serialize)]
+pub struct McpRotateResult {
+    pub status: McpStatus,
+    /// Connection files (`.mcp.json`, `.cursor/mcp.json`, `.codex/config.toml`)
+    /// rewritten with the new token.
+    pub updated: Vec<String>,
+    /// Files that could not be rewritten (path — error). The old token is
+    /// already gone, so the user has to reconnect those by hand.
+    pub failed: Vec<String>,
+    /// Registry entries dropped because the file no longer exists.
+    pub removed: Vec<String>,
+}
+
+/// Generate a new bearer token, restart the server with it and push it
+/// into every connection file Danbi wrote (see `agent_connect`). The
+/// frontend asks for confirmation first — anything registered by hand
+/// (`claude mcp add`) silently stops working until the user updates it.
 #[tauri::command]
-pub fn mcp_rotate_token(app: AppHandle) -> DanbiResult<McpStatus> {
+pub fn mcp_rotate_token(app: AppHandle) -> DanbiResult<McpRotateResult> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
@@ -1166,7 +1183,28 @@ pub fn mcp_rotate_token(app: AppHandle) -> DanbiResult<McpStatus> {
     if cfg.mcp.enabled {
         server.start(cfg.mcp.port, cfg.mcp.token.clone());
     }
-    mcp_status(app)
+    let report = match dirs::home_dir() {
+        Some(home) => crate::agent_connect::rotate_all(&home, &cfg.mcp.token),
+        None => Default::default(),
+    };
+    Ok(McpRotateResult {
+        status: mcp_status(app)?,
+        updated: report.updated,
+        failed: report.failed,
+        removed: report.removed,
+    })
+}
+
+/// How many connection files Danbi has written — shown in the rotation
+/// confirmation so the user knows what will be refreshed automatically.
+#[tauri::command]
+pub fn mcp_connections_list() -> Vec<crate::agent_connect::Connection> {
+    match dirs::home_dir() {
+        Some(home) => crate::agent_connect::load_registry(
+            &crate::agent_connect::registry_path(&home),
+        ),
+        None => Vec::new(),
+    }
 }
 
 #[tauri::command]
@@ -3720,7 +3758,7 @@ pub fn undo_last() -> DanbiResult<Option<String>> {
 /// `~/.claude/skills/<dir>/` lookup wants ASCII-safe names; Korean and
 /// other non-ASCII project names get hashed to a stable suffix so the
 /// directory is always reproducible from the project name.
-fn skill_dir_for(project: &str) -> String {
+pub(crate) fn skill_dir_for(project: &str) -> String {
     let safe: String = project
         .chars()
         .map(|c| {
@@ -3955,6 +3993,22 @@ pub fn codex_connect(
     let (merged, replaced) = merge_codex_block(&existing, &server_name, &url, &token);
     std::fs::write(&config_path, &merged)
         .map_err(|e| DanbiError::Other(format!("write config.toml: {e}")))?;
+    // 토큰 회전이 이 파일도 갱신할 수 있게 레지스트리에 기록.
+    if let Some(home) = dirs::home_dir() {
+        crate::agent_connect::register(
+            &home,
+            crate::agent_connect::Connection {
+                agent: "codex".into(),
+                project: project.clone(),
+                path: config_path.to_string_lossy().to_string(),
+                servers: vec![crate::agent_connect::ServerEntry {
+                    name: server_name.clone(),
+                    url: url.clone(),
+                }],
+                connected_at: crate::agent_connect::now_secs(),
+            },
+        )?;
+    }
 
     // Migrate every Danbi-managed legacy global entry away. Leaving even one
     // in ~/.codex/config.toml would keep exposing it in every workspace.
@@ -3965,6 +4019,182 @@ pub fn codex_connect(
         server_name,
         global_removed,
         action: if replaced { "updated" } else { "added" }.to_string(),
+    })
+}
+
+#[derive(Serialize)]
+pub struct AgentConnectResult {
+    pub agent: String,
+    pub path: String,
+    pub server_names: Vec<String>,
+    /// "added" when none of our servers existed in the file, "updated"
+    /// when at least one was replaced in place.
+    pub action: String,
+    /// Registrations found in `~/.claude*.json` (`claude mcp add`) that
+    /// point at this Danbi server for the same folder (local) or every
+    /// folder (user). Reported only — Danbi never edits those files.
+    pub legacy: Vec<crate::agent_connect::LegacyEntry>,
+}
+
+/// Write Danbi's MCP servers into a code folder for Claude Code
+/// (`<repo>/.mcp.json`) or Cursor (`<repo>/.cursor/mcp.json`). Same
+/// flow as Codex: pick a folder, merge into the existing file (other
+/// servers/keys preserved, ours replaced in place), keep the token out
+/// of Git via `.git/info/exclude`, and record the file in
+/// `~/.danbi/connections.json` so a token rotation refreshes it.
+#[tauri::command]
+pub fn agent_connect(
+    app: AppHandle,
+    project: String,
+    agent: String,
+    target_dir: String,
+) -> DanbiResult<AgentConnectResult> {
+    use crate::agent_connect::{self as ac, Agent};
+    let kind = match Agent::parse(&agent) {
+        Some(Agent::Claude) => Agent::Claude,
+        Some(Agent::Cursor) => Agent::Cursor,
+        _ => {
+            return Err(DanbiError::Other(format!(
+                "agent_connect 는 claude · cursor 만 지원해요 (받은 값: {agent}). Codex 는 codex_connect."
+            )))
+        }
+    };
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    if !cfg.mcp.enabled {
+        return Err(DanbiError::Other(
+            "MCP 서버가 꺼져 있어요. 설정 → MCP 에서 먼저 켜주세요.".into(),
+        ));
+    }
+    let server = app.state::<crate::mcp::McpServer>();
+    if server.info().is_none() {
+        return Err(DanbiError::Other(
+            "MCP 서버가 실행 중이 아니에요. 설정 → MCP 에서 켜주세요.".into(),
+        ));
+    }
+    let vault_path = require_vault(&cfg)?;
+    let id = vault::ensure_project_id(&vault_path, &project)?;
+    let servers = ac::split_servers(&project, &id, cfg.mcp.port);
+
+    let target = std::path::PathBuf::from(&target_dir);
+    if !target.is_absolute() || !target.is_dir() {
+        return Err(DanbiError::Other(
+            "코드 폴더가 존재하는 절대 경로여야 합니다.".into(),
+        ));
+    }
+    let target = std::fs::canonicalize(&target)
+        .map_err(|e| DanbiError::Other(format!("resolve code folder: {e}")))?;
+    let config_path = target.join(kind.config_rel_path());
+    exclude_local_file_from_git(
+        &target,
+        &config_path,
+        &format!("{} 설정", kind.label()),
+        "MCP 토큰을 기록하지 않았습니다",
+        &format!("# Danbi {} MCP credentials (machine-local)", kind.label()),
+    )?;
+    let existing = match std::fs::read_to_string(&config_path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(DanbiError::Other(format!("read {}: {e}", kind.config_rel_path()))),
+    };
+    let (merged, replaced) = ac::merge_mcp_json(&existing, kind, &servers, &cfg.mcp.token)?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| DanbiError::Other(format!("create {}: {e}", parent.display())))?;
+    }
+    std::fs::write(&config_path, merged)
+        .map_err(|e| DanbiError::Other(format!("write {}: {e}", kind.config_rel_path())))?;
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| DanbiError::Other("home directory not found".into()))?;
+    ac::register(
+        &home,
+        ac::Connection {
+            agent: kind.as_str().to_string(),
+            project: project.clone(),
+            path: config_path.to_string_lossy().to_string(),
+            servers: servers.clone(),
+            connected_at: ac::now_secs(),
+        },
+    )?;
+    let legacy = if kind == Agent::Claude {
+        ac::detect_claude_legacy_in_home(&home, &target, cfg.mcp.port)
+    } else {
+        Vec::new()
+    };
+
+    Ok(AgentConnectResult {
+        agent: kind.as_str().to_string(),
+        path: config_path.to_string_lossy().to_string(),
+        server_names: servers.into_iter().map(|s| s.name).collect(),
+        action: if replaced { "updated" } else { "added" }.to_string(),
+        legacy,
+    })
+}
+
+#[derive(Serialize)]
+pub struct ConnectionFileStatus {
+    pub agent: String,
+    pub path: String,
+    /// false when the folder/file was deleted since we wrote it.
+    pub exists: bool,
+}
+
+#[derive(Serialize)]
+pub struct AgentConnectionStatus {
+    pub server_running: bool,
+    pub port: u16,
+    /// Connection files Danbi wrote for this project.
+    pub connections: Vec<ConnectionFileStatus>,
+    /// Last authenticated MCP call on this project's endpoints since the
+    /// app started (reads included). Unix ms.
+    pub last_call_at: Option<i64>,
+    pub last_call_client: Option<String>,
+    /// Last persisted inbound write (usage log) — survives restarts.
+    pub last_write_at: Option<i64>,
+    pub last_write_client: Option<String>,
+}
+
+/// "연결됨" is decided here, not when a command is copied to the
+/// clipboard: the server must be up, and we show when an agent last
+/// actually called in.
+#[tauri::command]
+pub fn agent_connection_status(app: AppHandle, project: String) -> DanbiResult<AgentConnectionStatus> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let server = app.state::<crate::mcp::McpServer>();
+    let project_id = vault::ensure_project_id(&vault_path, &project).ok();
+
+    let connections = dirs::home_dir()
+        .map(|home| {
+            crate::agent_connect::load_registry(&crate::agent_connect::registry_path(&home))
+                .into_iter()
+                .filter(|c| c.project == project)
+                .map(|c| ConnectionFileStatus {
+                    exists: std::path::Path::new(&c.path).exists(),
+                    agent: c.agent,
+                    path: c.path,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let presence = project_id
+        .as_deref()
+        .and_then(crate::mcp_presence::last_for);
+    let last_write = crate::mcp_inbound::last_write_for_project(&project);
+
+    Ok(AgentConnectionStatus {
+        server_running: server.info().is_some(),
+        port: cfg.mcp.port,
+        connections,
+        last_call_at: presence.as_ref().map(|p| p.ts_ms),
+        last_call_client: presence.map(|p| p.client),
+        last_write_at: last_write.as_ref().map(|w| w.0),
+        last_write_client: last_write.and_then(|w| w.1),
     })
 }
 
@@ -4094,7 +4324,7 @@ fn exclude_local_file_from_git(
 /// group's header lines and everything under them up to the next
 /// unrelated table header, plus a preceding `# danbi:mcp <name>` marker
 /// line if we wrote one before. Everything else is left byte-identical.
-fn merge_codex_block(
+pub(crate) fn merge_codex_block(
     existing: &str,
     server_name: &str,
     url: &str,

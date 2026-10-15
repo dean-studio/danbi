@@ -719,6 +719,11 @@ async fn run_rpc(
         )
             .into_response();
     }
+    // 프로젝트 홈의 "연결됨" 표시용 — 읽기 호출까지 포함한 마지막 접속.
+    crate::mcp_presence::note(
+        scoped_project_id.as_deref(),
+        headers.get("user-agent").and_then(|v| v.to_str().ok()),
+    );
 
     // JSON-RPC notifications carry no `id` and MUST NOT receive a response
     // object. MCP Streamable HTTP requires the server to answer 202 Accepted

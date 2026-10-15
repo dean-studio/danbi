@@ -117,8 +117,66 @@ export type ProjectContextStatus = {
 
 /** Which external coding agent we're wiring up. Claude Code installs
  *  skills under `~/.claude/skills/`, Codex under `~/.codex/skills/`;
- *  both consume the same MCP endpoint and the same SKILL.md format. */
-export type AgentTarget = "claude" | "codex";
+ *  both consume the same MCP endpoint and the same SKILL.md format.
+ *  Cursor gets an MCP connection file only (no SKILL.md). */
+export type AgentTarget = "claude" | "codex" | "cursor";
+
+/** A `claude mcp add` registration found in `~/.claude*.json` that
+ *  points at this Danbi server. Reported only — never edited. */
+export type LegacyMcpEntry = {
+  config_file: string;
+  /** "local" (this folder) | "user" (every folder). */
+  scope: "local" | "user";
+  name: string;
+  url: string;
+};
+
+/** Result of writing Danbi's servers into `<repo>/.mcp.json` (Claude
+ *  Code) or `<repo>/.cursor/mcp.json` (Cursor). */
+export type AgentConnectResult = {
+  agent: "claude" | "cursor";
+  path: string;
+  /** `danbi_read` + `danbi-<slug>` (backend-derived, hash for 한글). */
+  server_names: string[];
+  action: "added" | "updated";
+  legacy: LegacyMcpEntry[];
+};
+
+export type ConnectionFileStatus = {
+  agent: AgentTarget;
+  path: string;
+  exists: boolean;
+};
+
+/** Whether a project is really connected: server up + files written +
+ *  when an agent last actually called in. */
+export type AgentConnectionStatus = {
+  server_running: boolean;
+  port: number;
+  connections: ConnectionFileStatus[];
+  /** Last authenticated call (reads included) since app start, unix ms. */
+  last_call_at: number | null;
+  last_call_client: string | null;
+  /** Last persisted inbound write, unix ms. */
+  last_write_at: number | null;
+  last_write_client: string | null;
+};
+
+/** One connection file Danbi wrote (`~/.danbi/connections.json`). */
+export type McpConnection = {
+  agent: AgentTarget;
+  project: string;
+  path: string;
+  servers: { name: string; url: string }[];
+  connected_at: number;
+};
+
+export type McpRotateResult = {
+  status: McpStatus;
+  updated: string[];
+  failed: string[];
+  removed: string[];
+};
 
 /** Result of writing the Danbi MCP block into a project's .codex/config.toml. */
 export type CodexConnectResult = {
@@ -998,6 +1056,14 @@ export const ipc = {
    *  project's `.codex/config.toml`. */
   codexConnect: (project: string, targetDir: string) =>
     invoke<CodexConnectResult>("codex_connect", { project, targetDir }),
+  /** Write Danbi's read + write servers into the code folder's
+   *  `.mcp.json` (claude) or `.cursor/mcp.json` (cursor). Same flow as
+   *  Codex; other servers in the file are preserved. */
+  agentConnect: (project: string, agent: "claude" | "cursor", targetDir: string) =>
+    invoke<AgentConnectResult>("agent_connect", { project, agent, targetDir }),
+  agentConnectionStatus: (project: string) =>
+    invoke<AgentConnectionStatus>("agent_connection_status", { project }),
+  mcpConnectionsList: () => invoke<McpConnection[]>("mcp_connections_list"),
   /** Install (or refresh) the Claude Code SessionStart hook — plus the
    *  SessionEnd auto-log hook when `sessionEnd` — into the selected code
    *  folder's `.claude/settings.local.json`. */
@@ -1183,7 +1249,8 @@ export const ipc = {
   mcpEnable: (port?: number) =>
     invoke<McpStatus>("mcp_enable", { port: port ?? null }),
   mcpDisable: () => invoke<McpStatus>("mcp_disable"),
-  mcpRotateToken: () => invoke<McpStatus>("mcp_rotate_token"),
+  /** New token + restart + rewrite every registered connection file. */
+  mcpRotateToken: () => invoke<McpRotateResult>("mcp_rotate_token"),
   mcpProjectEndpoint: (project: string) =>
     invoke<McpProjectEndpoint>("mcp_project_endpoint", { project }),
 

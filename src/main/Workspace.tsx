@@ -224,16 +224,6 @@ export function Workspace() {
         );
         return;
       }
-      const endpoint = await ipc.mcpProjectEndpoint(project);
-      // Slugify the project name for the MCP server identifier so non-ASCII
-      // project names don't end up in the CLI token. Both Claude Code and
-      // Codex use this as a server handle; it must match [a-z0-9_-].
-      const slug = project
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "");
-      const serverName = slug ? `danbi-${slug}` : "danbi";
-
       if (agent === "codex") {
         const targetDir = await openFolderDialog({
           directory: true,
@@ -241,7 +231,6 @@ export function Workspace() {
           title: `Codex 가 실행될 코드 폴더 선택 · ${project}`,
         });
         if (typeof targetDir !== "string") return;
-        void serverName; // server name is derived identically on the backend
         const res = await ipc.codexConnect(project, targetDir);
         flash(
           "ok",
@@ -254,15 +243,46 @@ export function Workspace() {
         return;
       }
 
-      const cmd = `claude mcp add --transport http ${serverName} "${endpoint.url}" --header "Authorization: Bearer ${status.token}"`;
-      await clipboardWriteText(cmd);
-      flash(
-        "ok",
-        `"${project}" 설치 명령을 복사했어요. 이 명령을 당신 프로젝트 폴더에서 실행하세요.`,
-      );
+      // Claude Code · Cursor: Codex 와 같은 흐름 — 코드 폴더를 고르면 그
+      // 폴더의 .mcp.json / .cursor/mcp.json 에 읽기+쓰기 서버를 직접
+      // 기록한다 (서버 이름은 백엔드가 정함). 명령 복사 단계 없음.
+      const label = agent === "cursor" ? "Cursor" : "Claude Code";
+      const targetDir = await openFolderDialog({
+        directory: true,
+        multiple: false,
+        title: `${label} 가 실행될 코드 폴더 선택 · ${project}`,
+      });
+      if (typeof targetDir !== "string") return;
+      const res = await ipc.agentConnect(project, agent, targetDir);
+      flash("ok", describeAgentConnect(project, label, res));
     } catch (e) {
-      flash("err", `복사 실패: ${e}`);
+      flash("err", `연결 실패: ${e}`);
     }
+  }
+
+  /** 연결 결과 한 줄 + 기존 `claude mcp add` 등록이 겹치면 안내. 사용자
+   *  설정 파일(~/.claude*.json)은 건드리지 않으므로 지우는 법만 알려준다. */
+  function describeAgentConnect(
+    project: string,
+    label: string,
+    res: import("@/lib/ipc").AgentConnectResult,
+  ): string {
+    let msg =
+      res.action === "updated"
+        ? `"${project}"의 ${label} 연결을 갱신했어요 (${res.path}). ${label} 를 재시작하세요.`
+        : `"${project}"를 ${res.path}에 연결했어요. ${label} 를 재시작하세요.`;
+    const local = res.legacy.filter((l) => l.scope === "local");
+    const user = res.legacy.filter((l) => l.scope === "user");
+    if (local.length > 0) {
+      msg += ` 이 폴더에 예전 방식으로 등록한 서버(${local
+        .map((l) => l.name)
+        .join(", ")})가 있어 도구가 겹쳐요 — 터미널에서 \`claude mcp remove ${local[0].name}\` 로 지우면 됩니다.`;
+    } else if (user.length > 0) {
+      msg += ` 전역(user)에 등록된 단비 서버(${user
+        .map((l) => l.name)
+        .join(", ")})도 함께 뜹니다.`;
+    }
+    return msg;
   }
 
   async function copyClaudeMdTemplate(project: string) {

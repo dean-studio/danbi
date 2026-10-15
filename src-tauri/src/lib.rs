@@ -1,3 +1,4 @@
+mod agent_connect;
 mod aws_profiles;
 mod backup;
 mod bedrock;
@@ -24,6 +25,7 @@ mod journal_view;
 mod links;
 mod mcp;
 mod mcp_inbound;
+mod mcp_presence;
 mod popover;
 mod preview;
 mod tray_badge;
@@ -548,6 +550,9 @@ pub fn run() {
             commands::skill_status,
             commands::skill_status_all,
             commands::codex_connect,
+            commands::agent_connect,
+            commands::agent_connection_status,
+            commands::mcp_connections_list,
             commands::claude_hooks_install,
             commands::trash_list,
             commands::trash_restore,
