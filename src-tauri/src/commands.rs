@@ -43,14 +43,14 @@ pub fn ping() -> &'static str {
 }
 
 /// Returns the default vault path suggestion.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn default_vault() -> DanbiResult<String> {
     Ok(default_vault_path()?.to_string_lossy().to_string())
 }
 
 /// Returns an existing config if a vault is already set up, otherwise None.
 /// Looks at the provided vault path; if absent, tries the default one.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn load_config(vault_path: Option<String>) -> DanbiResult<Option<DanbiConfig>> {
     let vault = match vault_path {
         Some(s) => PathBuf::from(s),
@@ -60,13 +60,13 @@ pub fn load_config(vault_path: Option<String>) -> DanbiResult<Option<DanbiConfig
 }
 
 /// Saves config.json into the vault directory (creates dir if needed).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_config(vault_path: String, cfg: DanbiConfig) -> DanbiResult<()> {
     let vault = PathBuf::from(&vault_path);
     config::save_config(&vault, &cfg)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn detect_aws() -> DanbiResult<AwsDetection> {
     aws_profiles::detect_profiles()
 }
@@ -158,7 +158,7 @@ pub fn delete_nvidia_api_key() -> DanbiResult<()> {
     secrets::delete_api_key(NVIDIA_KEY_REF)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_nvidia_models() -> DanbiResult<Vec<crate::providers::ModelInfo>> {
     Ok(crate::providers::nvidia::catalog())
 }
@@ -201,7 +201,7 @@ pub fn store_openai_api_key(api_key: String) -> DanbiResult<String> {
 pub fn delete_openai_api_key() -> DanbiResult<()> {
     secrets::delete_api_key(OPENAI_KEY_REF)
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_openai_models() -> DanbiResult<Vec<crate::providers::ModelInfo>> {
     Ok(crate::providers::openai::catalog())
 }
@@ -233,7 +233,7 @@ pub fn store_anthropic_api_key(api_key: String) -> DanbiResult<String> {
 pub fn delete_anthropic_api_key() -> DanbiResult<()> {
     secrets::delete_api_key(ANTHROPIC_KEY_REF)
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_anthropic_models() -> DanbiResult<Vec<crate::providers::ModelInfo>> {
     Ok(crate::providers::anthropic::catalog())
 }
@@ -262,7 +262,7 @@ pub fn store_google_api_key(api_key: String) -> DanbiResult<String> {
 pub fn delete_google_api_key() -> DanbiResult<()> {
     secrets::delete_api_key(GOOGLE_KEY_REF)
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_google_models() -> DanbiResult<Vec<crate::providers::ModelInfo>> {
     Ok(crate::providers::google::catalog())
 }
@@ -295,7 +295,7 @@ pub fn delete_voyage_api_key() -> DanbiResult<()> {
     secrets::delete_api_key(VOYAGE_KEY_REF)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_voyage_models() -> DanbiResult<Vec<crate::providers::ModelInfo>> {
     Ok(crate::providers::voyage::catalog())
 }
@@ -340,7 +340,7 @@ pub async fn test_ollama(
 
 // ---------- Vault / Watcher ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn init_vault(vault_path: String) -> DanbiResult<()> {
     vault::init_vault(&PathBuf::from(vault_path))
 }
@@ -458,7 +458,7 @@ pub async fn delete_project(vault_path: String, name: String) -> DanbiResult<()>
     .map_err(|e| DanbiError::Other(format!("join: {e}")))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_domain(
     vault_path: String,
     project: String,
@@ -467,7 +467,7 @@ pub fn create_domain(
     vault::create_domain(&PathBuf::from(vault_path), &project, &domain)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_domain(
     vault_path: String,
     project: String,
@@ -480,7 +480,7 @@ pub fn rename_domain(
 /// Soft-delete a domain file. The file is moved into `.danbi/trash/`
 /// rather than removed from disk so the user can restore it from the
 /// trash panel. To wipe permanently, use `trash_purge` after deletion.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_domain(
     vault_path: String,
     project: String,
@@ -490,7 +490,7 @@ pub fn delete_domain(
     crate::trash::trash_file(&p, &project, &domain).map(|_| ())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_folder(
     vault_path: String,
     project: String,
@@ -499,7 +499,7 @@ pub fn create_folder(
     vault::create_folder(&PathBuf::from(vault_path), &project, &folder)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn rename_folder(
     vault_path: String,
     project: String,
@@ -510,7 +510,7 @@ pub fn rename_folder(
 }
 
 /// Soft-delete a sub-folder (and everything inside) into trash.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_folder(
     vault_path: String,
     project: String,
@@ -520,7 +520,7 @@ pub fn delete_folder(
     crate::trash::trash_folder(&p, &project, &folder).map(|_| ())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn trash_list() -> DanbiResult<Vec<crate::trash::TrashEntry>> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -529,7 +529,7 @@ pub fn trash_list() -> DanbiResult<Vec<crate::trash::TrashEntry>> {
     crate::trash::list(&vault_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn trash_restore(id: String) -> DanbiResult<crate::trash::TrashEntry> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -538,7 +538,7 @@ pub fn trash_restore(id: String) -> DanbiResult<crate::trash::TrashEntry> {
     crate::trash::restore(&vault_path, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn trash_purge(id: String) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -547,7 +547,7 @@ pub fn trash_purge(id: String) -> DanbiResult<()> {
     crate::trash::purge(&vault_path, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn trash_empty() -> DanbiResult<usize> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -558,7 +558,7 @@ pub fn trash_empty() -> DanbiResult<usize> {
 
 /// Move a domain file between top-level / sub-folder. Pass `to_folder = None`
 /// (or null from the frontend) to move into the project root.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn move_domain(
     vault_path: String,
     project: String,
@@ -573,7 +573,7 @@ pub fn move_domain(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn read_doc(
     vault_path: String,
     project: String,
@@ -644,7 +644,7 @@ pub fn write_doc_blocking(
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_asset(
     vault_path: String,
     project: String,
@@ -658,7 +658,7 @@ pub fn save_asset(
     vault::save_asset(&PathBuf::from(vault_path), &project, &filename, &bytes)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn resolve_asset(
     vault_path: String,
     project: String,
@@ -969,12 +969,12 @@ pub async fn route_message(
     Ok(route)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn extract_file_path(path: String) -> DanbiResult<Extracted> {
     ingest::extract_from_path(&PathBuf::from(path))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn extract_file_bytes(filename: String, bytes_b64: String) -> DanbiResult<Extracted> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -1077,7 +1077,7 @@ fn require_vault(cfg: &DanbiConfig) -> DanbiResult<PathBuf> {
     Ok(PathBuf::from(s))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn apply_plan(
     project: String,
     domain: String,
@@ -1155,7 +1155,7 @@ pub fn apply_plan(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn daily_snapshot() -> DanbiResult<crate::daily::DailySnapshot> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?;
@@ -1212,7 +1212,7 @@ fn build_project_endpoints(vault_path: &PathBuf, port: u16) -> Vec<McpProjectEnd
     out
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mcp_status(app: AppHandle) -> DanbiResult<McpStatus> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -1234,7 +1234,7 @@ pub fn mcp_status(app: AppHandle) -> DanbiResult<McpStatus> {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mcp_enable(app: AppHandle, port: Option<u16>) -> DanbiResult<McpStatus> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -1255,7 +1255,7 @@ pub fn mcp_enable(app: AppHandle, port: Option<u16>) -> DanbiResult<McpStatus> {
     mcp_status(app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mcp_disable(app: AppHandle) -> DanbiResult<McpStatus> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -1270,7 +1270,7 @@ pub fn mcp_disable(app: AppHandle) -> DanbiResult<McpStatus> {
     mcp_status(app)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mcp_project_endpoint(project: String) -> DanbiResult<McpProjectEndpoint> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -1301,7 +1301,7 @@ pub struct McpRotateResult {
 /// into every connection file Danbi wrote (see `agent_connect`). The
 /// frontend asks for confirmation first — anything registered by hand
 /// (`claude mcp add`) silently stops working until the user updates it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mcp_rotate_token(app: AppHandle) -> DanbiResult<McpRotateResult> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -1328,7 +1328,7 @@ pub fn mcp_rotate_token(app: AppHandle) -> DanbiResult<McpRotateResult> {
 
 /// How many connection files Danbi has written — shown in the rotation
 /// confirmation so the user knows what will be refreshed automatically.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mcp_connections_list() -> Vec<crate::agent_connect::Connection> {
     match dirs::home_dir() {
         Some(home) => crate::agent_connect::load_registry(
@@ -1338,19 +1338,19 @@ pub fn mcp_connections_list() -> Vec<crate::agent_connect::Connection> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_templates() -> Vec<crate::templates::VaultTemplate> {
     crate::templates::list_templates()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn apply_template(vault_path: String, template_id: String) -> DanbiResult<()> {
     let tpl = crate::templates::get_template(&template_id)
         .ok_or_else(|| DanbiError::Config(format!("unknown template: {template_id}")))?;
     crate::templates::apply_template(&PathBuf::from(vault_path), &tpl)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ensure_today_note(project: String) -> DanbiResult<String> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -1359,7 +1359,7 @@ pub fn ensure_today_note(project: String) -> DanbiResult<String> {
     crate::daily::ensure_today_note(&vault_path, &project)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vault_suggestions() -> DanbiResult<Vec<crate::healing::Suggestion>> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?;
@@ -1385,7 +1385,7 @@ pub async fn build_link_index() -> DanbiResult<crate::links::LinkIndex> {
     .map_err(|e| DanbiError::Other(format!("join: {e}")))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn recent_commits(limit: Option<usize>) -> DanbiResult<Vec<crate::vcs::CommitSummary>> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?;
@@ -1399,7 +1399,7 @@ pub fn recent_commits(limit: Option<usize>) -> DanbiResult<Vec<crate::vcs::Commi
 /// Activity feed rows (newest first). `before` is the `ts` cursor from the
 /// last row of the previous page; `scope_project` narrows to commits that
 /// touched that project.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn activity_feed(
     scope_project: Option<String>,
     before: Option<i64>,
@@ -1418,7 +1418,7 @@ pub fn activity_feed(
 /// Undo what one feed row did to one file (`path` = a `files` entry of
 /// the row). Later changes to the same file are reported as a warning;
 /// `force` applies the revert regardless.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn activity_revert(
     commit_id: String,
     path: String,
@@ -1464,7 +1464,7 @@ pub async fn project_updates() -> DanbiResult<std::collections::HashMap<String, 
 /// "Auto-Journal" view — per-trigger counts for today, the latest 8
 /// entries across the last 7 days, and per-day buckets. Used by the
 /// new ProjectHome dashboard.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn project_journal_view(
     project: String,
 ) -> DanbiResult<crate::journal_view::ProjectJournalView> {
@@ -1478,7 +1478,7 @@ pub fn project_journal_view(
 /// Mark a project as "just seen" — stores the current epoch seconds so
 /// `project_updates` will exclude everything up to this point going
 /// forward. Called whenever the user selects a project.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn project_mark_seen(project: String) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -1601,7 +1601,7 @@ fn domain_updates_blocking()
 /// We store the MAX of (file's current mtime, wall clock now) in ms so
 /// the badge stays cleared even if the watcher fires again moments
 /// later — `mtime > last_seen` will be false.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn domain_mark_seen(project: String, domain: String) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -1628,7 +1628,7 @@ pub fn domain_mark_seen(project: String, domain: String) -> DanbiResult<()> {
 /// Mark every domain in a project as read. Walks the project tree and
 /// stamps `domain_last_seen_at` for each .md file. Also updates
 /// `project_last_seen_at` so the project-level "N" badge clears.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn project_mark_all_read(project: String) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -1671,7 +1671,7 @@ pub fn project_mark_all_read(project: String) -> DanbiResult<()> {
 /// Mark every project + every domain in the vault as read in one shot.
 /// Used by the sidebar's "모두 읽음" button so the user can dismiss
 /// every "N" badge across all projects without clicking each one.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vault_mark_all_read() -> DanbiResult<usize> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -1727,7 +1727,7 @@ pub fn vault_mark_all_read() -> DanbiResult<usize> {
 /// surface dead simple. Groups that reference unknown project names are
 /// silently filtered, and any project not mentioned in any group is
 /// implicitly "Ungrouped" (rendered at the top).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn groups_set(
     groups: Vec<crate::config::ProjectGroup>,
 ) -> DanbiResult<Vec<crate::config::ProjectGroup>> {
@@ -2112,7 +2112,7 @@ pub struct CaptureContext {
     pub last_domain: Option<String>,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn search_local(query: String, limit: Option<usize>) -> DanbiResult<Vec<crate::search::SearchHit>> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?;
@@ -2246,7 +2246,7 @@ pub async fn compound_preview(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn compound_apply(
     project: String,
     domain: String,
@@ -2335,7 +2335,7 @@ pub async fn search_vault(query: String) -> DanbiResult<crate::search::SearchRes
     crate::search::search(provider.as_ref(), &model, &query, &index).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn capture_context() -> DanbiResult<CaptureContext> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -2585,7 +2585,7 @@ pub async fn summarize_weekly(
 
 /// 사용자가 daily 노트의 export history 를 볼 때 호출. 같은 노트의
 /// 이전 요약 list 를 newest-first 로 반환.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn list_exports(
     project: Option<String>,
     source_domain: Option<String>,
@@ -2629,7 +2629,7 @@ pub struct ExportDocHtmlResult {
 /// AI 연동 / 토큰 소비 0. 모든 .md 파일에서 동작.
 ///
 /// 결과는 `.danbi/exports/` 에도 저장되어 history 패널에 등장한다.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn export_doc_html(
     project: String,
     domain: String,
@@ -3355,7 +3355,7 @@ pub fn tray_badge_set_enabled(app: AppHandle, enabled: bool) -> DanbiResult<()> 
 
 // ---------- Ghost Links ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ghost_list(project: String) -> DanbiResult<GhostStore> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3381,7 +3381,7 @@ pub async fn ghost_scan(project: String) -> DanbiResult<GhostStore> {
     ghost_links::scan_project(&vault_path, &project, provider.as_ref(), &model).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ghost_accept(project: String, id: String) -> DanbiResult<GhostStore> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3446,7 +3446,7 @@ pub async fn project_qa_ask(project: String, question: String) -> DanbiResult<Qa
     .await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_snapshot() -> DanbiResult<crate::dashboard::DashboardSnapshot> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3457,7 +3457,7 @@ pub fn dashboard_snapshot() -> DanbiResult<crate::dashboard::DashboardSnapshot> 
 
 /// Per-project activity overview for the home dashboard donut. Combines
 /// commit count + MCP inbound calls/tokens within a rolling N-day window.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn project_activity_overview(
     days: Option<i64>,
 ) -> DanbiResult<crate::dashboard::ActivityOverview> {
@@ -3478,7 +3478,7 @@ pub fn project_activity_overview(
 // All three return a self-describing payload that includes the
 // disclaimer string, so the renderer can't accidentally hide it.
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_mcp_inbound(
     range: String,
 ) -> DanbiResult<crate::mcp_inbound::VaultSummary> {
@@ -3486,7 +3486,7 @@ pub fn dashboard_mcp_inbound(
     Ok(crate::mcp_inbound::summarize_vault(r))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_mcp_inbound_project(
     project: String,
     range: String,
@@ -3495,7 +3495,7 @@ pub fn dashboard_mcp_inbound_project(
     Ok(crate::mcp_inbound::summarize_project(&project, r))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_mcp_inbound_domain(
     project: String,
     domain: String,
@@ -3509,7 +3509,7 @@ pub fn dashboard_mcp_inbound_domain(
 /// presents the dialog and passes us the chosen path; we own the write
 /// so we don't have to enable Tauri's `fs` plugin (every plugin we
 /// add is one more attack-surface entry in the Tauri ACL).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn usage_export_json(path: String) -> DanbiResult<()> {
     let body = crate::usage::export_json()
         .map_err(|e| DanbiError::Config(format!("export failed: {e}")))?;
@@ -3519,7 +3519,7 @@ pub fn usage_export_json(path: String) -> DanbiResult<()> {
 }
 
 /// Same as `usage_export_json` but CSV.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn usage_export_csv(path: String) -> DanbiResult<()> {
     let body = crate::usage::export_csv()
         .map_err(|e| DanbiError::Config(format!("export failed: {e}")))?;
@@ -3531,7 +3531,7 @@ pub fn usage_export_csv(path: String) -> DanbiResult<()> {
 /// Run the retention sweep on demand. Normally fires automatically
 /// during startup (see `lib.rs`); this command lets the user trigger
 /// it from Settings if they're worried about the live log size.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn usage_retention_sweep() -> DanbiResult<usize> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3547,7 +3547,7 @@ pub fn usage_retention_sweep() -> DanbiResult<usize> {
 /// Toggle MCP inbound tracking from Settings. `true` re-enables a
 /// disabled tracker; `false` causes future MCP writes to skip the
 /// usage log entirely.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn usage_set_mcp_tracking(enabled: bool) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -3560,7 +3560,7 @@ pub fn usage_set_mcp_tracking(enabled: bool) -> DanbiResult<()> {
 /// Update the MCP retention window. Negative or zero means "keep
 /// forever". Triggers an immediate sweep so the user sees the file
 /// shrink right after lowering the retention.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn usage_set_mcp_retention(days: i64) -> DanbiResult<usize> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -3580,7 +3580,7 @@ pub fn usage_set_mcp_retention(days: i64) -> DanbiResult<usize> {
 // 토큰 + 비용을 보여준다. agentcat connectors 와 달리 OAuth endpoint 호출
 // 없이 transcript 만으로 동작 — 자기 디스크의 자기 파일 read-only.
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_claude_code(range: String) -> DanbiResult<crate::claude_code_usage::CcSummary> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3610,20 +3610,20 @@ pub fn dashboard_claude_code(range: String) -> DanbiResult<crate::claude_code_us
 }
 
 /// 90일 sparkline + 달력 잔디 + 1년 전 오늘 비교용 일별 시리즈.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_claude_code_daily(
     days: Option<u32>,
 ) -> DanbiResult<Vec<crate::claude_code_usage::DailyPoint>> {
     Ok(crate::claude_code_usage::daily_series(days.unwrap_or(90)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_claude_code_monthly() -> DanbiResult<Vec<crate::claude_code_usage::DailyPoint>> {
     Ok(crate::claude_code_usage::monthly_series())
 }
 
 /// transcript 캐시 강제 무효화 — Settings "다시 인덱싱" 버튼.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_claude_code_reindex() -> DanbiResult<()> {
     crate::claude_code_usage::invalidate_cache();
     Ok(())
@@ -3632,7 +3632,7 @@ pub fn dashboard_claude_code_reindex() -> DanbiResult<()> {
 /// 영속 비용 히스토리 (cc_billing_history.jsonl) 삭제 후 다음 카드 갱신 시
 /// 현재 단가표로 다시 finalize. 단가 보정 후 사용자가 과거 비용도 새 단가로
 /// 재계산하길 원할 때.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_claude_code_reset_history() -> DanbiResult<()> {
     crate::claude_code_usage::reset_history()
         .map_err(|e| DanbiError::Config(format!("history 삭제 실패: {e}")))?;
@@ -3640,7 +3640,7 @@ pub fn dashboard_claude_code_reset_history() -> DanbiResult<()> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn usage_set_claude_code_tracking(enabled: bool) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -3650,7 +3650,7 @@ pub fn usage_set_claude_code_tracking(enabled: bool) -> DanbiResult<()> {
     Ok(())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn usage_set_tray_options(tray_usage: bool, tray_label: bool) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -3663,7 +3663,7 @@ pub fn usage_set_tray_options(tray_usage: bool, tray_label: bool) -> DanbiResult
 
 // ---------- 단비 자체 Bedrock/LLM 사용량 (Phase 5) ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn dashboard_danbi_llm(range: String) -> DanbiResult<crate::pricing::UsageSummary> {
     let r = crate::claude_code_usage::Range::parse(&range);
     let (from_ms, to_ms) = r.window();
@@ -3679,7 +3679,7 @@ pub fn dashboard_danbi_llm(range: String) -> DanbiResult<crate::pricing::UsageSu
 
 // ---------- Backup (mirror vault to external folder) ----------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn backup_now() -> DanbiResult<crate::backup::BackupReport> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
@@ -3708,7 +3708,7 @@ pub fn backup_now() -> DanbiResult<crate::backup::BackupReport> {
     Ok(report)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn backup_validate_path(path: String) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3721,7 +3721,7 @@ pub fn backup_validate_path(path: String) -> DanbiResult<()> {
 
 /// Estimate the scope of a full reindex without actually running it. The
 /// frontend uses this to show "약 N 토큰" before the user confirms.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vector_estimate_reindex(
     model_id: Option<String>,
 ) -> DanbiResult<VectorEstimateResponse> {
@@ -3751,7 +3751,7 @@ pub struct VectorEstimateResponse {
     pub estimate: crate::vector::ReindexEstimate,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vector_stats() -> DanbiResult<crate::vector::VectorIndexStats> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3843,7 +3843,7 @@ pub async fn vector_reindex_project(
     Ok(report)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn vector_clear() -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3874,7 +3874,7 @@ pub async fn vector_search(
     Ok(crate::vector::query(&idx, &q, limit.unwrap_or(10)))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reviews_list() -> DanbiResult<crate::reviews::ReviewStore> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3883,7 +3883,7 @@ pub fn reviews_list() -> DanbiResult<crate::reviews::ReviewStore> {
     crate::reviews::load(&vault_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn reviews_resolve(
     app: AppHandle,
     id: String,
@@ -3910,7 +3910,7 @@ pub fn reviews_resolve(
     Ok(store)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn cache_clear() -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3919,7 +3919,7 @@ pub fn cache_clear() -> DanbiResult<()> {
     crate::cache::clear_all(&vault_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn project_context_status(
     project: String,
 ) -> DanbiResult<crate::project_context::ProjectContext> {
@@ -3930,7 +3930,7 @@ pub fn project_context_status(
     Ok(crate::project_context::load(&vault_path, &project))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn project_context_ensure(project: String) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3939,7 +3939,7 @@ pub fn project_context_ensure(project: String) -> DanbiResult<()> {
     crate::project_context::ensure_templates(&vault_path, &project)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn build_graph(project: Option<String>) -> DanbiResult<crate::graph::GraphData> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3963,7 +3963,7 @@ pub async fn project_briefing(project: String, range: String) -> DanbiResult<Bri
     briefing::build(&vault_path, &project, &range, provider.as_ref(), &writer).await
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ghost_reject(project: String, id: String) -> DanbiResult<GhostStore> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -3972,7 +3972,7 @@ pub fn ghost_reject(project: String, id: String) -> DanbiResult<GhostStore> {
     ghost_links::reject(&vault_path, &project, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn undo_last() -> DanbiResult<Option<String>> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -4098,7 +4098,7 @@ fn project_mcp_url(vault_path: &std::path::Path, project: &str) -> String {
 /// placeholders ({{PROJECT}}, {{MCP_URL}}), and writes the result to
 /// `~/.claude/skills/`. Editing vault's SKILL.md and pressing 갱신
 /// is the round-trip.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn install_skill(project: String, agent: Option<String>) -> DanbiResult<String> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -4137,7 +4137,7 @@ pub fn install_skill(project: String, agent: Option<String>) -> DanbiResult<Stri
 
 /// Whether THIS project's skill file exists. Used to swap the header
 /// button between "Skill 설치" and "Skill 갱신".
-#[tauri::command]
+#[tauri::command(async)]
 pub fn skill_status(project: String, agent: Option<String>) -> DanbiResult<bool> {
     let home = match dirs::home_dir() {
         Some(p) => p,
@@ -4148,7 +4148,7 @@ pub fn skill_status(project: String, agent: Option<String>) -> DanbiResult<bool>
 
 /// `skill_status` for many projects in one IPC round-trip — the home
 /// screen used to call it once per project, serially.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn skill_status_all(
     projects: Vec<String>,
     agent: Option<String>,
@@ -4191,7 +4191,7 @@ pub struct CodexConnectResult {
 /// already present it is replaced in place rather than duplicated —
 /// re-pressing 연결 never stacks blocks. All other content (comments,
 /// unrelated servers) is preserved verbatim via line-based editing.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn codex_connect(
     app: AppHandle,
     project: String,
@@ -4292,7 +4292,7 @@ pub struct AgentConnectResult {
 /// servers/keys preserved, ours replaced in place), keep the token out
 /// of Git via `.git/info/exclude`, and record the file in
 /// `~/.danbi/connections.json` so a token rotation refreshes it.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn agent_connect(
     app: AppHandle,
     project: String,
@@ -4409,7 +4409,7 @@ pub struct AgentConnectionStatus {
 /// "연결됨" is decided here, not when a command is copied to the
 /// clipboard: the server must be up, and we show when an agent last
 /// actually called in.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn agent_connection_status(app: AppHandle, project: String) -> DanbiResult<AgentConnectionStatus> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -4686,7 +4686,7 @@ pub struct ClaudeHooksResult {
 /// never committed) and runs `~/.danbi/bin/danbi-hook`, which reads the
 /// port and token from Danbi's config at run time — no token is written
 /// into the folder.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn claude_hooks_install(
     project: String,
     target_dir: String,
@@ -4767,7 +4767,7 @@ fn write_hook_helper(home: &std::path::Path) -> DanbiResult<std::path::PathBuf> 
 
 // ---------- Goals ----------------------------------------------------------
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn goals_list(
     project: String,
     include_archived: Option<bool>,
@@ -4783,7 +4783,7 @@ pub fn goals_list(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn goals_add(
     project: String,
     title: String,
@@ -4796,7 +4796,7 @@ pub fn goals_add(
     crate::goals::add(&vault_path, &project, &title, note)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn goals_edit(
     project: String,
     id: String,
@@ -4818,7 +4818,7 @@ pub fn goals_edit(
     crate::goals::edit(&vault_path, &project, &id, title, note_patch)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn goals_archive(project: String, id: String) -> DanbiResult<crate::goals::Goal> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -4827,7 +4827,7 @@ pub fn goals_archive(project: String, id: String) -> DanbiResult<crate::goals::G
     crate::goals::archive(&vault_path, &project, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn goals_unarchive(project: String, id: String) -> DanbiResult<crate::goals::Goal> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -4836,7 +4836,7 @@ pub fn goals_unarchive(project: String, id: String) -> DanbiResult<crate::goals:
     crate::goals::unarchive(&vault_path, &project, &id)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn goals_delete(project: String, id: String) -> DanbiResult<()> {
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?
@@ -4848,7 +4848,7 @@ pub fn goals_delete(project: String, id: String) -> DanbiResult<()> {
 /// 메뉴바 popover 의 빠른 메모용 — 지정 project 의 오늘 daily 노트에
 /// content 를 append 하고 git snapshot. mcp 의 `danbi_log` 와 같은 의미인데
 /// IPC 직호출 경로라 외부 LLM 트래픽으로 잡히지 않는다.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn danbi_log_quick(
     project: String,
     content: String,
@@ -4904,7 +4904,7 @@ pub fn danbi_log_quick(
 /// 문서 변경 히스토리 — 현재 열린 doc 우측 패널에 노출되는 list.
 /// git 커밋 메시지에서 op (upsert_item / replace_section / append / …)
 /// 을 분류하고, upsert_item 의 경우 update vs add 모드까지 함께.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn doc_change_history(
     project: String,
     domain: String,
@@ -4919,7 +4919,7 @@ pub fn doc_change_history(
 
 /// 인스펙터 [diff] — 커밋 하나가 이 문서에 가한 변경 (base 생략 시 첫
 /// 부모 대비).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn doc_diff(
     project: String,
     domain: String,
@@ -4936,7 +4936,7 @@ pub fn doc_diff(
 /// 인스펙터·피드 [이 변경 되돌리기] / [이 버전으로] — 문서 하나만
 /// `before`(커밋 직전) 또는 `at`(그 시점) 으로. 새 커밋 id 반환, 변화
 /// 없으면 None. vault 전체 reset 은 하지 않는다.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn doc_restore(
     project: String,
     domain: String,
