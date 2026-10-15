@@ -76,6 +76,12 @@ export type VectorIndexStats = {
   oldest: number | null;
   newest: number | null;
   model: string | null;
+  by_model: { model: string; count: number }[];
+  configured_model?: string;
+  other_count: number;
+  mixed: boolean;
+  /** 색인에 다른 임베딩 모델의 문서가 섞여 있을 때만. */
+  warning?: string;
 };
 
 export type VectorReindexReport = {

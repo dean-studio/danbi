@@ -1741,12 +1741,8 @@ function timeAgo(ms: number): string {
 function VectorPanel() {
   const cfg = useApp((s) => s.cfg);
   const setCfg = useApp((s) => s.setCfg);
-  const [stats, setStats] = useState<{
-    count: number;
-    oldest: number | null;
-    newest: number | null;
-    model: string | null;
-  } | null>(null);
+  const [stats, setStats] =
+    useState<import("@/lib/ipc").VectorIndexStats | null>(null);
   const [estimate, setEstimate] =
     useState<import("@/lib/ipc").VectorEstimateResponse | null>(null);
   const [estimating, setEstimating] = useState(false);
@@ -2273,6 +2269,17 @@ function VectorPanel() {
               {stats?.model && (
                 <span className="text-caption-sm text-mute">
                   모델: {stats.model}
+                </span>
+              )}
+              {stats?.warning && (
+                <span className="max-w-[320px] text-caption-sm text-on-dark-mute">
+                  {stats.warning}
+                  {stats.by_model.length > 1 && (
+                    <>
+                      {" "}
+                      ({stats.by_model.map((m) => `${m.model} ${m.count}`).join(" · ")})
+                    </>
+                  )}
                 </span>
               )}
             </div>

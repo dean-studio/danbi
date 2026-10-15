@@ -87,6 +87,31 @@ pub struct VectorIndexStats {
     pub oldest: Option<i64>,
     pub newest: Option<i64>,
     pub model: Option<String>,
+    /// Entry count per embedding model, most common first.
+    #[serde(default)]
+    pub by_model: Vec<ModelCount>,
+    /// Model the next query / reindex would use, when one is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_model: Option<String>,
+    /// Entries embedded with some other model — invisible to semantic
+    /// search until a full reindex.
+    pub other_count: usize,
+    pub mixed: bool,
+    /// Ready-made sentence for the Settings panel; None when consistent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// `stats` plus the mixed-model census against the configured model.
+pub fn stats_with_model(index: &VectorIndex, configured: Option<&str>) -> VectorIndexStats {
+    let status = model_status(&model_counts(index), configured);
+    let mut out = stats(index);
+    out.warning = mixed_warning(&status);
+    out.configured_model = status.configured_model;
+    out.by_model = status.by_model;
+    out.other_count = status.other_count;
+    out.mixed = status.mixed;
+    out
 }
 
 pub fn stats(index: &VectorIndex) -> VectorIndexStats {
@@ -109,6 +134,11 @@ pub fn stats(index: &VectorIndex) -> VectorIndexStats {
         oldest: if oldest == i64::MAX { None } else { Some(oldest) },
         newest: if newest == 0 { None } else { Some(newest) },
         model,
+        by_model: Vec::new(),
+        configured_model: None,
+        other_count: 0,
+        mixed: false,
+        warning: None,
     }
 }
 
@@ -773,6 +803,18 @@ mod tests {
         let s = model_status(&counts, Some("newest"));
         assert_eq!(s.other_count, 8);
         assert!(s.mixed);
+    }
+
+    #[test]
+    fn stats_with_model_carries_the_census() {
+        let s = stats_with_model(&index_with(&[("new", 5), ("old", 3)]), Some("new"));
+        assert_eq!(s.count, 8);
+        assert!(s.mixed);
+        assert_eq!(s.other_count, 3);
+        assert_eq!(s.configured_model.as_deref(), Some("new"));
+        assert!(s.warning.unwrap().contains("3개"));
+        let s = stats_with_model(&index_with(&[("new", 5)]), Some("new"));
+        assert!(!s.mixed && s.warning.is_none());
     }
 
     #[test]

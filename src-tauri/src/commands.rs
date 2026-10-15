@@ -3459,7 +3459,10 @@ pub fn vector_stats() -> DanbiResult<crate::vector::VectorIndexStats> {
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
     let idx = crate::vector::load(&vault_path)?;
-    Ok(crate::vector::stats(&idx))
+    // Compare against the model a reindex would use so Settings can warn
+    // about entries left behind by a model switch.
+    let configured = crate::mcp::configured_embed_model(&cfg);
+    Ok(crate::vector::stats_with_model(&idx, configured.as_deref()))
 }
 
 /// Emit a `vector:reindex_progress` Tauri event for every step pushed by
