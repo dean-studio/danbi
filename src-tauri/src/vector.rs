@@ -112,6 +112,102 @@ pub fn stats(index: &VectorIndex) -> VectorIndexStats {
     }
 }
 
+// ---------- Mixed-model detection ----------
+//
+// Each entry remembers the model that embedded it. After the user
+// switches embedding models, entries from the old model linger until a
+// full reindex — and they silently drop out of semantic search (different
+// dimension → cosine 0, same dimension → meaningless scores).
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ModelCount {
+    pub model: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VectorModelStatus {
+    /// Model the next query / reindex would use. None when no embedding
+    /// provider is configured.
+    pub configured_model: Option<String>,
+    pub total: usize,
+    /// Entry count per model, most common first.
+    pub by_model: Vec<ModelCount>,
+    /// Entries embedded with a model other than `configured_model` (or,
+    /// with nothing configured, other than the most common one).
+    pub other_count: usize,
+    pub mixed: bool,
+}
+
+pub fn model_counts(index: &VectorIndex) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for e in index.entries.values() {
+        *counts.entry(e.model.clone()).or_default() += 1;
+    }
+    counts
+}
+
+pub fn model_status(
+    counts: &HashMap<String, usize>,
+    configured: Option<&str>,
+) -> VectorModelStatus {
+    let mut by_model: Vec<ModelCount> = counts
+        .iter()
+        .map(|(m, c)| ModelCount { model: m.clone(), count: *c })
+        .collect();
+    by_model.sort_by(|a, b| b.count.cmp(&a.count).then(a.model.cmp(&b.model)));
+    let total: usize = by_model.iter().map(|m| m.count).sum();
+    let reference = configured
+        .map(|m| counts.get(m).copied().unwrap_or(0))
+        .unwrap_or_else(|| by_model.first().map(|m| m.count).unwrap_or(0));
+    let other_count = total - reference;
+    VectorModelStatus {
+        configured_model: configured.map(str::to_string),
+        total,
+        by_model,
+        other_count,
+        mixed: other_count > 0,
+    }
+}
+
+/// One-line warning for MCP output, None when the index is consistent.
+pub fn mixed_warning(status: &VectorModelStatus) -> Option<String> {
+    status.mixed.then(|| {
+        format!(
+            "의미 검색 색인에 다른 모델로 만든 문서 {}개가 섞여 있어요 — 이 문서들은 의미 검색에 안 잡혀요. 단비 설정 → AI 연동에서 전체 재색인이 필요해요.",
+            status.other_count
+        )
+    })
+}
+
+/// Per-model counts, re-read only when vectors.json changes on disk —
+/// the MCP search path asks on every call and the index can be tens of MB.
+pub fn cached_model_counts(vault: &Path) -> HashMap<String, usize> {
+    type Key = (PathBuf, Option<std::time::SystemTime>, u64);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(Key, HashMap<String, usize>)>>> =
+        std::sync::OnceLock::new();
+    let path = index_path(vault);
+    let meta = std::fs::metadata(&path).ok();
+    let key: Key = (
+        path,
+        meta.as_ref().and_then(|m| m.modified().ok()),
+        meta.as_ref().map(|m| m.len()).unwrap_or(0),
+    );
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(guard) = cache.lock() {
+        if let Some((k, counts)) = guard.as_ref() {
+            if *k == key {
+                return counts.clone();
+            }
+        }
+    }
+    let counts = load(vault).map(|i| model_counts(&i)).unwrap_or_default();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((key, counts.clone()));
+    }
+    counts
+}
+
 /// Walks the vault, embeds files whose hash changed, drops entries for
 /// deleted files. Returns a summary the UI can display.
 ///
@@ -626,4 +722,65 @@ pub fn query(
             score: s,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn index_with(models: &[(&str, usize)]) -> VectorIndex {
+        let mut index = VectorIndex::default();
+        for (model, n) in models {
+            for i in 0..*n {
+                let id = format!("p/{model}-{i}.md");
+                index.entries.insert(
+                    id.clone(),
+                    VectorEntry {
+                        id,
+                        project: "p".into(),
+                        domain: format!("{model}-{i}.md"),
+                        content_hash: String::new(),
+                        model: model.to_string(),
+                        embedding: vec![1.0],
+                        updated_at: 0,
+                    },
+                );
+            }
+        }
+        index
+    }
+
+    #[test]
+    fn single_model_index_is_not_mixed() {
+        let counts = model_counts(&index_with(&[("m1", 4)]));
+        let s = model_status(&counts, Some("m1"));
+        assert!(!s.mixed);
+        assert_eq!(s.other_count, 0);
+        assert_eq!(s.total, 4);
+        assert!(mixed_warning(&s).is_none());
+    }
+
+    #[test]
+    fn entries_from_another_model_are_counted_against_configured() {
+        let counts = model_counts(&index_with(&[("new", 5), ("old", 3)]));
+        let s = model_status(&counts, Some("new"));
+        assert!(s.mixed);
+        assert_eq!(s.other_count, 3);
+        assert_eq!(s.by_model[0], ModelCount { model: "new".into(), count: 5 });
+        assert!(mixed_warning(&s).unwrap().contains("3개"));
+
+        // Switched model, nothing reindexed yet: everything is "other".
+        let s = model_status(&counts, Some("newest"));
+        assert_eq!(s.other_count, 8);
+        assert!(s.mixed);
+    }
+
+    #[test]
+    fn without_configured_model_majority_is_the_reference() {
+        let counts = model_counts(&index_with(&[("a", 2), ("b", 6)]));
+        let s = model_status(&counts, None);
+        assert!(s.mixed);
+        assert_eq!(s.other_count, 2);
+        assert!(!model_status(&HashMap::new(), Some("a")).mixed, "empty index");
+    }
 }
