@@ -25,7 +25,12 @@ const RIGHT_EDGE_PADDING: f64 = 12.0;
 /// if already visible. Creates the window on first invocation.
 pub fn toggle_popover_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(win) = app.get_webview_window(POPOVER_LABEL) {
-        if win.is_visible().unwrap_or(false) {
+        // Hide only when it is really up in front of the user. A popover that
+        // never got focus (so blur never hid it) stays "visible" on the Space
+        // it opened on; treating that as open made the next tray click hide
+        // it again and nothing ever appeared.
+        let open = win.is_visible().unwrap_or(false) && win.is_focused().unwrap_or(false);
+        if open {
             let _ = win.hide();
         } else {
             position_near_cursor(&win);
@@ -47,6 +52,9 @@ pub fn toggle_popover_window(app: &AppHandle) -> tauri::Result<()> {
         .skip_taskbar(true)
         .transparent(true)
         .shadow(false)
+        // Open on whatever Space / full-screen app the user is in, not the
+        // one the window was first created on.
+        .visible_on_all_workspaces(true)
         .visible(false)
         .build()?;
 
