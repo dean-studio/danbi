@@ -468,6 +468,9 @@ fn build_corpus(vault: &Path, snapshot: VaultSnapshot) -> DanbiResult<IndexedCor
 /// `Index`/`IndexReader` handles are shared with `old`, so a search that
 /// is still holding the old `Arc` keeps working; it simply sees the new
 /// docs after `reader.reload()`.
+/// Above this many segments the next refresh rebuilds from scratch.
+const MAX_INCREMENTAL_SEGMENTS: usize = 32;
+
 fn update_corpus(old: &IndexedCorpus, snapshot: VaultSnapshot) -> DanbiResult<IndexedCorpus> {
     let (upsert, removed) = snapshot.diff(&old.snapshot);
     let mut writer = open_writer(&old.index)?;
@@ -487,6 +490,12 @@ fn update_corpus(old: &IndexedCorpus, snapshot: VaultSnapshot) -> DanbiResult<In
     writer
         .commit()
         .map_err(|e| DanbiError::Other(format!("tantivy commit: {e}")))?;
+    // Dropping the writer kills its segment updater, which discards any
+    // merge the commit just scheduled — every edit would then leave one more
+    // segment (and its deleted docs) behind. Wait for the merges instead.
+    writer
+        .wait_merging_threads()
+        .map_err(|e| DanbiError::Other(format!("tantivy merge: {e}")))?;
     old.reader
         .reload()
         .map_err(|e| DanbiError::Other(format!("tantivy reload: {e}")))?;
@@ -511,13 +520,15 @@ fn current_corpus() -> DanbiResult<Option<Arc<IndexedCorpus>>> {
 /// queue behind an index build. `None` only before the very first build
 /// when the vault has no projects folder.
 fn ensure_corpus_fresh(vault: &Path) -> DanbiResult<Option<Arc<IndexedCorpus>>> {
-    let snapshot = snapshot_vault(vault)?;
-    let is_fresh = |c: &Arc<IndexedCorpus>| {
+    let is_fresh = |c: &Arc<IndexedCorpus>, snapshot: &VaultSnapshot| {
         c.vault == vault && c.snapshot.fingerprint == snapshot.fingerprint
     };
     let current = current_corpus()?;
-    if let Some(c) = current.as_ref().filter(|c| is_fresh(c)) {
-        return Ok(Some(c.clone()));
+    {
+        let snapshot = snapshot_vault(vault)?;
+        if let Some(c) = current.as_ref().filter(|c| is_fresh(c, &snapshot)) {
+            return Ok(Some(c.clone()));
+        }
     }
 
     let _building = match REFRESH.try_lock() {
@@ -534,14 +545,23 @@ fn ensure_corpus_fresh(vault: &Path) -> DanbiResult<Option<Arc<IndexedCorpus>>> 
             return Err(DanbiError::Other("refresh lock".into()))
         }
     };
+    // Snapshot again under the lock: one taken before it could be older
+    // than the corpus another builder just swapped in, and applying it
+    // would roll that corpus back (a new file would be "removed").
+    let snapshot = snapshot_vault(vault)?;
     // Another thread may have finished exactly this build while we waited.
     let current = current_corpus()?;
-    if let Some(c) = current.as_ref().filter(|c| is_fresh(c)) {
+    if let Some(c) = current.as_ref().filter(|c| is_fresh(c, &snapshot)) {
         return Ok(Some(c.clone()));
     }
 
     let incremental = current.as_ref().filter(|c| {
         if c.vault != vault {
+            return false;
+        }
+        // Safety net if merges ever fall behind: a fresh build compacts.
+        let segments = c.index.searchable_segment_ids().map(|s| s.len()).unwrap_or(0);
+        if segments > MAX_INCREMENTAL_SEGMENTS {
             return false;
         }
         let (upsert, removed) = snapshot.diff(&c.snapshot);
@@ -1103,7 +1123,9 @@ impl SearchMode {
 /// `full_search_hybrid` with an explicit retriever choice. `Keyword`
 /// skips the vector arm even when an embedding is supplied; `Semantic`
 /// skips BM25 when an embedding is available and otherwise behaves like
-/// `Keyword` so the caller never gets an empty page.
+/// `Keyword` — also when the vector index has nothing to match (not built
+/// yet, or embedded with another model) — so the caller never gets an
+/// empty page.
 pub fn full_search_mode(
     vault: &Path,
     query: &str,
@@ -1128,6 +1150,13 @@ pub fn full_search_mode(
             crate::vector::query(&idx, emb, depth)
         }
         None => Vec::new(),
+    };
+    // Semantic with an empty (or other-model) vector index matches nothing;
+    // fall back to keyword hits rather than an empty page.
+    let bm25 = if bm25.is_empty() && vector_hits.is_empty() && embedding.is_some() {
+        full_search(vault, query, depth)?
+    } else {
+        bm25
     };
     let mut hits = rrf_merge(&bm25, &vector_hits, limit);
     // Semantic-only hits carry no BM25 excerpt; fill one from the file so
@@ -1233,6 +1262,36 @@ mod tests {
         assert_eq!(sorted(search_corpus(&second, "릴리스", 50).unwrap()), Vec::<String>::new(), "deleted doc gone");
         assert_eq!(sorted(search_corpus(&second, "리프레시", 50).unwrap()), vec!["B/four.md".to_string()]);
         assert_eq!(second.snapshot.files.len(), 3);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn repeated_incremental_edits_do_not_pile_up_segments() {
+        let v = temp_vault("segments");
+        for i in 0..40 {
+            write(&v, &format!("A/doc{i}.md"), &format!("# 문서 {i}\n본문"));
+        }
+        let mut corpus = build_corpus(&v, snapshot_vault(&v).unwrap()).unwrap();
+        // One small edit per refresh to a different doc each time, like a day
+        // of autosaves across notes: each refresh adds a one-doc segment that
+        // stays live, so only merging keeps the count down.
+        for i in 0..40 {
+            write(&v, &format!("A/doc{i}.md"), &format!("# 문서 {i}\n편집한 회차 내용 {i}"));
+            corpus = update_corpus(&corpus, snapshot_vault(&v).unwrap()).unwrap();
+        }
+        let segments = corpus.index.searchable_segment_ids().unwrap().len();
+        assert!(segments <= 16, "segments kept growing: {segments}");
+        assert_eq!(search_corpus(&corpus, "회차", 50).unwrap().len(), 40);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn semantic_mode_falls_back_to_keyword_without_vectors() {
+        let v = temp_vault("semantic-empty");
+        write(&v, "A/one.md", "# 배포\n릴리스 절차 문서");
+        // No vectors.json in this vault: the vector arm matches nothing.
+        let hits = full_search_mode(&v, "릴리스", 10, Some(&[0.1, 0.2, 0.3]), SearchMode::Semantic).unwrap();
+        assert_eq!(hits.len(), 1);
         std::fs::remove_dir_all(v).ok();
     }
 
