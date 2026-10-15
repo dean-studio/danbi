@@ -25,7 +25,7 @@ const GROUPS: { title: string; rows: { keys: string[]; label: string }[] }[] = [
       { keys: ["⌘", "⇧", "D"], label: "현재(또는 최근) 프로젝트의 오늘 daily 열기" },
       { keys: ["⌘", "S"], label: "저장 (자동 저장이 켜져 있어도 즉시)" },
       { keys: ["⌘", "F"], label: "문서 안에서 찾기" },
-      { keys: ["⌘", "I"], label: "인스펙터 (변경·링크·정보) 토글" },
+      { keys: ["⌘", "I"], label: "인스펙터 (변경·링크·정보) 토글 — 편집 중엔 ⌥⌘I" },
     ],
   },
   {

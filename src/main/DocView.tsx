@@ -694,10 +694,17 @@ export function DocView({
   }, []);
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "i" && !e.shiftKey) {
-        e.preventDefault();
-        toggleInspector();
-      }
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey) return;
+      // ⌥ 를 누르면 Mac 은 e.key 가 바뀌므로 물리 키로 본다.
+      if (e.code !== "KeyI") return;
+      // 에디터·입력 안에서 ⌘I 는 기울임 — 인스펙터는 ⌥⌘I 로만.
+      const t = e.target as HTMLElement | null;
+      const editable = !!t?.closest?.(
+        '[contenteditable="true"], input, textarea, select',
+      );
+      if (editable && !e.altKey) return;
+      e.preventDefault();
+      toggleInspector();
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1012,7 +1019,7 @@ export function DocView({
           </div>
           <button
             onClick={toggleInspector}
-            title="인스펙터 (⌘I)"
+            title="인스펙터 (⌘I · 편집 중엔 ⌥⌘I)"
             className={cn(
               "inline-flex h-7 w-7 items-center justify-center rounded-sm border border-hairline bg-surface-elevated text-body transition-colors hover:border-hairline-strong hover:text-on-dark",
               inspectorOpen && "border-hairline-strong text-on-dark",
