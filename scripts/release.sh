@@ -57,6 +57,14 @@ if [[ "${1:-}" != "--skip-build" ]]; then
     echo "→ detaching stale DMG volume $vol"
     hdiutil detach "$vol" -force >/dev/null 2>&1 || true
   done
+  # 설치하려고 열어 둔 단비 DMG(/Volumes/단비, "단비 1"…)가 남아 있어도
+  # bundle_dmg.sh 가 같은 볼륨 이름을 꾸미다 실패한다 (v0.8.10). 디스크
+  # 이미지로 마운트된 것만 꺼낸다 — 설치된 /Applications 앱과는 무관.
+  while IFS= read -r vol; do
+    [[ -n "$vol" ]] || continue
+    echo "→ ejecting mounted installer image $vol"
+    hdiutil detach "$vol" -force >/dev/null 2>&1 || true
+  done < <(hdiutil info | awk -F'\t' '/\/Volumes\/단비/ {print $NF}')
   find "$BUNDLE" -maxdepth 2 -name 'rw.*.dmg' -print -delete 2>/dev/null || true
 
   echo "→ building signed release v$VERSION (target=$TARGET_TRIPLE)"
