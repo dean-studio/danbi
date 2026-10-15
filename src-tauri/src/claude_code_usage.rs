@@ -74,13 +74,14 @@ pub struct CcEvent {
     pub ts_ms: i64,
     /// 계정 id — `~/.claude` 는 [`DEFAULT_ACCOUNT`], `~/.claude-hckim` 은 `hckim`.
     pub account: &'static str,
-    pub session_id: String,
+    /// 문자열 필드는 전부 [`intern`] — 이벤트 수십만 건이 같은 세션·cwd·
+    /// 모델 문자열을 각자 들고 있으면 그것만 수십 MB 다.
+    pub session_id: &'static str,
     /// cwd 디렉토리 절대 경로 (e.g. `/Users/hazbola/works/agent/danbi`).
-    pub cwd: String,
-    pub git_branch: Option<String>,
-    pub model: String,
+    pub cwd: &'static str,
+    pub model: &'static str,
     /// `bedrock` | `anthropic_api`. id prefix 로만 구분.
-    pub backend: String,
+    pub backend: &'static str,
     pub input_tokens: u64,
     pub output_tokens: u64,
     /// `cache_creation_input_tokens` 합계. 5m + 1h 가 합쳐진 값.
@@ -106,8 +107,6 @@ struct RawLine {
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
     cwd: Option<String>,
-    #[serde(rename = "gitBranch")]
-    git_branch: Option<String>,
     #[serde(rename = "requestId")]
     request_id: Option<String>,
     message: Option<RawMessage>,
@@ -176,11 +175,10 @@ fn parse_line(line: &str, account: &'static str) -> Option<CcEvent> {
     Some(CcEvent {
         ts_ms,
         account,
-        session_id: raw.session_id.unwrap_or_default(),
-        cwd: raw.cwd.unwrap_or_default(),
-        git_branch: raw.git_branch,
-        model,
-        backend: backend.to_string(),
+        session_id: intern(raw.session_id.as_deref().unwrap_or("")),
+        cwd: intern(raw.cwd.as_deref().unwrap_or("")),
+        model: intern(&model),
+        backend,
         input_tokens: usage.input_tokens.max(0) as u64,
         output_tokens: usage.output_tokens.max(0) as u64,
         cache_creation_tokens: usage.cache_creation_input_tokens.max(0) as u64,
@@ -209,8 +207,9 @@ struct AccountDir {
     oldest_mtime_ms: Option<i64>,
 }
 
-/// 계정 이름을 `&'static str` 로 intern. 이벤트 수십만 건에 String 을
-/// 하나씩 붙이지 않으려는 것 — 계정 수만큼(한 자릿수)만 leak 된다.
+/// 계정·세션·cwd·모델 이름을 `&'static str` 로 intern. 이벤트 수십만 건에
+/// String 을 하나씩 붙이지 않으려는 것 — 서로 다른 값 수만큼만 leak 된다
+/// (세션 수천 개 × 36바이트 수준).
 fn intern(name: &str) -> &'static str {
     static NAMES: OnceLock<std::sync::Mutex<std::collections::HashSet<&'static str>>> =
         OnceLock::new();
@@ -355,14 +354,34 @@ fn parse_from(
                 let t = s.trim();
                 if !t.is_empty() {
                     if let Some(ev) = parse_line(t, account) {
-                        events.push(ev);
+                        push_merged(&mut events, ev);
                     }
                 }
             }
             line_start = i + 1;
         }
     }
+    events.shrink_to_fit();
     Ok((events, start + complete_end as u64))
+}
+
+/// Claude Code 는 응답 하나를 블록마다 한 줄씩, 연달아 기록한다. 같은
+/// `dedup_key` 가 바로 앞 이벤트와 이어지면 저장 단계에서 하나로 합친다
+/// (output 이 가장 큰 줄을 남김 — `dedup_responses` 와 같은 규칙). 캐시가
+/// 들고 있는 이벤트가 절반 가까이 준다. 파일을 넘나드는 중복은 여전히
+/// 조회 때 `dedup_responses` 가 거른다.
+fn push_merged(events: &mut Vec<CcEvent>, ev: CcEvent) {
+    if ev.dedup_key != 0 {
+        if let Some(last) = events.last_mut() {
+            if last.dedup_key == ev.dedup_key {
+                if ev.output_tokens > last.output_tokens {
+                    *last = ev;
+                }
+                return;
+            }
+        }
+    }
+    events.push(ev);
 }
 
 /// 캐시 반영 액션. 파싱은 락 밖에서 끝내고, 짧게 write-lock 을 잡아
@@ -479,7 +498,9 @@ fn refresh_cache() {
                     // 이 델타는 버린다 — 이중 집계 방지. 그 파일은 이미 최신.
                     if let Some(entry) = cache.files.get_mut(&path) {
                         if entry.parsed_bytes == from {
-                            entry.events.append(&mut events);
+                            for ev in events.drain(..) {
+                                push_merged(&mut entry.events, ev);
+                            }
                             entry.parsed_bytes = parsed_bytes;
                             entry.mtime_ms = mtime_ms;
                             entry.size = size;
@@ -520,6 +541,17 @@ fn refresh_cache() {
 /// 통째 clone + sort 했다. Claude Code 대시보드 한 번 열면 summarize/daily/monthly
 /// 세 경로가 각각 clone → 수십 MB 임시 할당이 반복되며 allocator RSS 고수위를
 /// 밀어올렸다. 이제 struct 는 복사하지 않고 포인터(`&CcEvent`)만 모아 정렬한다.
+/// Bench hook: fills the transcript cache (read-only on ~/.claude*) and
+/// returns how many events it now holds.
+#[cfg(test)]
+pub(crate) fn bench_warm_cache() -> usize {
+    refresh_cache();
+    cache()
+        .read()
+        .map(|c| c.files.values().map(|f| f.events.len()).sum())
+        .unwrap_or(0)
+}
+
 fn with_events<R>(f: impl FnOnce(&[&CcEvent], &[AccountDir]) -> R) -> R {
     refresh_cache();
     let guard = cache().read();
@@ -746,26 +778,26 @@ fn summarize_events(
     range_label: &str,
 ) -> CcSummary {
     let mut totals = Totals::default();
-    let mut by_model: HashMap<(String, String), Totals> = HashMap::new();
-    let mut by_project: HashMap<String, Totals> = HashMap::new();
-    let mut by_backend: HashMap<String, Totals> = HashMap::new();
+    let mut by_model: HashMap<(&'static str, &'static str), Totals> = HashMap::new();
+    let mut by_project: HashMap<&'static str, Totals> = HashMap::new();
+    let mut by_backend: HashMap<&'static str, Totals> = HashMap::new();
     let mut by_account: HashMap<&'static str, Totals> = HashMap::new();
     let mut by_day: BTreeMap<String, Totals> = BTreeMap::new();
     let mut by_hour: HashMap<(u8, u8), u64> = HashMap::new();
-    let mut sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut sessions: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
 
     for &ev in events {
         if ev.ts_ms < from_ms || ev.ts_ms >= to_ms {
             continue;
         }
         totals.add(ev);
-        sessions.insert(ev.session_id.clone());
+        sessions.insert(ev.session_id);
 
-        let key = (ev.model.clone(), ev.backend.clone());
+        let key = (ev.model, ev.backend);
         by_model.entry(key).or_default().add(ev);
 
-        by_project.entry(ev.cwd.clone()).or_default().add(ev);
-        by_backend.entry(ev.backend.clone()).or_default().add(ev);
+        by_project.entry(ev.cwd).or_default().add(ev);
+        by_backend.entry(ev.backend).or_default().add(ev);
         by_account.entry(ev.account).or_default().add(ev);
 
         let day = day_label(ev.ts_ms);
@@ -787,19 +819,23 @@ fn summarize_events(
 
     let mut by_model_vec: Vec<ModelBreakdown> = by_model
         .into_iter()
-        .map(|((model, backend), totals)| ModelBreakdown { model, backend, totals })
+        .map(|((model, backend), totals)| ModelBreakdown {
+            model: model.to_string(),
+            backend: backend.to_string(),
+            totals,
+        })
         .collect();
     by_model_vec.sort_by(|a, b| b.totals.total_tokens.cmp(&a.totals.total_tokens));
 
     let mut by_project_vec: Vec<ProjectBreakdown> = by_project
         .into_iter()
         .map(|(cwd, totals)| {
-            let label = Path::new(&cwd)
+            let label = Path::new(cwd)
                 .file_name()
                 .and_then(|s| s.to_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| cwd.clone());
-            ProjectBreakdown { cwd, label, totals }
+                .unwrap_or(cwd)
+                .to_string();
+            ProjectBreakdown { cwd: cwd.to_string(), label, totals }
         })
         .collect();
     by_project_vec.sort_by(|a, b| b.totals.total_tokens.cmp(&a.totals.total_tokens));
@@ -853,7 +889,7 @@ fn summarize_events(
         by_model: by_model_vec,
         by_project: by_project_vec,
         by_account: by_account_vec,
-        by_backend,
+        by_backend: by_backend.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
         daily,
         hourly,
         year_ago_today,
@@ -1147,11 +1183,10 @@ mod tests {
         CcEvent {
             ts_ms,
             account: DEFAULT_ACCOUNT,
-            session_id: "s".to_string(),
-            cwd: "/x/danbi".to_string(),
-            git_branch: None,
-            model: model.to_string(),
-            backend: backend.to_string(),
+            session_id: "s",
+            cwd: "/x/danbi",
+            model: intern(model),
+            backend: intern(backend),
             input_tokens: in_t,
             output_tokens: out_t,
             cache_creation_tokens: cc,
@@ -1252,6 +1287,25 @@ mod tests {
         assert_eq!(s.by_account[0].dir, "~/.claude-hckim");
         assert_eq!(s.by_account[2].totals.calls, 0);
         assert_eq!(s.totals.total_tokens, 110);
+    }
+
+    #[test]
+    fn consecutive_lines_of_one_response_merge_on_store() {
+        let mut v = Vec::new();
+        let mut a = ev(1, "m", "anthropic_api", 10, 1, 0, 0);
+        a.dedup_key = 5;
+        let mut b = ev(2, "m", "anthropic_api", 10, 7, 0, 0);
+        b.dedup_key = 5;
+        let mut c = ev(3, "m", "anthropic_api", 10, 2, 0, 0);
+        c.dedup_key = 6;
+        let d = ev(4, "m", "anthropic_api", 10, 2, 0, 0); // no key → kept
+        let d2 = ev(5, "m", "anthropic_api", 10, 2, 0, 0);
+        for e in [a, b, c, d, d2] {
+            push_merged(&mut v, e);
+        }
+        assert_eq!(v.len(), 4);
+        assert_eq!(v[0].output_tokens, 7, "largest output line kept");
+        assert_eq!(v[1].dedup_key, 6);
     }
 
     #[test]

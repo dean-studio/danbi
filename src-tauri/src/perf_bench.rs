@@ -181,3 +181,69 @@ fn first_md(dir: &Path) -> Option<PathBuf> {
     }
     None
 }
+
+// ---------- 메모리 구성 실측 ------------------------------------------------
+//
+// `cargo test --lib -- --ignored memory_bench --nocapture`
+// 각 캐시를 하나씩 채우고 malloc 이 실제로 들고 있는 바이트(size_in_use)의
+// 증가분을 잰다. RSS 와 달리 반납 안 된 free 메모리가 섞이지 않는다.
+
+#[repr(C)]
+#[derive(Default)]
+struct MallocStatistics {
+    blocks_in_use: u32,
+    size_in_use: usize,
+    max_size_in_use: usize,
+    size_allocated: usize,
+}
+
+extern "C" {
+    fn malloc_zone_statistics(zone: *mut std::ffi::c_void, stats: *mut MallocStatistics);
+}
+
+fn heap_in_use() -> usize {
+    let mut s = MallocStatistics::default();
+    unsafe { malloc_zone_statistics(std::ptr::null_mut(), &mut s) };
+    s.size_in_use
+}
+
+fn mb(b: isize) -> f64 {
+    b as f64 / 1024.0 / 1024.0
+}
+
+fn measured<T>(label: &str, f: impl FnOnce() -> T) -> T {
+    let before = heap_in_use() as isize;
+    let t = Instant::now();
+    let out = f();
+    let after = heap_in_use() as isize;
+    eprintln!(
+        "[mem] {label:<40} {:>+8.1} MB  (heap {:>7.1} MB, {:>7.0} ms)",
+        mb(after - before),
+        mb(after),
+        t.elapsed().as_secs_f64() * 1000.0
+    );
+    out
+}
+
+#[test]
+#[ignore]
+fn memory_bench_components() {
+    let vault = bench_vault();
+    eprintln!("[mem] baseline heap {:.1} MB", mb(heap_in_use() as isize));
+    let _corpus = measured("search corpus (tantivy, RAM)", || crate::search::warm_corpus(&vault).unwrap());
+    let _links = measured("link index", || crate::links::build_index_cached(&vault).unwrap());
+    let _ids = measured("existing doc ids", || crate::graph::existing_doc_ids_cached(&vault).unwrap());
+    let _vec = measured("vectors.json (load_cached)", || crate::vector::load_cached(&vault).unwrap());
+    let _all = measured("graph (all projects)", || crate::graph::build_graph_cached(&vault, None).unwrap());
+    let projects = crate::vault::project_names(&vault).unwrap();
+    let _per: Vec<_> = measured(&format!("graph per project ×{}", projects.len()), || {
+        projects
+            .iter()
+            .filter_map(|p| crate::graph::build_graph_cached(&vault, Some(p)).ok())
+            .collect()
+    });
+    let events = measured("Claude Code usage cache (~/.claude*)", crate::claude_code_usage::bench_warm_cache);
+    eprintln!("[mem] Claude Code events held: {events}");
+    eprintln!("[mem] total heap {:.1} MB", mb(heap_in_use() as isize));
+    let _ = std::fs::remove_dir_all(&vault);
+}
