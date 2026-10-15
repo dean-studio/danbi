@@ -125,7 +125,8 @@ impl Default for AppearanceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorConfig {
-    /// 자동 저장 (ctrl+s 없이도 blur에 저장)
+    /// 자동 저장 — 입력이 멈추면 디바운스 후, blur 시에도 저장. 기본 켜짐.
+    /// 꺼도 문서 전환 시 flush 는 항상 한다 (DocView).
     pub autosave: bool,
     /// Soft-wrap long lines
     pub word_wrap: bool,
@@ -134,7 +135,7 @@ pub struct EditorConfig {
 impl Default for EditorConfig {
     fn default() -> Self {
         Self {
-            autosave: false,
+            autosave: true,
             word_wrap: true,
         }
     }
@@ -361,6 +362,10 @@ pub struct DanbiConfig {
     /// "claude_code" / "builtin" / "minimal" / 비어있음(레거시).
     #[serde(default)]
     pub preset: Option<String>,
+    /// 검토함에서 "제외" 한 고아 문서 경로 (`<project>/<domain>`). healing
+    /// 스캐너 결과를 보여줄 때 걸러낸다 — 리뷰 큐에 복제하지 않는다.
+    #[serde(default)]
+    pub review_excluded_paths: Vec<String>,
 }
 
 /// 한 개의 프로젝트 그룹. 그룹은 순서를 갖고, 그 안의 프로젝트들도

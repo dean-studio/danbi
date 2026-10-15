@@ -361,15 +361,7 @@ pub fn list_tree_with(vault: &Path, sniff_titles: bool) -> DanbiResult<VaultTree
             _ => continue,
         };
 
-        // Top-level .md files.
-        let domains = read_md_domains(&p, None, sniff_titles)?;
-        let subfolders = read_subfolders(&p, None, sniff_titles)?;
-
-        projects.push(ProjectNode {
-            name: project_name,
-            domains,
-            subfolders,
-        });
+        projects.push(scan_project(&p, project_name, sniff_titles)?);
     }
     projects.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
@@ -377,6 +369,33 @@ pub fn list_tree_with(vault: &Path, sniff_titles: bool) -> DanbiResult<VaultTree
         vault_path: vault.to_string_lossy().to_string(),
         projects,
     })
+}
+
+/// One project's sidebar node: top-level `.md` files + one level of
+/// subfolders. Shared by the full tree scan and the per-project refresh.
+fn scan_project(dir: &Path, name: String, sniff_titles: bool) -> DanbiResult<ProjectNode> {
+    let domains = read_md_domains(dir, None, sniff_titles)?;
+    let subfolders = read_subfolders(dir, None, sniff_titles)?;
+    Ok(ProjectNode {
+        name,
+        domains,
+        subfolders,
+    })
+}
+
+/// Rescan a single project. `Ok(None)` when the folder is gone (deleted
+/// or renamed) so the caller can drop it from the tree instead of doing a
+/// full `list_tree` — the watcher-driven refresh uses this to touch only
+/// the project an agent just wrote into.
+pub fn list_project_node(vault: &Path, project: &str) -> DanbiResult<Option<ProjectNode>> {
+    if project.is_empty() || project.starts_with('.') || project.contains('/') {
+        return Ok(None);
+    }
+    let dir = projects_root(vault).join(project);
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    scan_project(&dir, project.to_string(), true).map(Some)
 }
 
 /// Walk one level of subfolders under `dir`. `parent_prefix` is what we

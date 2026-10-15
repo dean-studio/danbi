@@ -33,6 +33,7 @@ import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-ma
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ipc,
+  type AgentConnectionStatus,
   type AgentTarget,
   type BriefingResult,
   type DailyNoteRef,
@@ -49,7 +50,7 @@ import {
   type TriggerKind,
   type VaultSuggestion,
 } from "@/lib/ipc";
-import { CodexIcon, ClaudeIcon } from "@/components/AgentIcons";
+import { CodexIcon, ClaudeIcon, CursorIcon } from "@/components/AgentIcons";
 import { projectIconOf } from "@/components/ProjectIconPicker";
 import { ReindexProgressCard } from "@/main/Settings";
 import { cn } from "@/lib/utils";
@@ -320,7 +321,7 @@ function ProjectHero({
   // (both render from the same shared vault SKILL.md source).
   const [skillInstalled, setSkillInstalled] = useState<
     Record<AgentTarget, boolean>
-  >({ claude: false, codex: false });
+  >({ claude: false, codex: false, cursor: false });
   const [skillFlash, setSkillFlash] = useState<string | null>(null);
   const [hookOpen, setHookOpen] = useState(false);
   useEffect(() => {
@@ -375,9 +376,10 @@ function ProjectHero({
         {/* 에이전트별 연결 액션 — Codex / Claude Code 각각 한 줄씩,
          *  [연결] [Skill] [Skill 수정] 3버튼을 그대로 노출. 드롭다운을
          *  없애 한눈에 두 에이전트를 다 볼 수 있게 함 (사용자 요청).
-         *  - 연결: MCP 등록. Codex = 선택한 코드 폴더의 .codex/config.toml 에 기록
-         *    (이미 있으면 그 자리를 교체, 중복 X). Claude Code =
-         *    `claude mcp add` 명령 복사.
+         *  - 연결: MCP 등록. 세 에이전트 모두 코드 폴더를 고르면 그 폴더의
+         *    설정 파일에 직접 기록 (Codex .codex/config.toml · Claude Code
+         *    .mcp.json · Cursor .cursor/mcp.json). 이미 있으면 그 자리를
+         *    교체, 중복 X. 서버 이름은 백엔드가 정한다.
          *  - Skill: 자동 활성화 SKILL.md 설치/갱신 (~/.codex 또는 ~/.claude).
          *  - Skill 수정: 두 에이전트 공용 vault 원본(SKILL.md) 편집. */}
         <div className="flex shrink-0 flex-col items-stretch gap-1.5">
@@ -395,7 +397,7 @@ function ProjectHero({
           <AgentActionRow
             agentLabel="Claude Code"
             agentIcon={<ClaudeIcon size={13} />}
-            connectHint={`${project} → claude mcp add 명령 복사`}
+            connectHint={`${project} → 선택한 코드 폴더의 .mcp.json 에 기록`}
             onConnect={() => onCopyInstall("claude")}
             skillDone={skillInstalled.claude}
             onSkill={() => installSkill("claude")}
@@ -417,6 +419,19 @@ function ProjectHero({
               </button>
             }
           />
+          <div className="h-px bg-hairline" />
+          <AgentActionRow
+            agentLabel="Cursor"
+            agentIcon={<CursorIcon size={13} />}
+            connectHint={`${project} → 선택한 코드 폴더의 .cursor/mcp.json 에 기록`}
+            onConnect={() => onCopyInstall("cursor")}
+            skillDone={false}
+            onSkill={() => {}}
+            onEditSkill={onEditSkill}
+            project={project}
+            skill={false}
+          />
+          <ConnectionStatusLine project={project} />
         </div>
       </div>
       {hookOpen && <ClaudeHookPanel project={project} />}
@@ -452,6 +467,7 @@ function AgentActionRow({
   onEditSkill,
   project,
   extra,
+  skill = true,
 }: {
   agentLabel: string;
   agentIcon: ReactNode;
@@ -463,6 +479,8 @@ function AgentActionRow({
   project: string;
   /** Agent-specific trailing button (Claude Code: 세션 훅). */
   extra?: ReactNode;
+  /** false for agents without a SKILL.md convention (Cursor). */
+  skill?: boolean;
 }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -478,6 +496,8 @@ function AgentActionRow({
       >
         <Server size={12} /> 연결
       </button>
+      {skill && (
+        <>
       <button
         type="button"
         onClick={onSkill}
@@ -504,9 +524,82 @@ function AgentActionRow({
       >
         <Edit3 size={12} /> Skill 수정
       </button>
+        </>
+      )}
       {extra}
     </div>
   );
+}
+
+/** "연결됨" 은 명령을 복사한 시점이 아니라 서버 상태 + 실제 인바운드
+ *  호출로 판단한다. 서버가 켜져 있고 이 프로젝트 엔드포인트로 호출이
+ *  한 번이라도 들어왔으면 연결됨, 파일만 쓰여 있으면 "호출 대기".
+ *  트리가 바뀔 때(에이전트가 쓸 때) 다시 조회한다. */
+function ConnectionStatusLine({ project }: { project: string }) {
+  const tree = useApp((s) => s.tree);
+  const [status, setStatus] = useState<AgentConnectionStatus | null>(null);
+  useEffect(() => {
+    let alive = true;
+    ipc
+      .agentConnectionStatus(project)
+      .then((st) => {
+        if (alive) setStatus(st);
+      })
+      .catch(() => {
+        if (alive) setStatus(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [project, tree]);
+  if (!status) return null;
+  const last = status.last_call_at ?? status.last_write_at;
+  const client = status.last_call_at
+    ? status.last_call_client
+    : status.last_write_client;
+  const files = status.connections.filter((c) => c.exists);
+  let text: string;
+  let tone: string;
+  if (!status.server_running) {
+    text = "MCP 서버 꺼짐 — ⌘, 설정 → MCP";
+    tone = "text-mute";
+  } else if (last) {
+    text = `연결됨 · 마지막 호출 ${relativeTime(last)}${
+      client ? ` (${agentClientLabel(client)})` : ""
+    }`;
+    tone = "text-accent-green";
+  } else if (files.length > 0) {
+    text = `연결 파일 ${files.length}개 기록됨 · 아직 호출 없음 — 에이전트를 재시작하면 연결돼요`;
+    tone = "text-mute";
+  } else {
+    text = "아직 연결 안 됨";
+    tone = "text-mute";
+  }
+  return (
+    <div
+      className={cn("self-end text-[11px]", tone)}
+      title={files.map((f) => f.path).join("\n") || undefined}
+    >
+      {text}
+    </div>
+  );
+}
+
+function relativeTime(ms: number): string {
+  const diff = Math.max(0, Date.now() - ms);
+  const m = Math.floor(diff / 60_000);
+  if (m < 1) return "방금";
+  if (m < 60) return `${m}분 전`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}시간 전`;
+  return `${Math.floor(h / 24)}일 전`;
+}
+
+function agentClientLabel(client: string): string {
+  if (client === "claude_code") return "Claude Code";
+  if (client === "codex") return "Codex";
+  if (client === "cursor") return "Cursor";
+  return client;
 }
 
 /** Claude Code 세션 훅 설치 패널. 코드 폴더를 고르면 그 폴더의
@@ -602,10 +695,9 @@ function ClaudeHookPanel({ project }: { project: string }) {
  *  안내한다(프로젝트 격리 유지). */
 function ConnectCard({ project }: { project: string }) {
   const dismissKey = `danbi:connect-card-dismissed:${project}`;
-  const [installed, setInstalled] = useState<Record<AgentTarget, boolean>>({
-    claude: false,
-    codex: false,
-  });
+  // "연결됨" = 단비가 이 프로젝트의 연결 파일을 하나라도 기록했거나(새
+  // 방식) SKILL 이 설치돼 있음(예전 방식). 명령 복사 시점은 아니다.
+  const [connected, setConnected] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState<AgentTarget | null>(null);
   const [dismissed, setDismissed] = useState(false);
@@ -616,18 +708,16 @@ function ConnectCard({ project }: { project: string }) {
   useEffect(() => {
     let alive = true;
     setDismissed(localStorage.getItem(dismissKey) === "1");
-    Promise.all(
-      (["claude", "codex"] as const).map((a) =>
-        ipc.skillStatus(project, a).then((ok) => [a, ok] as const).catch(
-          () => [a, false] as const,
-        ),
-      ),
-    ).then((pairs) => {
+    Promise.all([
+      ipc.skillStatus(project, "claude").catch(() => false),
+      ipc.skillStatus(project, "codex").catch(() => false),
+      ipc
+        .agentConnectionStatus(project)
+        .then((st) => st.connections.some((c) => c.exists))
+        .catch(() => false),
+    ]).then(([claude, codex, files]) => {
       if (!alive) return;
-      setInstalled({
-        claude: pairs.find((p) => p[0] === "claude")?.[1] ?? false,
-        codex: pairs.find((p) => p[0] === "codex")?.[1] ?? false,
-      });
+      setConnected(claude || codex || files);
       setLoaded(true);
     });
     return () => {
@@ -662,7 +752,7 @@ function ConnectCard({ project }: { project: string }) {
         const res = await ipc.codexConnect(project, targetDir);
         // MCP 등록과 함께 자동 활성화 SKILL 도 설치 — 두 스텝을 한 번에.
         await ipc.installSkill(project, "codex").catch(() => {});
-        setInstalled((s) => ({ ...s, codex: true }));
+        setConnected(true);
         setFlash({
           kind: "ok",
           msg:
@@ -673,19 +763,34 @@ function ConnectCard({ project }: { project: string }) {
             " · SKILL 설치 완료 — Codex 에서 폴더를 신뢰하고 재시작하면 도구가 뜹니다.",
         });
       } else {
-        const endpoint = await ipc.mcpProjectEndpoint(project);
-        const slug = project
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "");
-        const serverName = slug ? `danbi-${slug}` : "danbi";
-        const cmd = `claude mcp add --transport http ${serverName} "${endpoint.url}" --header "Authorization: Bearer ${status.token}"`;
-        await clipboardWriteText(cmd);
-        await ipc.installSkill(project, "claude").catch(() => {});
-        setInstalled((s) => ({ ...s, claude: true }));
+        // Claude Code · Cursor: 코드 폴더의 .mcp.json / .cursor/mcp.json 에
+        // 읽기+쓰기 서버를 직접 기록. 명령 복사 단계 없음.
+        const label = agent === "cursor" ? "Cursor" : "Claude Code";
+        const targetDir = await openDialog({
+          directory: true,
+          multiple: false,
+          title: `${label} 가 실행될 코드 폴더 선택 · ${project}`,
+        });
+        if (typeof targetDir !== "string") return;
+        const res = await ipc.agentConnect(project, agent, targetDir);
+        if (agent === "claude") {
+          await ipc.installSkill(project, "claude").catch(() => {});
+        }
+        setConnected(true);
+        const local = res.legacy.filter((l) => l.scope === "local");
         setFlash({
           kind: "ok",
-          msg: "설치 명령을 복사했어요 · 이 명령을 당신 프로젝트 폴더에서 실행하세요.",
+          msg:
+            (res.action === "updated"
+              ? `${label} 연결을 갱신했어요`
+              : `${res.path} 에 연결했어요`) +
+            (agent === "claude" ? " · SKILL 설치 완료" : "") +
+            ` — ${label} 를 재시작하면 도구가 뜹니다.` +
+            (local.length > 0
+              ? ` 이 폴더에 예전 방식으로 등록한 ${local
+                  .map((l) => l.name)
+                  .join(", ")} 서버는 \`claude mcp remove ${local[0].name}\` 로 지우면 도구가 겹치지 않아요.`
+              : ""),
         });
       }
     } catch (e) {
@@ -702,7 +807,7 @@ function ConnectCard({ project }: { project: string }) {
 
   // 상태 로드 전엔 깜빡임 방지, 이미 연결됐거나(둘 중 하나 SKILL 설치)
   // 사용자가 숨겼으면 렌더하지 않는다.
-  if (!loaded || dismissed || installed.claude || installed.codex) return null;
+  if (!loaded || dismissed || connected) return null;
 
   const AGENTS: {
     key: AgentTarget;
@@ -722,8 +827,15 @@ function ConnectCard({ project }: { project: string }) {
       key: "claude",
       label: "Claude Code",
       icon: <ClaudeIcon size={16} />,
-      cta: "명령 복사",
-      hint: "복사한 명령을 당신 프로젝트 폴더에서 실행",
+      cta: "지금 연결",
+      hint: "코드 폴더를 선택하면 .mcp.json 에 기록 (읽기 + 이 프로젝트 쓰기)",
+    },
+    {
+      key: "cursor",
+      label: "Cursor",
+      icon: <CursorIcon size={16} />,
+      cta: "지금 연결",
+      hint: "코드 폴더를 선택하면 .cursor/mcp.json 에 기록",
     },
   ];
 
@@ -738,7 +850,7 @@ function ConnectCard({ project }: { project: string }) {
             </h3>
           </div>
           <p className="mt-1.5 text-[13px] leading-[1.6] text-body">
-            Claude Code · Codex 가{" "}
+            Claude Code · Codex · Cursor 가{" "}
             <span className="text-on-dark">{project}</span> 의 vault 를 직접
             읽고 씁니다. 한 번만 붙이면, 다음부턴 새 세션에서도 맥락을 기억해요.
           </p>

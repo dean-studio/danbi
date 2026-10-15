@@ -312,6 +312,18 @@ fn with_events<R>(f: impl FnOnce(&[UsageEvent]) -> R) -> R {
     f(&cache.events)
 }
 
+/// Most recent inbound write for one project — `(unix ms, client)`.
+/// Served from the cached event slice (no full log parse per call).
+pub fn last_write_for_project(project: &str) -> Option<(i64, Option<String>)> {
+    with_events(|events| {
+        events
+            .iter()
+            .filter(|e| e.project.as_deref() == Some(project))
+            .max_by_key(|e| e.ts_ms)
+            .map(|e| (e.ts_ms, e.client.clone()))
+    })
+}
+
 /// Drop the cache. Called from tests and from the retention sweep so a
 /// shrunken file isn't served from a stale snapshot.
 pub fn invalidate_cache() {

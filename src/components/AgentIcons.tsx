@@ -40,3 +40,22 @@ export function ClaudeIcon({ size = 13 }: { size?: number }) {
     </svg>
   );
 }
+
+/** Cursor 로고마크 — 등각 큐브. 단색 currentColor. */
+export function CursorIcon({ size = 13 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 2.5 20.5 7v10L12 21.5 3.5 17V7L12 2.5Z" />
+      <path d="M3.5 7 12 12l8.5-5M12 12v9.5" />
+    </svg>
+  );
+}

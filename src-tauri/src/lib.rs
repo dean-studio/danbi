@@ -1,3 +1,4 @@
+mod agent_connect;
 mod aws_profiles;
 mod backup;
 mod bedrock;
@@ -24,6 +25,7 @@ mod journal_view;
 mod links;
 mod mcp;
 mod mcp_inbound;
+mod mcp_presence;
 mod popover;
 mod preview;
 mod tray_badge;
@@ -558,6 +560,7 @@ pub fn run() {
             commands::vector_search,
             commands::init_vault,
             commands::list_tree,
+            commands::list_project_node,
             commands::create_project,
             commands::rename_project,
             commands::delete_project,
@@ -570,7 +573,11 @@ pub fn run() {
             commands::move_domain,
             commands::install_skill,
             commands::skill_status,
+            commands::skill_status_all,
             commands::codex_connect,
+            commands::agent_connect,
+            commands::agent_connection_status,
+            commands::mcp_connections_list,
             commands::claude_hooks_install,
             commands::trash_list,
             commands::trash_restore,
@@ -640,6 +647,8 @@ pub fn run() {
             commands::goals_unarchive,
             commands::goals_delete,
             commands::doc_change_history,
+            commands::doc_diff,
+            commands::doc_restore,
             commands::danbi_log_quick,
             commands::summarize_weekly,
             commands::project_activity_overview,
