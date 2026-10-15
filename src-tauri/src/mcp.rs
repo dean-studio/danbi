@@ -2244,7 +2244,7 @@ fn read_doc_tool(
         .ok()
         .map(|t| chrono::DateTime::<Local>::from(t).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "?".into());
-    let links_in = crate::links::build_index(vault_path)
+    let links_in = crate::links::build_index_cached(vault_path)
         .map(|idx| {
             idx.incoming
                 .get(&format!("{project}/{domain_norm}"))

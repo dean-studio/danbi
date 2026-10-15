@@ -158,7 +158,7 @@ fn collect_docs(vault: &Path, project: &str) -> DanbiResult<Vec<(String, String)
 /// suppress suggestions that are already confirmed.
 fn existing_links(vault: &Path, project: &str) -> HashMap<String, HashSet<String>> {
     let mut out: HashMap<String, HashSet<String>> = HashMap::new();
-    let idx = match links::build_index(vault) {
+    let idx = match links::build_index_cached(vault) {
         Ok(i) => i,
         Err(_) => return out,
     };
