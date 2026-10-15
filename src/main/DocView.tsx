@@ -10,7 +10,7 @@ import {
   exportBlocksToMarkdown,
   parseMarkdownRestoringImages,
 } from "@/main/imageRoundTrip";
-import { ipc } from "@/lib/ipc";
+import { DOC_CONFLICT, ipc } from "@/lib/ipc";
 import { DocInspector } from "@/main/DocInspector";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
@@ -115,6 +115,14 @@ export function DocView({
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   /** 인스펙터 복원 뒤 강제 재로드용. */
   const [reloadTick, setReloadTick] = useState(0);
+  /** 편집 중에 다른 곳(에이전트 등)이 이 문서를 바꿔 저장을 보류한 상태.
+   *  풀릴 때까지 자동 저장을 멈추고 배너로 선택을 받는다. */
+  const [conflict, setConflict] = useState(false);
+  const conflictRef = useRef(false);
+  const setConflictState = useCallback((v: boolean) => {
+    conflictRef.current = v;
+    setConflict(v);
+  }, []);
 
   // Last markdown we synced to disk. `dirty` 는 onChange 플래그 — 키 입력마다
   // 전체 마크다운을 직렬화해 비교하지 않는다 (큰 문서에서 타이핑이 끊기던
@@ -155,11 +163,14 @@ export function DocView({
 
   /** 에디터 본문을 `loadedDoc` 경로에 저장. 바뀐 게 없으면 쓰기 없이
    *  dirty 만 내린다. 동시 호출은 진행 중인 저장을 그대로 돌려준다. */
-  const save = useCallback((): Promise<void> => {
+  const save = useCallback((overwrite = false): Promise<void> => {
     if (saveInFlight.current) return saveInFlight.current;
     const target = loadedDoc.current;
     if (!target || !dirtyRef.current) return Promise.resolve();
     cancelAutosave();
+    if (conflictRef.current && !overwrite) {
+      return Promise.reject(new Error(`${DOC_CONFLICT}: 저장 보류 중`));
+    }
     const run = (async () => {
       setSaving(true);
       try {
@@ -173,8 +184,25 @@ export function DocView({
         // 우리가 만든 저장이라는 marker — Workspace 의 watcher refresh 가
         // 이 직후 발화하는 vault:changed 를 한 번 무시하게 해서 사이드바
         // listTree + linkIndex 재빌드를 건너뛴다.
-        useApp.getState().markSelfSave();
-        await ipc.writeDoc(target.vault, target.project, target.domain, md);
+        useApp
+          .getState()
+          .markSelfSave(`Projects/${target.project}/${target.domain}`);
+        try {
+          // 마지막으로 읽거나 쓴 본문을 base 로 넘겨, 그 사이 에이전트가 쓴
+          // 내용을 덮어쓰지 않게 한다. 사용자가 덮어쓰기를 고르면 base 없이.
+          await ipc.writeDoc(
+            target.vault,
+            target.project,
+            target.domain,
+            md,
+            overwrite ? undefined : lastSyncedMd.current,
+          );
+        } catch (e) {
+          if (String(e).startsWith(DOC_CONFLICT) && loadedDoc.current === target) {
+            setConflictState(true);
+          }
+          throw e;
+        }
         // 저장 중에 문서가 바뀌지 않았을 때만 상태를 내린다 (load() 가
         // flush 를 기다리므로 보통은 항상 같다).
         if (loadedDoc.current === target) {
@@ -182,6 +210,7 @@ export function DocView({
           setBytes(md.length);
           markDirty(false);
           setLastSavedAt(Date.now());
+          setConflictState(false);
         }
       } finally {
         setSaving(false);
@@ -190,13 +219,15 @@ export function DocView({
     })();
     saveInFlight.current = run;
     return run;
-  }, [editor, cancelAutosave, markDirty]);
+  }, [editor, cancelAutosave, markDirty, setConflictState]);
 
   // 실패를 toast 로 알리는 변형 — 본문은 에디터에 그대로 남아 있으므로
   // 전체 패널을 에러로 바꾸지 않는다 (사용자가 다시 ⌘S 하면 됨).
   const saveOrNotify = useCallback(() => {
     const target = loadedDoc.current;
     return save().catch((e) => {
+      // 충돌은 문서 위 배너가 알린다 — toast 를 겹쳐 띄우지 않는다.
+      if (String(e).includes(DOC_CONFLICT)) return;
       pushNotification({
         tone: "err",
         title: "저장 실패",
@@ -279,6 +310,7 @@ export function DocView({
         suppressChange.current = false;
         lastSyncedMd.current = md;
         loadedKey.current = selKey;
+        setConflictState(false);
         if (isSwitchingDoc) setLastSavedAt(null);
         loadedDoc.current = {
           vault: cfg.vault_path,
@@ -307,6 +339,27 @@ export function DocView({
       if (dirtyRef.current) saveOrNotify();
     };
   }, [saveOrNotify, cancelAutosave]);
+
+  /** 충돌 배너: 내 편집을 버리고 디스크(에이전트가 쓴) 버전으로 다시 연다. */
+  async function loadDiskVersion() {
+    const target = loadedDoc.current;
+    if (!target) return;
+    cancelAutosave();
+    try {
+      const md = await ipc.readDoc(target.vault, target.project, target.domain);
+      if (loadedDoc.current !== target) return;
+      suppressChange.current = true;
+      await replaceEditorFromMd(editor, md, target.vault, target.project);
+      suppressChange.current = false;
+      lastSyncedMd.current = md;
+      setBytes(md.length);
+      markDirty(false);
+      setConflictState(false);
+    } catch (e) {
+      suppressChange.current = false;
+      setErr(String(e));
+    }
+  }
 
   async function revert() {
     if (!dirty) return;
@@ -593,7 +646,7 @@ export function DocView({
     if (!autosaveEnabled) cancelAutosave();
   }, [autosaveEnabled, cancelAutosave]);
   const scheduleAutosave = useCallback(() => {
-    if (!autosaveRef.current) return;
+    if (!autosaveRef.current || conflictRef.current) return;
     cancelAutosave();
     autosaveTimer.current = setTimeout(() => {
       autosaveTimer.current = null;
@@ -1081,6 +1134,35 @@ export function DocView({
         </div>
       )}
 
+      {conflict && (
+        <div className="mx-6 mt-3 flex flex-wrap items-center gap-2 rounded-md border border-hairline-strong bg-surface-elevated px-3 py-2 text-[12px] text-on-dark">
+          <span className="min-w-0 flex-1">
+            편집하는 동안 다른 곳에서 이 문서가 바뀌었어요. 저장을 멈췄어요.
+          </span>
+          <button
+            type="button"
+            onClick={loadDiskVersion}
+            className="rounded-md border border-hairline px-2.5 py-1 text-[12px] text-on-dark hover:bg-surface-card"
+          >
+            디스크 버전 불러오기
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              save(true).catch((e) =>
+                pushNotification({
+                  tone: "err",
+                  title: "저장 실패",
+                  body: String(e).slice(0, 120),
+                }),
+              );
+            }}
+            className="rounded-md border border-hairline px-2.5 py-1 text-[12px] text-mute hover:bg-surface-card hover:text-on-dark"
+          >
+            내 편집으로 덮어쓰기
+          </button>
+        </div>
+      )}
       {findOpen && (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-hairline bg-surface-elevated px-5 py-2">
           <input

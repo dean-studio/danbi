@@ -36,7 +36,7 @@ import {
   type VaultChangedPayload,
   type VaultTemplate,
 } from "@/lib/ipc";
-import { useApp } from "@/state/store";
+import { SELF_SAVE_WINDOW_MS, useApp } from "@/state/store";
 import { cn } from "@/lib/utils";
 
 type DialogState =
@@ -462,8 +462,27 @@ export function Workspace() {
     let batchProjects = new Set<string>();
     let batchFull = false;
     const scheduleRefresh = (p: VaultChangedPayload) => {
-      if (p.truncated || p.projects.length === 0) batchFull = true;
-      for (const name of p.projects) batchProjects.add(name);
+      // 방금 에디터가 저장한 파일 이벤트만 걸러낸다. 같은 이벤트에 섞여
+      // 들어온 에이전트 쓰기(다른 파일·다른 프로젝트)는 그대로 처리해야
+      // 사이드바 갱신과 열린 문서의 외부 변경 감지가 빠지지 않는다.
+      if (!p.truncated && p.paths.length > 0) {
+        const now = Date.now();
+        const saved = useApp.getState().selfSavedPaths;
+        const others = p.paths.filter(
+          (path) => !(saved[path] && now - saved[path] < SELF_SAVE_WINDOW_MS),
+        );
+        if (others.length === 0) return;
+        const projects = new Set<string>();
+        for (const path of others) {
+          const m = /^Projects\/([^/]+)\//.exec(path);
+          if (m) projects.add(m[1]);
+        }
+        if (projects.size === 0) batchFull = true;
+        for (const name of projects) batchProjects.add(name);
+      } else {
+        if (p.truncated || p.projects.length === 0) batchFull = true;
+        for (const name of p.projects) batchProjects.add(name);
+      }
       if (pending) clearTimeout(pending);
       pending = setTimeout(() => {
         pending = null;
@@ -471,13 +490,11 @@ export function Workspace() {
         const full = batchFull;
         batchProjects = new Set();
         batchFull = false;
-        // 사용자가 방금 직접 저장한 거면 watcher refresh 를 한 번 건너뛴다.
-        // (writeDoc 직후 이미 우리가 정확한 상태를 알고 있어서 listTree
-        // + buildLinkIndex + projectUpdates + domainUpdates 를 또 돌릴
-        // 필요 없음. 큰 vault 에선 이 한 번이 수백 ms 잡아먹어 에디터
-        // 가 버벅댐.)
+        // 프로젝트 생성·이름 변경·삭제 직후엔 우리가 이미 refresh() 를
+        // 불렀으니 watcher refresh 를 한 번 건너뛴다. (문서 저장은 위에서
+        // 경로 단위로 걸러지므로 여기 걸리지 않는다.)
         const since = Date.now() - useApp.getState().lastSelfSaveAt;
-        if (since < 1500) {
+        if (since < SELF_SAVE_WINDOW_MS) {
           return;
         }
         refresh(full ? undefined : { projects });

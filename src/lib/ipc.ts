@@ -935,6 +935,9 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
 
 // --- IPC wrappers ---
 
+/** `writeDoc` 충돌 오류 접두. Rust `commands::DOC_CONFLICT` 와 같다. */
+export const DOC_CONFLICT = "DOC_CONFLICT";
+
 export const ipc = {
   ping: () => invoke<string>("ping"),
   defaultVault: () => invoke<string>("default_vault"),
@@ -1132,12 +1135,23 @@ export const ipc = {
   trashEmpty: () => invoke<number>("trash_empty"),
   readDoc: (vaultPath: string, project: string, domain: string) =>
     invoke<string>("read_doc", { vaultPath, project, domain }),
+  /** `expectedBase` 를 주면 디스크 내용이 그와 다를 때 쓰지 않고
+   *  `DOC_CONFLICT: …` 오류를 낸다 (에디터 편집 중 에이전트가 같은 문서에
+   *  쓴 경우). */
   writeDoc: (
     vaultPath: string,
     project: string,
     domain: string,
     content: string,
-  ) => invoke<void>("write_doc", { vaultPath, project, domain, content }),
+    expectedBase?: string,
+  ) =>
+    invoke<void>("write_doc", {
+      vaultPath,
+      project,
+      domain,
+      content,
+      expectedBase: expectedBase ?? null,
+    }),
   saveAsset: (
     vaultPath: string,
     project: string,

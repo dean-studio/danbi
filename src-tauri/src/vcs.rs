@@ -1328,12 +1328,46 @@ mod tests {
         let vault = temp_vault("save");
         ensure_repo(&vault).unwrap();
         let vp = vault.to_string_lossy().to_string();
-        crate::commands::write_doc(vp.clone(), "p".into(), "ui.md".into(), "# v1\n".into()).unwrap();
+        crate::commands::write_doc(vp.clone(), "p".into(), "ui.md".into(), "# v1\n".into(), None).unwrap();
         let head = recent_commits(&vault, 1).unwrap().remove(0);
         assert_eq!(head.summary, "danbi: save · p/ui.md [human]");
         // Unchanged content → no new commit.
-        crate::commands::write_doc(vp, "p".into(), "ui.md".into(), "# v1\n".into()).unwrap();
+        crate::commands::write_doc(vp, "p".into(), "ui.md".into(), "# v1\n".into(), None).unwrap();
         assert_eq!(recent_commits(&vault, 1).unwrap().remove(0).id, head.id);
+    }
+
+    #[test]
+    fn editor_save_refuses_when_file_changed_since_load() {
+        let vault = temp_vault("save-conflict");
+        ensure_repo(&vault).unwrap();
+        let vp = vault.to_string_lossy().to_string();
+        crate::commands::write_doc(vp.clone(), "p".into(), "ui.md".into(), "# v1\n".into(), None).unwrap();
+        // An agent appends while the editor still holds "# v1\n".
+        crate::vault::write_doc(&vault, "p", "ui.md", "# v1\n- agent note\n").unwrap();
+        let err = crate::commands::write_doc(
+            vp.clone(),
+            "p".into(),
+            "ui.md".into(),
+            "# v1 edited\n".into(),
+            Some("# v1\n".into()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().starts_with(crate::commands::DOC_CONFLICT), "{err}");
+        assert_eq!(
+            crate::vault::read_doc(&vault, "p", "ui.md").unwrap(),
+            "# v1\n- agent note\n",
+            "agent text must survive"
+        );
+        // With the current disk text as base the save goes through.
+        crate::commands::write_doc(
+            vp,
+            "p".into(),
+            "ui.md".into(),
+            "# v1 edited\n".into(),
+            Some("# v1\n- agent note\n".into()),
+        )
+        .unwrap();
+        assert_eq!(crate::vault::read_doc(&vault, "p", "ui.md").unwrap(), "# v1 edited\n");
     }
 }
 

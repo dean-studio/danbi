@@ -127,9 +127,12 @@ export type AppStore = {
   /** 사용자가 단비 안에서 노트를 직접 저장한 시점 (ms epoch).
    *  watcher 가 그 직후 발화하는 vault:changed 이벤트는 우리가 만든
    *  것이므로 vault refresh 한 번 건너뛰어도 안전 — 큰 vault 에서는
-   *  이 skip 이 에디터 체감 속도를 크게 좌우한다. */
+   *  이 skip 이 에디터 체감 속도를 크게 좌우한다.
+   *  `path`(vault 상대, `Projects/<p>/<d>`)를 주면 vault 전체가 아니라 그
+   *  파일 이벤트만 건너뛴다 — 같은 창에 들어온 에이전트 쓰기를 버리지 않게. */
   lastSelfSaveAt: number;
-  markSelfSave: () => void;
+  selfSavedPaths: Record<string, number>;
+  markSelfSave: (path?: string) => void;
 
   /** purpose / schema 자동 작성이 끝난 결과를 잠시 보관. 사용자가
    *  알림 / toast 를 클릭해 해당 노트로 이동하면 PurposeSchemaHint 가
@@ -304,6 +307,8 @@ export type BgJob =
 /** Max chat turns kept in memory. Older turns are dropped to bound RAM —
  *  each turn can carry full extracted attachment text + plan/diff payloads. */
 const MAX_TURNS = 100;
+/** 자기 저장 직후 watcher 이벤트를 무시하는 창. */
+export const SELF_SAVE_WINDOW_MS = 1500;
 
 export const useApp = create<AppStore>((set) => ({
   cfg: null,
@@ -387,7 +392,19 @@ export const useApp = create<AppStore>((set) => ({
   setBgJob: (job) => set({ bgJob: job }),
 
   lastSelfSaveAt: 0,
-  markSelfSave: () => set({ lastSelfSaveAt: Date.now() }),
+  selfSavedPaths: {},
+  markSelfSave: (path) =>
+    path
+      ? set((st) => {
+          const now = Date.now();
+          const next: Record<string, number> = {};
+          for (const [k, t] of Object.entries(st.selfSavedPaths)) {
+            if (now - t < SELF_SAVE_WINDOW_MS) next[k] = t;
+          }
+          next[path] = now;
+          return { selfSavedPaths: next };
+        })
+      : set({ lastSelfSaveAt: Date.now() }),
 
   pendingCompose: null,
   setPendingCompose: (v) => set({ pendingCompose: v }),

@@ -586,15 +586,29 @@ pub fn read_doc(
 /// next writer's `(pre)` snapshot, so a human edit never had a row of its
 /// own; the activity feed needs one. Same lock as every other writer; an
 /// unchanged document makes no commit (autosave fires often).
+/// Error prefix the editor matches to show its conflict banner.
+pub const DOC_CONFLICT: &str = "DOC_CONFLICT";
+
 #[tauri::command]
 pub fn write_doc(
     vault_path: String,
     project: String,
     domain: String,
     content: String,
+    expected_base: Option<String>,
 ) -> DanbiResult<()> {
     let vault = PathBuf::from(vault_path);
     let _write_guard = vcs::write_guard();
+    // The editor passes the text it last loaded/saved. If the file moved on
+    // since (an agent appended while the user was typing), refuse instead of
+    // silently overwriting — the editor shows a conflict banner.
+    if let Some(base) = expected_base {
+        if vault::read_doc(&vault, &project, &domain)? != base {
+            return Err(DanbiError::Other(format!(
+                "{DOC_CONFLICT}: {project}/{domain} changed on disk since it was loaded"
+            )));
+        }
+    }
     vault::write_doc(&vault, &project, &domain, &content)?;
     // Commit failure must not surface as a failed save — the file is on
     // disk; the next successful snapshot carries it.
