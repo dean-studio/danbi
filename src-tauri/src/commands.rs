@@ -4658,6 +4658,39 @@ pub fn doc_change_history(
     crate::vcs::doc_history(&vault_path, &project, &domain, limit.unwrap_or(40))
 }
 
+/// 인스펙터 [diff] — 커밋 하나가 이 문서에 가한 변경 (base 생략 시 첫
+/// 부모 대비).
+#[tauri::command]
+pub fn doc_diff(
+    project: String,
+    domain: String,
+    commit: String,
+    base: Option<String>,
+) -> DanbiResult<crate::vcs::DocDiff> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::vcs::doc_diff(&vault_path, &project, &domain, &commit, base.as_deref())
+}
+
+/// 인스펙터·피드 [이 변경 되돌리기] / [이 버전으로] — 문서 하나만
+/// `before`(커밋 직전) 또는 `at`(그 시점) 으로. 새 커밋 id 반환, 변화
+/// 없으면 None. vault 전체 reset 은 하지 않는다.
+#[tauri::command]
+pub fn doc_restore(
+    project: String,
+    domain: String,
+    commit: String,
+    mode: String,
+) -> DanbiResult<Option<String>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::vcs::doc_restore(&vault_path, &project, &domain, &commit, &mode)
+}
+
 #[cfg(test)]
 mod codex_tests {
     use super::{

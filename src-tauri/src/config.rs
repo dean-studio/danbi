@@ -362,6 +362,10 @@ pub struct DanbiConfig {
     /// "claude_code" / "builtin" / "minimal" / 비어있음(레거시).
     #[serde(default)]
     pub preset: Option<String>,
+    /// 검토함에서 "제외" 한 고아 문서 경로 (`<project>/<domain>`). healing
+    /// 스캐너 결과를 보여줄 때 걸러낸다 — 리뷰 큐에 복제하지 않는다.
+    #[serde(default)]
+    pub review_excluded_paths: Vec<String>,
 }
 
 /// 한 개의 프로젝트 그룹. 그룹은 순서를 갖고, 그 안의 프로젝트들도

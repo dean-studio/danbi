@@ -262,6 +262,8 @@ export type DanbiConfig = {
   project_icons?: Record<string, string>;
   project_colors?: Record<string, string>;
   preset?: "claude_code" | "builtin" | "minimal" | null;
+  /** 검토함에서 "제외" 한 고아 문서 (`<project>/<domain>`). */
+  review_excluded_paths?: string[];
 };
 
 export type AwsProfile = {
@@ -312,6 +314,20 @@ export type AuthInput =
   | { kind: "profile"; name: string }
   | { kind: "manual"; label: string }
   | { kind: "env" };
+
+/** 커밋 하나가 문서 하나에 가한 변경 (`doc_diff`). */
+export type DocDiff = {
+  commit: string;
+  /** 비교 기준 커밋. 루트 커밋이면 null (빈 파일 대비). */
+  base: string | null;
+  /** `Projects/<project>/<domain>` */
+  path: string;
+  /** unified diff (~200KB 상한, 넘으면 `… (truncated)` 로 끝남). */
+  unified: string;
+  added: number;
+  removed: number;
+  binary: boolean;
+};
 
 export type DocChangeEntry = {
   commit: string;
@@ -1295,6 +1311,17 @@ export const ipc = {
 
   docChangeHistory: (project: string, domain: string, limit = 20) =>
     invoke<DocChangeEntry[]>("doc_change_history", { project, domain, limit }),
+  /** 커밋 하나가 이 문서에 가한 변경. `base` 생략 = 첫 부모 대비. */
+  docDiff: (project: string, domain: string, commit: string, base?: string) =>
+    invoke<DocDiff>("doc_diff", { project, domain, commit, base: base ?? null }),
+  /** 문서 하나만 `before`(커밋 직전) / `at`(그 시점) 으로 되돌리고 새
+   *  커밋을 남긴다. 변화 없으면 null. vault 전체 reset 아님. */
+  docRestore: (
+    project: string,
+    domain: string,
+    commit: string,
+    mode: "before" | "at",
+  ) => invoke<string | null>("doc_restore", { project, domain, commit, mode }),
 
   danbiLogQuick: (project: string, content: string) =>
     invoke<{ project: string; domain: string; commit: string | null }>(

@@ -622,6 +622,8 @@ pub fn run() {
             commands::goals_unarchive,
             commands::goals_delete,
             commands::doc_change_history,
+            commands::doc_diff,
+            commands::doc_restore,
             commands::danbi_log_quick,
             commands::summarize_weekly,
             commands::project_activity_overview,
