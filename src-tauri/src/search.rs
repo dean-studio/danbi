@@ -2,13 +2,14 @@ use crate::providers::Provider;
 use crate::error::{DanbiError, DanbiResult};
 use crate::vault::PROJECTS_DIRNAME;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, TryLockError};
 use tantivy::{
     collector::TopDocs,
     query::QueryParser,
     schema::{Field, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING},
-    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument,
+    Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
 };
 
 #[derive(Debug, Serialize, Clone)]
@@ -46,7 +47,11 @@ const MAX_HEADINGS: usize = 8;
 
 // ---------- In-memory Tantivy index ----------
 
+#[derive(Clone)]
 struct SearchFields {
+    /// "project/domain" — unique per doc, so a changed/deleted file can be
+    /// removed with a single `delete_term` instead of a full rebuild.
+    doc_id: Field,
     project: Field,
     domain: Field,
     body: Field,
@@ -55,19 +60,175 @@ struct SearchFields {
     stored_body: Field,
 }
 
+/// (size, mtime) of one `.md` — the cheap change signal used by every
+/// cache in this crate. Content hashing would cost a full read per file.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct FileStamp {
+    pub len: u64,
+    pub mtime_ms: u128,
+}
+
+/// Every `.md` the search/link/graph walks see (depth ≤ 2 below the
+/// project folder, hidden and `_assets` folders skipped), keyed by
+/// "project/rel.md", plus an order-independent fingerprint of the whole
+/// set. One directory walk + one `stat` per file; ~10ms for 1.5k files.
+#[derive(Clone, Debug)]
+pub(crate) struct VaultSnapshot {
+    pub files: HashMap<String, (PathBuf, FileStamp)>,
+    pub fingerprint: String,
+}
+
+impl VaultSnapshot {
+    /// Ids that must be (re)indexed and ids that must be dropped to turn
+    /// `old` into `self`.
+    fn diff(&self, old: &VaultSnapshot) -> (Vec<String>, Vec<String>) {
+        let mut upsert = Vec::new();
+        for (id, (_, stamp)) in &self.files {
+            match old.files.get(id) {
+                Some((_, prev)) if prev == stamp => {}
+                _ => upsert.push(id.clone()),
+            }
+        }
+        let removed: Vec<String> = old
+            .files
+            .keys()
+            .filter(|id| !self.files.contains_key(*id))
+            .cloned()
+            .collect();
+        (upsert, removed)
+    }
+}
+
+pub(crate) fn snapshot_vault(vault: &Path) -> DanbiResult<VaultSnapshot> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let projects_root = vault.join(PROJECTS_DIRNAME);
+    if !projects_root.exists() {
+        return Ok(VaultSnapshot {
+            files: HashMap::new(),
+            fingerprint: "empty".into(),
+        });
+    }
+    let mut project_dirs: Vec<(String, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(&projects_root)? {
+        let entry = entry?;
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        match p.file_name().and_then(|s| s.to_str()) {
+            Some(n) if !n.starts_with('.') => project_dirs.push((n.to_string(), p)),
+            _ => {}
+        }
+    }
+
+    // Two parallel phases. Listing uses `DirEntry::file_type` (free on
+    // APFS — it comes back with the directory read) so the only `stat`
+    // per file is the one for its stamp, and that phase is chunked so a
+    // single large project can't serialise the walk.
+    let listed: Vec<(String, PathBuf)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = project_dirs
+            .iter()
+            .map(|(project, dir)| {
+                scope.spawn(move || {
+                    let mut files = Vec::new();
+                    list_project_md_fast(dir, &mut files);
+                    files
+                        .into_iter()
+                        .map(|(rel, path)| (format!("{project}/{rel}"), path))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    });
+    let stamp_of = |path: &Path| -> Option<FileStamp> {
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime_ms = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        Some(FileStamp { len: meta.len(), mtime_ms })
+    };
+    let walked: Vec<Vec<(String, PathBuf, FileStamp)>> = if listed.len() < SNAPSHOT_PARALLEL_MIN {
+        vec![listed
+            .into_iter()
+            .filter_map(|(id, path)| stamp_of(&path).map(|st| (id, path, st)))
+            .collect()]
+    } else {
+        let chunk = listed.len().div_ceil(SNAPSHOT_THREADS).max(1);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = listed
+                .chunks(chunk)
+                .map(|part| {
+                    scope.spawn(move || {
+                        part.iter()
+                            .filter_map(|(id, path)| {
+                                stamp_of(path).map(|st| (id.clone(), path.clone(), st))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        })
+    };
+
+    let mut files: HashMap<String, (PathBuf, FileStamp)> = HashMap::new();
+    // Order-independent combine so read_dir ordering can't fake a change.
+    let mut acc: u64 = 0;
+    for chunk in walked {
+        for (id, path, stamp) in chunk {
+            let mut h = DefaultHasher::new();
+            id.hash(&mut h);
+            stamp.hash(&mut h);
+            acc = acc.wrapping_add(h.finish().rotate_left(17) ^ 0x9e37_79b9_7f4a_7c15);
+            files.insert(id, (path, stamp));
+        }
+    }
+    let fingerprint = format!("{:x}-{}", acc, files.len());
+    Ok(VaultSnapshot { files, fingerprint })
+}
+
+/// Cheap change detector shared by the link/graph caches.
+pub(crate) fn fingerprint_vault(vault: &Path) -> DanbiResult<String> {
+    snapshot_vault(vault).map(|s| s.fingerprint)
+}
+
 struct IndexedCorpus {
-    vault_fingerprint: String,
+    vault: PathBuf,
+    snapshot: VaultSnapshot,
     index: Index,
     reader: IndexReader,
     fields: SearchFields,
 }
 
-/// Global cache of the most recent tantivy index. Rebuilt lazily when the
-/// vault contents change.
-static CORPUS: Mutex<Option<IndexedCorpus>> = Mutex::new(None);
+/// Global cache of the most recent tantivy index. Searches clone the `Arc`
+/// out under a short lock and never hold `CORPUS` while (re)building.
+static CORPUS: Mutex<Option<Arc<IndexedCorpus>>> = Mutex::new(None);
+/// Serializes builders. A search that finds this busy keeps using the
+/// previous corpus instead of queueing behind the rebuild.
+static REFRESH: Mutex<()> = Mutex::new(());
+
+/// Past this share of changed files a fresh build beats delete+add.
+const FULL_REBUILD_RATIO: f64 = 0.5;
+/// Snapshot stat phase: below this many files threads cost more than they save.
+const SNAPSHOT_PARALLEL_MIN: usize = 64;
+const SNAPSHOT_THREADS: usize = 8;
+const WRITER_HEAP_BYTES: usize = 15_000_000;
 
 fn make_schema() -> (Schema, SearchFields) {
     let mut sb = Schema::builder();
+    let doc_id = sb.add_text_field("doc_id", STRING);
     let project = sb.add_text_field("project", STRING | STORED);
     let domain = sb.add_text_field("domain", STRING | STORED);
 
@@ -96,6 +257,7 @@ fn make_schema() -> (Schema, SearchFields) {
     (
         schema,
         SearchFields {
+            doc_id,
             project,
             domain,
             body,
@@ -105,93 +267,49 @@ fn make_schema() -> (Schema, SearchFields) {
     )
 }
 
-fn fingerprint_vault(vault: &Path) -> DanbiResult<String> {
-    // Sum of (path, modified_ms, len) hashes → cheap change detector.
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let projects_root = vault.join(PROJECTS_DIRNAME);
-    if !projects_root.exists() {
-        return Ok("empty".into());
-    }
-    let mut h = DefaultHasher::new();
-    for entry in std::fs::read_dir(&projects_root)? {
-        let entry = entry?;
-        let p = entry.path();
-        if !p.is_dir() {
-            continue;
+/// `collect_project_md_files` without a `stat` per entry: same depth and
+/// skip rules, but file-vs-dir comes from the directory read. Symlinks
+/// fall back to a real `stat` so a linked note still counts as a file.
+fn list_project_md_fast(project_dir: &Path, out: &mut Vec<(String, PathBuf)>) {
+    fn kind(de: &std::fs::DirEntry) -> (bool, bool) {
+        match de.file_type() {
+            Ok(ft) if ft.is_symlink() => {
+                let p = de.path();
+                (p.is_file(), p.is_dir())
+            }
+            Ok(ft) => (ft.is_file(), ft.is_dir()),
+            Err(_) => (false, false),
         }
-        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        name.hash(&mut h);
-        hash_dir_md(&p, None, &mut h)?;
-        for de in std::fs::read_dir(&p)? {
-            let de = de?;
-            let sub = de.path();
-            if !sub.is_dir() {
-                continue;
-            }
-            let Some(sname) = sub.file_name().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if sname.starts_with('.') || sname == "_assets" {
-                continue;
-            }
-            hash_dir_md(&sub, Some(sname), &mut h)?;
-            // Depth 2.
-            for de2 in std::fs::read_dir(&sub)? {
-                let de2 = de2?;
-                let sub2 = de2.path();
-                if !sub2.is_dir() {
-                    continue;
+    }
+    fn files_in(dir: &Path, prefix: Option<&str>, out: &mut Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
+        let mut subdirs = Vec::new();
+        let Ok(rd) = std::fs::read_dir(dir) else { return subdirs };
+        for de in rd.flatten() {
+            let (is_file, is_dir) = kind(&de);
+            let name = de.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if is_dir {
+                if !name.starts_with('.') && name != "_assets" {
+                    subdirs.push((name.to_string(), de.path()));
                 }
-                let Some(sname2) = sub2.file_name().and_then(|s| s.to_str()) else {
-                    continue;
+            } else if is_file && name.to_lowercase().ends_with(".md") && !name.starts_with('.') {
+                let full = match prefix {
+                    Some(p) => format!("{p}/{name}"),
+                    None => name.to_string(),
                 };
-                if sname2.starts_with('.') || sname2 == "_assets" {
-                    continue;
-                }
-                let combined = format!("{sname}/{sname2}");
-                hash_dir_md(&sub2, Some(&combined), &mut h)?;
+                out.push((full, de.path()));
             }
         }
+        subdirs
     }
-    Ok(format!("{:x}", h.finish()))
-}
-
-fn hash_dir_md(
-    dir: &Path,
-    prefix: Option<&str>,
-    h: &mut std::collections::hash_map::DefaultHasher,
-) -> DanbiResult<()> {
-    use std::hash::Hash;
-    let rd = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return Ok(()),
-    };
-    for de in rd {
-        let de = de?;
-        let path = de.path();
-        if !path.is_file() {
-            continue;
-        }
-        let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if !fname.to_lowercase().ends_with(".md") || fname.starts_with('.') {
-            continue;
-        }
-        if let Some(p) = prefix {
-            p.hash(h);
-        }
-        fname.hash(h);
-        if let Ok(meta) = std::fs::metadata(&path) {
-            meta.len().hash(h);
-            if let Ok(m) = meta.modified() {
-                if let Ok(d) = m.duration_since(std::time::UNIX_EPOCH) {
-                    d.as_millis().hash(h);
-                }
-            }
+    for (sname, sub) in files_in(project_dir, None, out) {
+        for (sname2, sub2) in files_in(&sub, Some(&sname), out) {
+            let combined = format!("{sname}/{sname2}");
+            // Depth 2 is the floor: anything deeper is ignored, as in
+            // `collect_project_md_files`.
+            files_in(&sub2, Some(&combined), out);
         }
     }
-    Ok(())
 }
 
 /// Walk a project directory and collect all `.md` files up to depth 2
@@ -269,7 +387,39 @@ fn collect_md_files(
     Ok(())
 }
 
-fn build_corpus(vault: &Path) -> DanbiResult<IndexedCorpus> {
+/// One tantivy document for "project/rel.md". Filename + headings are
+/// prepended to the searchable body so tantivy weights them higher.
+fn make_doc(fields: &SearchFields, id: &str, path: &Path) -> Option<TantivyDocument> {
+    let (project, fname) = id.split_once('/')?;
+    let md = std::fs::read_to_string(path).ok()?;
+    let headings: Vec<String> = md
+        .lines()
+        .filter(|l| l.trim_start().starts_with('#'))
+        .take(MAX_HEADINGS)
+        .map(|l| l.trim().to_string())
+        .collect();
+    let boosted = format!(
+        "{project} {fname} {heads}\n{body}",
+        heads = headings.join(" "),
+        body = md,
+    );
+    let mut doc = TantivyDocument::default();
+    doc.add_text(fields.doc_id, id);
+    doc.add_text(fields.project, project);
+    doc.add_text(fields.domain, fname);
+    doc.add_text(fields.body, boosted.as_str());
+    doc.add_text(fields.body_ngram, boosted.as_str());
+    doc.add_text(fields.stored_body, md.as_str());
+    Some(doc)
+}
+
+fn open_writer(index: &Index) -> DanbiResult<IndexWriter> {
+    index
+        .writer(WRITER_HEAP_BYTES)
+        .map_err(|e| DanbiError::Other(format!("tantivy writer: {e}")))
+}
+
+fn build_corpus(vault: &Path, snapshot: VaultSnapshot) -> DanbiResult<IndexedCorpus> {
     use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 
     let (schema, fields) = make_schema();
@@ -286,60 +436,14 @@ fn build_corpus(vault: &Path) -> DanbiResult<IndexedCorpus> {
         .tokenizers()
         .register("danbi_ngram", ngram_analyzer);
 
-    let mut writer: IndexWriter = index
-        .writer(15_000_000)
-        .map_err(|e| DanbiError::Other(format!("tantivy writer: {e}")))?;
-
-    let projects_root = vault.join(PROJECTS_DIRNAME);
-    if projects_root.exists() {
-        for entry in std::fs::read_dir(&projects_root)? {
-            let entry = entry?;
-            let p = entry.path();
-            if !p.is_dir() {
-                continue;
-            }
-            let project = match p.file_name().and_then(|s| s.to_str()) {
-                Some(n) if !n.starts_with('.') => n.to_string(),
-                _ => continue,
-            };
-
-            // Gather all .md files under this project, walking up to
-            // depth 2 (project/, project/<f>/, project/<f>/<f>/).
-            let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
-            collect_project_md_files(&p, &mut files)?;
-
-            for (fname, path) in files {
-                let Ok(md) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-
-                // Boost filename + headings by prepending them to the
-                // searchable body — tantivy then weights position higher.
-                let headings: Vec<String> = md
-                    .lines()
-                    .filter(|l| l.trim_start().starts_with('#'))
-                    .take(MAX_HEADINGS)
-                    .map(|l| l.trim().to_string())
-                    .collect();
-                let boosted = format!(
-                    "{project} {fname} {heads}\n{body}",
-                    heads = headings.join(" "),
-                    body = md,
-                );
-
-                let mut doc = TantivyDocument::default();
-                doc.add_text(fields.project, project.as_str());
-                doc.add_text(fields.domain, fname.as_str());
-                doc.add_text(fields.body, boosted.as_str());
-                doc.add_text(fields.body_ngram, boosted.as_str());
-                doc.add_text(fields.stored_body, md.as_str());
-                writer
-                    .add_document(doc)
-                    .map_err(|e| DanbiError::Other(format!("tantivy add: {e}")))?;
-            }
+    let mut writer = open_writer(&index)?;
+    for (id, (path, _)) in &snapshot.files {
+        if let Some(doc) = make_doc(&fields, id, path) {
+            writer
+                .add_document(doc)
+                .map_err(|e| DanbiError::Other(format!("tantivy add: {e}")))?;
         }
     }
-
     writer
         .commit()
         .map_err(|e| DanbiError::Other(format!("tantivy commit: {e}")))?;
@@ -351,30 +455,123 @@ fn build_corpus(vault: &Path) -> DanbiResult<IndexedCorpus> {
         .map_err(|e| DanbiError::Other(format!("tantivy reader: {e}")))?;
 
     Ok(IndexedCorpus {
-        vault_fingerprint: fingerprint_vault(vault)?,
+        vault: vault.to_path_buf(),
+        snapshot,
         index,
         reader,
         fields,
     })
 }
 
-fn ensure_corpus_fresh(vault: &Path) -> DanbiResult<()> {
-    let fp = fingerprint_vault(vault)?;
+/// Applies `snapshot` onto `old` in place: changed and deleted docs are
+/// dropped by `doc_id`, changed and new docs re-added, one commit. The
+/// `Index`/`IndexReader` handles are shared with `old`, so a search that
+/// is still holding the old `Arc` keeps working; it simply sees the new
+/// docs after `reader.reload()`.
+fn update_corpus(old: &IndexedCorpus, snapshot: VaultSnapshot) -> DanbiResult<IndexedCorpus> {
+    let (upsert, removed) = snapshot.diff(&old.snapshot);
+    let mut writer = open_writer(&old.index)?;
+    for id in removed.iter().chain(upsert.iter()) {
+        writer.delete_term(Term::from_field_text(old.fields.doc_id, id));
+    }
+    for id in &upsert {
+        let Some((path, _)) = snapshot.files.get(id) else {
+            continue;
+        };
+        if let Some(doc) = make_doc(&old.fields, id, path) {
+            writer
+                .add_document(doc)
+                .map_err(|e| DanbiError::Other(format!("tantivy add: {e}")))?;
+        }
+    }
+    writer
+        .commit()
+        .map_err(|e| DanbiError::Other(format!("tantivy commit: {e}")))?;
+    old.reader
+        .reload()
+        .map_err(|e| DanbiError::Other(format!("tantivy reload: {e}")))?;
+    Ok(IndexedCorpus {
+        vault: old.vault.clone(),
+        snapshot,
+        index: old.index.clone(),
+        reader: old.reader.clone(),
+        fields: old.fields.clone(),
+    })
+}
+
+fn current_corpus() -> DanbiResult<Option<Arc<IndexedCorpus>>> {
+    CORPUS
+        .lock()
+        .map(|slot| slot.clone())
+        .map_err(|_| DanbiError::Other("corpus lock".into()))
+}
+
+/// Returns a corpus that matches the vault on disk — or, while another
+/// thread is already rebuilding, the previous one so searches never
+/// queue behind an index build. `None` only before the very first build
+/// when the vault has no projects folder.
+fn ensure_corpus_fresh(vault: &Path) -> DanbiResult<Option<Arc<IndexedCorpus>>> {
+    let snapshot = snapshot_vault(vault)?;
+    let is_fresh = |c: &Arc<IndexedCorpus>| {
+        c.vault == vault && c.snapshot.fingerprint == snapshot.fingerprint
+    };
+    let current = current_corpus()?;
+    if let Some(c) = current.as_ref().filter(|c| is_fresh(c)) {
+        return Ok(Some(c.clone()));
+    }
+
+    let _building = match REFRESH.try_lock() {
+        Ok(g) => g,
+        Err(TryLockError::WouldBlock) => {
+            if let Some(c) = current.filter(|c| c.vault == vault) {
+                return Ok(Some(c)); // stale but instant; the builder will swap it in.
+            }
+            REFRESH
+                .lock()
+                .map_err(|_| DanbiError::Other("refresh lock".into()))?
+        }
+        Err(TryLockError::Poisoned(_)) => {
+            return Err(DanbiError::Other("refresh lock".into()))
+        }
+    };
+    // Another thread may have finished exactly this build while we waited.
+    let current = current_corpus()?;
+    if let Some(c) = current.as_ref().filter(|c| is_fresh(c)) {
+        return Ok(Some(c.clone()));
+    }
+
+    let incremental = current.as_ref().filter(|c| {
+        if c.vault != vault {
+            return false;
+        }
+        let (upsert, removed) = snapshot.diff(&c.snapshot);
+        let total = snapshot.files.len().max(c.snapshot.files.len()).max(1);
+        ((upsert.len() + removed.len()) as f64) < FULL_REBUILD_RATIO * total as f64
+    });
+    let next = match incremental {
+        Some(old) => Arc::new(update_corpus(old, snapshot)?),
+        None => {
+            // v0.8.0: 옛 인덱스를 먼저 drop 해서 재빌드 중 2× 메모리 피크를 없앤다.
+            // 재빌드가 실패하면 slot 은 None 이 되고, 다음 검색이 다시 빌드를 시도한다.
+            drop(current);
+            if let Ok(mut slot) = CORPUS.lock() {
+                *slot = None;
+            }
+            Arc::new(build_corpus(vault, snapshot)?)
+        }
+    };
     let mut slot = CORPUS
         .lock()
         .map_err(|_| DanbiError::Other("corpus lock".into()))?;
-    if let Some(c) = slot.as_ref() {
-        if c.vault_fingerprint == fp {
-            return Ok(());
-        }
-    }
-    // v0.8.0: 옛 인덱스를 먼저 drop 해서 재빌드 중 2× 메모리 피크를 없앤다.
-    // (예전엔 slot 에 옛 인덱스를 둔 채 새 인덱스를 만든 뒤 교체 → RAM 2배.)
-    // 재빌드가 실패하면 slot 은 None 이 되고, 다음 검색이 다시 빌드를 시도한다.
-    *slot = None;
-    let corpus = build_corpus(vault)?;
-    *slot = Some(corpus);
-    Ok(())
+    *slot = Some(next.clone());
+    Ok(Some(next))
+}
+
+/// Builds (or refreshes) the tantivy corpus ahead of the first search.
+/// Called from a background task at app start so the first ⌘K after
+/// launch doesn't pay the ~2.5s build.
+pub fn warm_corpus(vault: &Path) -> DanbiResult<()> {
+    ensure_corpus_fresh(vault).map(|_| ())
 }
 
 // ---------- Public search ----------
@@ -439,16 +636,13 @@ pub fn full_search(
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
-
-    ensure_corpus_fresh(vault)?;
-    let slot = CORPUS
-        .lock()
-        .map_err(|_| DanbiError::Other("corpus lock".into()))?;
-    let corpus = match slot.as_ref() {
-        Some(c) => c,
-        None => return Ok(Vec::new()),
+    let Some(corpus) = ensure_corpus_fresh(vault)? else {
+        return Ok(Vec::new());
     };
+    search_corpus(&corpus, trimmed, limit)
+}
 
+fn search_corpus(corpus: &IndexedCorpus, trimmed: &str, limit: usize) -> DanbiResult<Vec<SearchHit>> {
     let searcher = corpus.reader.searcher();
 
     // Query both the body (tokenized) and the ngram (Korean-friendly).
@@ -874,16 +1068,63 @@ pub fn full_search_hybrid(
     limit: usize,
     vector_embedding: Option<&[f32]>,
 ) -> DanbiResult<Vec<SearchHit>> {
+    full_search_mode(vault, query, limit, vector_embedding, SearchMode::Hybrid)
+}
+
+/// Which retrievers a search runs. `Semantic` without an embedding
+/// (no provider, timeout, error) degrades to `Keyword` — callers surface
+/// that through `commands::QueryEmbedding::semantic`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchMode {
+    Keyword,
+    Semantic,
+    Hybrid,
+}
+
+impl SearchMode {
+    /// `None`/empty → `Hybrid`; anything else must be one of the three names.
+    pub fn parse(raw: Option<&str>) -> DanbiResult<SearchMode> {
+        match raw.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            None | Some("") | Some("hybrid") => Ok(SearchMode::Hybrid),
+            Some("keyword") => Ok(SearchMode::Keyword),
+            Some("semantic") => Ok(SearchMode::Semantic),
+            Some(other) => Err(DanbiError::Config(format!(
+                "mode must be 'hybrid', 'keyword' or 'semantic' (got '{other}')"
+            ))),
+        }
+    }
+
+    pub fn wants_embedding(self) -> bool {
+        !matches!(self, SearchMode::Keyword)
+    }
+}
+
+/// `full_search_hybrid` with an explicit retriever choice. `Keyword`
+/// skips the vector arm even when an embedding is supplied; `Semantic`
+/// skips BM25 when an embedding is available and otherwise behaves like
+/// `Keyword` so the caller never gets an empty page.
+pub fn full_search_mode(
+    vault: &Path,
+    query: &str,
+    limit: usize,
+    vector_embedding: Option<&[f32]>,
+    mode: SearchMode,
+) -> DanbiResult<Vec<SearchHit>> {
     // Pull more candidates per arm than we'll keep — RRF works best when
     // each retriever contributes a fuller list, so depth=3x final limit
     // is a common starting point.
     let depth = limit.saturating_mul(3).max(8);
-    let bm25 = full_search(vault, query, depth)?;
-    let vector_hits = match vector_embedding {
+    let embedding = if mode.wants_embedding() { vector_embedding } else { None };
+    let bm25 = if mode == SearchMode::Semantic && embedding.is_some() {
+        Vec::new()
+    } else {
+        full_search(vault, query, depth)?
+    };
+    let vector_hits = match embedding {
         Some(emb) => {
-            let idx = crate::vector::load(vault).unwrap_or_else(|_| {
-                crate::vector::VectorIndex::default()
-            });
+            let idx = crate::vector::load_cached(vault)
+                .unwrap_or_else(|_| Arc::new(crate::vector::VectorIndex::default()));
             crate::vector::query(&idx, emb, depth)
         }
         None => Vec::new(),
@@ -903,6 +1144,154 @@ pub fn full_search_hybrid(
 mod tests {
     use super::*;
     use crate::vector::VectorHit;
+
+    fn temp_vault(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "danbi-search-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(PROJECTS_DIRNAME)).unwrap();
+        root
+    }
+
+    fn write(vault: &Path, rel: &str, body: &str) {
+        let path = vault.join(PROJECTS_DIRNAME).join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// Sorted "project/domain" of a fresh, uncached build — the reference
+    /// the incremental path must match exactly.
+    fn reference_hits(vault: &Path, query: &str) -> Vec<String> {
+        let corpus = build_corpus(vault, snapshot_vault(vault).unwrap()).unwrap();
+        let mut ids: Vec<String> = search_corpus(&corpus, query, 50)
+            .unwrap()
+            .into_iter()
+            .map(|h| format!("{}/{}", h.project, h.domain))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn live_hits(vault: &Path, query: &str) -> Vec<String> {
+        let mut ids: Vec<String> = full_search(vault, query, 50)
+            .unwrap()
+            .into_iter()
+            .map(|h| format!("{}/{}", h.project, h.domain))
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Bump mtime past the stamp's millisecond resolution so a same-size
+    /// edit done within the same ms is still seen as a change.
+    fn touch_old(vault: &Path, rel: &str) {
+        let path = vault.join(PROJECTS_DIRNAME).join(rel);
+        let t = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+        filetime::set_file_mtime(path, t).unwrap();
+    }
+
+    #[test]
+    fn incremental_refresh_matches_full_rebuild() {
+        let v = temp_vault("incr");
+        write(&v, "A/one.md", "# 인증\n리프레시 토큰은 7일");
+        write(&v, "A/notes/two.md", "# 배포\n릴리스 절차 문서");
+        write(&v, "B/three.md", "# 그래프\n커뮤니티 탐지");
+        assert_eq!(live_hits(&v, "리프레시"), reference_hits(&v, "리프레시"));
+        // The global slot is shared with other tests, so drive the
+        // incremental path on a private corpus.
+        let first = build_corpus(&v, snapshot_vault(&v).unwrap()).unwrap();
+
+        // Add + modify (same byte length, older mtime) + delete, then every
+        // query must agree with a from-scratch build.
+        write(&v, "B/four.md", "# 새 문서\n리프레시 토큰 회전");
+        write(&v, "A/one.md", "# 인증\n액세스 토큰은 7일");
+        touch_old(&v, "A/one.md");
+        std::fs::remove_file(v.join(PROJECTS_DIRNAME).join("A/notes/two.md")).unwrap();
+        let snap = snapshot_vault(&v).unwrap();
+        let (mut upsert, removed) = snap.diff(&first.snapshot);
+        upsert.sort();
+        assert_eq!(upsert, vec!["A/one.md".to_string(), "B/four.md".to_string()]);
+        assert_eq!(removed, vec!["A/notes/two.md".to_string()]);
+        let second = update_corpus(&first, snap).unwrap();
+        let sorted = |hits: Vec<SearchHit>| {
+            let mut ids: Vec<String> = hits
+                .into_iter()
+                .map(|h| format!("{}/{}", h.project, h.domain))
+                .collect();
+            ids.sort();
+            ids
+        };
+        for q in ["리프레시", "토큰", "릴리스", "커뮤니티", "액세스"] {
+            assert_eq!(sorted(search_corpus(&second, q, 50).unwrap()), reference_hits(&v, q), "query {q}");
+            assert_eq!(live_hits(&v, q), reference_hits(&v, q), "live query {q}");
+        }
+        assert_eq!(sorted(search_corpus(&second, "릴리스", 50).unwrap()), Vec::<String>::new(), "deleted doc gone");
+        assert_eq!(sorted(search_corpus(&second, "리프레시", 50).unwrap()), vec!["B/four.md".to_string()]);
+        assert_eq!(second.snapshot.files.len(), 3);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn switching_vaults_rebuilds_from_scratch() {
+        let a = temp_vault("switch-a");
+        write(&a, "P/x.md", "고유단어알파");
+        let b = temp_vault("switch-b");
+        write(&b, "P/x.md", "고유단어베타");
+        assert_eq!(live_hits(&a, "고유단어알파"), vec!["P/x.md".to_string()]);
+        assert_eq!(live_hits(&b, "고유단어알파"), Vec::<String>::new());
+        assert_eq!(live_hits(&b, "고유단어베타"), vec!["P/x.md".to_string()]);
+        std::fs::remove_dir_all(a).ok();
+        std::fs::remove_dir_all(b).ok();
+    }
+
+    #[test]
+    fn snapshot_fingerprint_tracks_content_and_set() {
+        let v = temp_vault("fp");
+        write(&v, "A/a.md", "hello");
+        let fp0 = fingerprint_vault(&v).unwrap();
+        assert_eq!(fp0, fingerprint_vault(&v).unwrap(), "stable without changes");
+        write(&v, "A/a.md", "hello!");
+        let fp1 = fingerprint_vault(&v).unwrap();
+        assert_ne!(fp0, fp1, "size change");
+        write(&v, "A/.hidden/skip.md", "x");
+        write(&v, "A/_assets/skip.md", "x");
+        assert_eq!(fp1, fingerprint_vault(&v).unwrap(), "hidden/_assets ignored");
+        write(&v, "A/n/d/deep.md", "x");
+        let fp2 = fingerprint_vault(&v).unwrap();
+        assert_ne!(fp1, fp2, "depth-2 file counts");
+        let snap = snapshot_vault(&v).unwrap();
+        assert!(snap.files.contains_key("A/n/d/deep.md"));
+        assert!(!snap.files.contains_key("A/_assets/skip.md"));
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn search_mode_parses_and_rejects() {
+        assert_eq!(SearchMode::parse(None).unwrap(), SearchMode::Hybrid);
+        assert_eq!(SearchMode::parse(Some(" Keyword ")).unwrap(), SearchMode::Keyword);
+        assert_eq!(SearchMode::parse(Some("semantic")).unwrap(), SearchMode::Semantic);
+        assert!(SearchMode::parse(Some("vector")).is_err());
+        assert!(!SearchMode::Keyword.wants_embedding());
+    }
+
+    #[test]
+    fn keyword_mode_ignores_embedding_and_semantic_falls_back() {
+        let v = temp_vault("mode");
+        write(&v, "A/k.md", "키워드전용문서");
+        let emb = vec![1.0f32, 0.0];
+        let kw = full_search_mode(&v, "키워드전용문서", 5, Some(&emb), SearchMode::Keyword).unwrap();
+        assert_eq!(kw.len(), 1);
+        assert_eq!(kw[0].matched, "keyword");
+        // No vector index on disk → semantic mode still returns BM25 hits.
+        let sem = full_search_mode(&v, "키워드전용문서", 5, None, SearchMode::Semantic).unwrap();
+        assert_eq!(sem.len(), 1);
+        std::fs::remove_dir_all(v).ok();
+    }
 
     fn bm25(project: &str, domain: &str) -> SearchHit {
         SearchHit {

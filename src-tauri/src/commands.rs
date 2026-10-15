@@ -782,18 +782,96 @@ pub fn resolve_embed_model(
 /// resolves to empty, or the embed call fails (rate-limit, network, etc.) —
 /// callers can then fall back to BM25-only search transparently.
 pub async fn embed_query_for_search(cfg: &DanbiConfig, query: &str) -> Option<Vec<f32>> {
-    let provider = resolve_embed_provider(cfg).ok()?;
+    embed_query(cfg, query, crate::search::SearchMode::Hybrid)
+        .await
+        .embedding
+}
+
+/// A search embeds its query at most this long; past it the vector arm is
+/// skipped so a slow provider can't hold the keyword results hostage.
+pub const QUERY_EMBED_TIMEOUT_MS: u64 = 1500;
+
+/// Outcome of embedding a search query. `semantic` tells the caller (and
+/// the user) why the vector arm did or didn't run:
+/// `used` · `cached` · `off` (no provider / keyword mode) · `timeout` · `error`.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryEmbedding {
+    pub embedding: Option<Vec<f32>>,
+    pub semantic: &'static str,
+    /// Korean one-liner for the fallback cases, for the result panel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl QueryEmbedding {
+    fn off() -> Self {
+        QueryEmbedding { embedding: None, semantic: "off", note: None }
+    }
+}
+
+/// `embed_query_for_search` with a mode and a status: keyword mode never
+/// calls the provider; otherwise the query LRU (`vector::query_cache_*`)
+/// is checked first and the provider call is capped at
+/// `QUERY_EMBED_TIMEOUT_MS`.
+pub async fn embed_query(
+    cfg: &DanbiConfig,
+    query: &str,
+    mode: crate::search::SearchMode,
+) -> QueryEmbedding {
+    if !mode.wants_embedding() {
+        return QueryEmbedding::off();
+    }
+    let Ok(provider) = resolve_embed_provider(cfg) else {
+        return QueryEmbedding::off();
+    };
     let model = resolve_embed_model(cfg, provider.as_ref(), None);
     if model.is_empty() {
-        return None;
+        return QueryEmbedding::off();
     }
-    let res = crate::usage::with_role(
-        "embed",
-        provider.embed(&model, &[query.to_string()]),
-    )
-    .await
-    .ok()?;
-    res.into_iter().next()
+    embed_query_with(provider.as_ref(), &model, query, QUERY_EMBED_TIMEOUT_MS).await
+}
+
+/// Provider-level core of `embed_query`: LRU first, then one `embed`
+/// call bounded by `timeout_ms`. Split out so the timeout/fallback path
+/// can be tested with a stub provider.
+pub(crate) async fn embed_query_with(
+    provider: &dyn Provider,
+    model: &str,
+    query: &str,
+    timeout_ms: u64,
+) -> QueryEmbedding {
+    let key = crate::vector::query_cache_key(provider.kind(), model, query);
+    if let Some(hit) = crate::vector::query_cache_get(&key) {
+        return QueryEmbedding { embedding: Some(hit), semantic: "cached", note: None };
+    }
+    let inputs = [query.to_string()];
+    let call = crate::usage::with_role("embed", provider.embed(model, &inputs));
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), call).await {
+        Ok(Ok(vectors)) => match vectors.into_iter().next() {
+            Some(emb) => {
+                crate::vector::query_cache_put(key, emb.clone());
+                QueryEmbedding { embedding: Some(emb), semantic: "used", note: None }
+            }
+            None => QueryEmbedding {
+                embedding: None,
+                semantic: "error",
+                note: Some("임베딩 응답이 비어 있어 키워드 검색 결과만 보여드려요.".into()),
+            },
+        },
+        Ok(Err(e)) => QueryEmbedding {
+            embedding: None,
+            semantic: "error",
+            note: Some(format!("임베딩 호출 실패({e}) — 키워드 검색 결과만 보여드려요.")),
+        },
+        Err(_) => QueryEmbedding {
+            embedding: None,
+            semantic: "timeout",
+            note: Some(format!(
+                "임베딩이 {:.1}초 안에 안 와서 키워드 검색 결과만 보여드려요.",
+                timeout_ms as f64 / 1000.0
+            )),
+        },
+    }
 }
 
 #[tauri::command]
@@ -1266,7 +1344,7 @@ pub async fn build_link_index() -> DanbiResult<crate::links::LinkIndex> {
             Some(p) => PathBuf::from(p),
             None => return Ok(crate::links::LinkIndex::default()),
         };
-        crate::links::build_index(&vault_path)
+        crate::links::build_index_cached(&vault_path).map(|idx| (*idx).clone())
     })
     .await
     .map_err(|e| DanbiError::Other(format!("join: {e}")))?
@@ -1994,23 +2072,54 @@ pub fn search_local(query: String, limit: Option<usize>) -> DanbiResult<Vec<crat
 pub async fn search_full(
     query: String,
     limit: Option<usize>,
+    mode: Option<String>,
 ) -> DanbiResult<Vec<crate::search::SearchHit>> {
+    search_hybrid(query, limit, mode).await.map(|r| r.hits)
+}
+
+/// `search_full` plus the semantic-arm status, so the UI can say "키워드
+/// 결과만" when the embedding timed out instead of silently degrading.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchOutcome {
+    pub hits: Vec<crate::search::SearchHit>,
+    pub mode: crate::search::SearchMode,
+    /// `used` · `cached` · `off` · `timeout` · `error` — see `QueryEmbedding`.
+    pub semantic: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[tauri::command]
+pub async fn search_hybrid(
+    query: String,
+    limit: Option<usize>,
+    mode: Option<String>,
+) -> DanbiResult<SearchOutcome> {
+    let mode = crate::search::SearchMode::parse(mode.as_deref())?;
+    let empty = |mode| SearchOutcome { hits: Vec::new(), mode, semantic: "off", note: None };
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?;
     let cfg = match cfg {
         Some(c) => c,
-        None => return Ok(Vec::new()),
+        None => return Ok(empty(mode)),
     };
     let vault_path = match cfg.vault_path.clone() {
         Some(p) => PathBuf::from(p),
-        None => return Ok(Vec::new()),
+        None => return Ok(empty(mode)),
     };
     let lim = limit.unwrap_or(10);
 
     // 사용자가 임베딩 provider 를 설정해뒀으면 RRF 하이브리드 검색,
-    // 아니면 BM25 만 사용.
-    let embedding = embed_query_for_search(&cfg, &query).await;
-    crate::search::full_search_hybrid(&vault_path, &query, lim, embedding.as_deref())
+    // 아니면 (또는 keyword 모드·타임아웃이면) BM25 만 사용.
+    let q = embed_query(&cfg, &query, mode).await;
+    let hits = tokio::task::spawn_blocking(move || {
+        crate::search::full_search_mode(&vault_path, &query, lim, q.embedding.as_deref(), mode)
+            .map(|hits| (hits, q.semantic, q.note))
+    })
+    .await
+    .map_err(|e| DanbiError::Other(format!("join: {e}")))??;
+    let (hits, semantic, note) = hits;
+    Ok(SearchOutcome { hits, mode, semantic, note })
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -3585,7 +3694,7 @@ pub fn vector_stats() -> DanbiResult<crate::vector::VectorIndexStats> {
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
-    let idx = crate::vector::load(&vault_path)?;
+    let idx = crate::vector::load_cached(&vault_path)?;
     // Compare against the model a reindex would use so Settings can warn
     // about entries left behind by a model switch.
     let configured = crate::mcp::configured_embed_model(&cfg);
@@ -3698,7 +3807,7 @@ pub async fn vector_search(
     let embeddings =
         crate::usage::with_role("embed", provider.embed(&model, &[query])).await?;
     let q = embeddings.into_iter().next().unwrap_or_default();
-    let idx = crate::vector::load(&vault_path)?;
+    let idx = crate::vector::load_cached(&vault_path)?;
     Ok(crate::vector::query(&idx, &q, limit.unwrap_or(10)))
 }
 
@@ -3768,7 +3877,7 @@ pub fn build_graph(project: Option<String>) -> DanbiResult<crate::graph::GraphDa
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
-    crate::graph::build_graph(&vault_path, project.as_deref())
+    crate::graph::build_graph_cached(&vault_path, project.as_deref()).map(|g| (*g).clone())
 }
 
 #[tauri::command]
@@ -4942,5 +5051,81 @@ mod skill_dir_tests {
             vec![home.join(".claude/skills")]
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
+mod embed_query_tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    /// Embeds after `delay_ms`, or fails when `fail` is set.
+    struct StubEmbed {
+        delay_ms: u64,
+        fail: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for StubEmbed {
+        fn kind(&self) -> &'static str {
+            "stub"
+        }
+        async fn converse_text(&self, _: &str, _: Option<&str>, _: &str, _: i32, _: f32) -> DanbiResult<String> {
+            unreachable!()
+        }
+        async fn list_models(&self) -> DanbiResult<Vec<crate::providers::ModelInfo>> {
+            Ok(Vec::new())
+        }
+        async fn test_connection(&self, _: Option<&str>) -> DanbiResult<crate::providers::TestResult> {
+            unreachable!()
+        }
+        async fn embed(&self, model_id: &str, inputs: &[String]) -> DanbiResult<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            if self.fail {
+                return Err(DanbiError::Other("429".into()));
+            }
+            Ok(inputs.iter().map(|q| vec![q.len() as f32, model_id.len() as f32]).collect())
+        }
+    }
+
+    fn stub(delay_ms: u64, fail: bool) -> StubEmbed {
+        StubEmbed { delay_ms, fail, calls: std::sync::atomic::AtomicUsize::new(0) }
+    }
+
+    #[tokio::test]
+    async fn slow_embedding_times_out_and_reports_keyword_fallback() {
+        let p = stub(300, false);
+        let out = embed_query_with(&p, "m", "느린 질문 timeout-case", 30).await;
+        assert!(out.embedding.is_none());
+        assert_eq!(out.semantic, "timeout");
+        assert!(out.note.unwrap().contains("키워드"));
+    }
+
+    #[tokio::test]
+    async fn provider_error_reports_error_not_timeout() {
+        let p = stub(0, true);
+        let out = embed_query_with(&p, "m", "실패 질문 error-case", 500).await;
+        assert!(out.embedding.is_none());
+        assert_eq!(out.semantic, "error");
+        assert!(out.note.unwrap().contains("429"));
+    }
+
+    #[tokio::test]
+    async fn repeated_query_is_served_from_lru_without_a_second_call() {
+        let p = stub(0, false);
+        let first = embed_query_with(&p, "model-a", "  캐시 질문 lru-case ", 500).await;
+        assert_eq!(first.semantic, "used");
+        let second = embed_query_with(&p, "model-a", "캐시 질문 lru-case", 500).await;
+        assert_eq!(second.semantic, "cached", "trimmed query shares the key");
+        assert_eq!(first.embedding, second.embedding);
+        assert_eq!(p.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Another model must not reuse the vector (dimensions differ).
+        let other = embed_query_with(&p, "model-b", "캐시 질문 lru-case", 500).await;
+        assert_eq!(other.semantic, "used");
+        assert_ne!(other.embedding, first.embedding);
+        assert_eq!(p.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

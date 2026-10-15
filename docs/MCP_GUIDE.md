@@ -256,7 +256,7 @@ curl -s -X POST http://127.0.0.1:47921/mcp \
 |---|---|---|
 | `danbi_briefing` | `project?` | 세션 시작용 요약 한 JSON: 오늘 daily 노트, 7일 활동(기록 수·최근 요약 6), 정리 제안 건수 + 상위 10건, 미확정 링크 제안. `project` 를 주면 그 프로젝트만 (스코프 서버면 기본값). 전체 약 4k자, 프로젝트 약 2.5k자 |
 | `danbi_context` | `query`, `limit?`, `max_chars?` | 질문 하나로 관련 문서의 해당 섹션 + `[[링크]]` 이웃을 글자 예산 안에서. **search → read 반복 대신 먼저** |
-| `danbi_search` | `query`, `limit?`, `project?` | BM25 + 한국어 n-gram, 임베딩 provider 가 있으면 RRF 하이브리드. `project` 로 한 프로젝트만 |
+| `danbi_search` | `query`, `limit?`, `project?`, `mode?` | BM25 + 한국어 n-gram, 임베딩 provider 가 있으면 RRF 하이브리드. `project` 로 한 프로젝트만. `mode`: `hybrid`(기본) · `keyword`(임베딩 호출 없이 BM25만) · `semantic`(벡터만). 결과는 `{hits, mode, semantic, note?, warning?}` — `semantic` 이 `timeout`/`error` 면 임베딩이 1.5초 안에 안 와 키워드 결과만 준 것 |
 | `danbi_read` | `project`, `domain`, `heading?`, `max_chars?`, `offset?` | 문서 본문. 첫 줄은 메타 주석 (`bytes · chars · modified · links_in`, 범위를 잘랐으면 다음 `offset`). `heading` 으로 섹션만 |
 | `danbi_related` | `project`, `domain`, `limit?` | 한 문서의 링크·백링크·내용상 가까운 문서·같은 주제 묶음 |
 | `danbi_recent` | `limit?`, `project?`, `exclude_daily?` | 최근 수정 문서 (하위 폴더 포함, daily 는 기본 제외) |
@@ -293,7 +293,8 @@ curl -s -X POST http://127.0.0.1:47921/mcp \
 - `not found: 보니/notes/auth-flow.md. 혹시 notes/auth.md? …` — 없는 문서. (예전엔 빈 문자열이 돌아와 "빈 문서"로 오해했음.) 새로 만들려면 `danbi_create_file`.
 - `heading not found: … 이 문서의 헤딩: …` — `danbi_read(heading)` 의 헤딩 오타.
 - `domain required (예: "notes/auth.md")` — 필수 인자 누락. 괄호 안이 형식 예시.
-- `warning: 의미 검색 결과에서 문서 N개가 빠졌어요 …` (검색 결과 뒤의 두 번째 content) — 임베딩 모델을 바꾼 뒤 전체 재색인을 안 한 상태. 키워드 검색엔 잡히니 결과는 쓰되, 설정 → AI 연동에서 재색인.
+- `warning: 의미 검색 결과에서 문서 N개가 빠졌어요 …` (`danbi_search` 는 결과 객체의 `warning` 키, `danbi_context` 도 같은 키) — 임베딩 모델을 바꾼 뒤 전체 재색인을 안 한 상태. 키워드 검색엔 잡히니 결과는 쓰되, 설정 → AI 연동에서 재색인.
+- `danbi_search` 의 `semantic: "timeout"` + `note` — 임베딩이 1.5초 안에 안 와서 키워드 결과만 준 것. 결과는 쓰되, 풀어 쓴 질문이면 잠시 후 `mode: "semantic"` 으로 한 번 더.
 
 ### 모든 쓰기 작업은 자동 git commit
 

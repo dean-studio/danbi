@@ -23,11 +23,12 @@
 
 use crate::error::{DanbiError, DanbiResult};
 use crate::ghost_links::{self, GhostStatus};
-use crate::links::{build_index, WikiLink};
+use crate::links::{build_index_cached_with, WikiLink};
 use crate::vault::{list_tree, PROJECTS_DIRNAME};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 // ---- Public types ----
 
@@ -109,7 +110,16 @@ pub struct GraphData {
 
 // ---- Entry point ----
 
+/// Uncached build. Callers on hot paths want `build_graph_cached`; this
+/// stays for one-off tools and as the reference the cache tests compare
+/// against.
+#[allow(dead_code)]
 pub fn build_graph(vault: &Path, project_filter: Option<&str>) -> DanbiResult<GraphData> {
+    let fp = crate::search::fingerprint_vault(vault)?;
+    build_graph_with(vault, project_filter, &fp)
+}
+
+fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &str) -> DanbiResult<GraphData> {
     let tree = list_tree(vault)?;
 
     // 1) Nodes
@@ -162,7 +172,7 @@ pub fn build_graph(vault: &Path, project_filter: Option<&str>) -> DanbiResult<Gr
     let mut edges: Vec<GraphEdge> = Vec::new();
     // Track confirmed pairs so ghost/soft layers don't duplicate them.
     let mut confirmed_pairs: HashSet<(String, String)> = HashSet::new();
-    let index = build_index(vault)?;
+    let index = build_index_cached_with(vault, fingerprint)?;
     for (src_key, targets) in &index.outgoing {
         if !node_ids.contains(src_key) {
             continue;
@@ -253,6 +263,100 @@ pub fn build_graph(vault: &Path, project_filter: Option<&str>) -> DanbiResult<Gr
     })
 }
 
+// ---- Caches (keyed by the vault's .md fingerprint) ----
+//
+// `danbi_related` used to run build_graph + build_index + list_tree on
+// every call (~250ms on a 1.5k-file vault); the sidebar's link index and
+// the graph view paid the same. Nothing here changes unless a file does,
+// so each result is kept until `search::fingerprint_vault` moves. Graph
+// entries also watch the project's ghost-links store, which is not a
+// `.md` and so is invisible to the fingerprint.
+
+type GraphCacheKey = (PathBuf, Option<String>);
+static GRAPH_CACHE: Mutex<Option<HashMap<GraphCacheKey, (String, Arc<GraphData>)>>> =
+    Mutex::new(None);
+static DOC_IDS_CACHE: Mutex<Option<(PathBuf, String, Arc<HashSet<String>>)>> = Mutex::new(None);
+
+/// (mtime, size) of every ghost-links.json the graph would read.
+fn ghost_stamp(vault: &Path, project_filter: Option<&str>) -> String {
+    let projects_root = vault.join(PROJECTS_DIRNAME);
+    let mut names: Vec<String> = match project_filter {
+        Some(p) => vec![p.to_string()],
+        None => std::fs::read_dir(&projects_root)
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| e.path().is_dir())
+                    .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+                    .filter(|n| !n.starts_with('.'))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    names.sort();
+    let mut out = String::new();
+    for name in names {
+        let path = projects_root.join(&name).join(".danbi").join("ghost-links.json");
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            out.push_str(&format!("{name}:{}:{mtime};", meta.len()));
+        }
+    }
+    out
+}
+
+pub fn build_graph_cached(vault: &Path, project_filter: Option<&str>) -> DanbiResult<Arc<GraphData>> {
+    let fp = crate::search::fingerprint_vault(vault)?;
+    build_graph_cached_with(vault, project_filter, &fp)
+}
+
+fn build_graph_cached_with(
+    vault: &Path,
+    project_filter: Option<&str>,
+    fingerprint: &str,
+) -> DanbiResult<Arc<GraphData>> {
+    let key: GraphCacheKey = (vault.to_path_buf(), project_filter.map(str::to_string));
+    let stamp = format!("{fingerprint}|{}", ghost_stamp(vault, project_filter));
+    if let Ok(guard) = GRAPH_CACHE.lock() {
+        if let Some((s, g)) = guard.as_ref().and_then(|m| m.get(&key)) {
+            if *s == stamp {
+                return Ok(g.clone());
+            }
+        }
+    }
+    let graph = Arc::new(build_graph_with(vault, project_filter, fingerprint)?);
+    if let Ok(mut guard) = GRAPH_CACHE.lock() {
+        guard
+            .get_or_insert_with(HashMap::new)
+            .insert(key, (stamp, graph.clone()));
+    }
+    Ok(graph)
+}
+
+pub fn existing_doc_ids_cached(vault: &Path) -> DanbiResult<Arc<HashSet<String>>> {
+    let fp = crate::search::fingerprint_vault(vault)?;
+    existing_doc_ids_cached_with(vault, &fp)
+}
+
+fn existing_doc_ids_cached_with(vault: &Path, fingerprint: &str) -> DanbiResult<Arc<HashSet<String>>> {
+    if let Ok(guard) = DOC_IDS_CACHE.lock() {
+        if let Some((v, fp, ids)) = guard.as_ref() {
+            if v == vault && fp == fingerprint {
+                return Ok(ids.clone());
+            }
+        }
+    }
+    let ids = Arc::new(existing_doc_ids(vault)?);
+    if let Ok(mut guard) = DOC_IDS_CACHE.lock() {
+        *guard = Some((vault.to_path_buf(), fingerprint.to_string(), ids.clone()));
+    }
+    Ok(ids)
+}
+
 // ---- Neighbourhood query (MCP `danbi_related`) ----
 
 #[derive(Debug, Serialize, Clone)]
@@ -314,7 +418,9 @@ pub fn related(
     limit: usize,
 ) -> DanbiResult<RelatedDocs> {
     let id = format!("{project}/{domain}");
-    let graph = build_graph(vault, Some(project))?;
+    // One stat walk serves all three caches below.
+    let fp = crate::search::fingerprint_vault(vault)?;
+    let graph = build_graph_cached_with(vault, Some(project), &fp)?;
     let Some(me) = graph.nodes.iter().find(|n| n.id == id) else {
         return Err(DanbiError::Config(format!(
             "document not found: {id}. 파일명은 danbi_list_projects(project=\"{project}\") 로 확인하세요 (하위 폴더면 notes/x.md 형태)."
@@ -324,8 +430,8 @@ pub fn related(
     // Only report links that resolve to a real file — guides full of
     // `[[example.md]]` placeholders would otherwise send agents to reads
     // that come back empty.
-    let existing = existing_doc_ids(vault)?;
-    let index = build_index(vault)?;
+    let existing = existing_doc_ids_cached_with(vault, &fp)?;
+    let index = build_index_cached_with(vault, &fp)?;
     let to_refs = |links: Option<&Vec<WikiLink>>| -> Vec<DocRef> {
         let mut seen: HashSet<String> = HashSet::new();
         links
@@ -904,6 +1010,88 @@ fn normalize_id(project: &str, raw: &str) -> String {
 mod tests {
     use super::*;
 
+    fn temp_vault(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "danbi-graph-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(PROJECTS_DIRNAME)).unwrap();
+        root
+    }
+
+    fn write(vault: &Path, rel: &str, body: &str) {
+        let path = vault.join(PROJECTS_DIRNAME).join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn graph_cache_refreshes_on_md_and_ghost_store_changes() {
+        let v = temp_vault("cache");
+        write(&v, "A/a.md", "# a\n[[b.md]]");
+        write(&v, "A/b.md", "# b");
+        let g1 = build_graph_cached(&v, Some("A")).unwrap();
+        assert_eq!(g1.nodes.len(), 2);
+        assert_eq!(g1.edges.iter().filter(|e| e.kind == "confirmed").count(), 1);
+        assert!(Arc::ptr_eq(&g1, &build_graph_cached(&v, Some("A")).unwrap()));
+
+        // A ghost-links.json is not a .md — the fingerprint can't see it,
+        // so the graph cache must stamp it separately.
+        write(&v, "A/c.md", "# c");
+        let g2 = build_graph_cached(&v, Some("A")).unwrap();
+        assert_eq!(g2.nodes.len(), 3);
+        let store = ghost_links::GhostStore {
+            links: vec![ghost_links::GhostLink {
+                id: "g1".into(),
+                source_domain: "A/a.md".into(),
+                target_domain: "A/c.md".into(),
+                reason: "test".into(),
+                status: GhostStatus::Pending,
+                created_at: 0,
+            }],
+            last_scan_at: None,
+        };
+        let ghost_path = v.join(PROJECTS_DIRNAME).join("A/.danbi/ghost-links.json");
+        std::fs::create_dir_all(ghost_path.parent().unwrap()).unwrap();
+        std::fs::write(&ghost_path, serde_json::to_string(&store).unwrap()).unwrap();
+        let g3 = build_graph_cached(&v, Some("A")).unwrap();
+        assert!(!Arc::ptr_eq(&g2, &g3));
+        assert_eq!(g3.edges.iter().filter(|e| e.kind == "ghost").count(), 1);
+
+        // Cached result equals an uncached build.
+        let fresh = build_graph(&v, Some("A")).unwrap();
+        assert_eq!(fresh.nodes.len(), g3.nodes.len());
+        assert_eq!(fresh.edges.len(), g3.edges.len());
+
+        // Project-scoped entries are independent: "B" is unaffected by "A".
+        write(&v, "B/x.md", "# x");
+        let gb = build_graph_cached(&v, Some("B")).unwrap();
+        assert_eq!(gb.nodes.len(), 1);
+        assert_eq!(build_graph_cached(&v, None).unwrap().nodes.len(), 4);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn existing_doc_ids_cache_tracks_adds_and_deletes() {
+        let v = temp_vault("ids");
+        write(&v, "A/a.md", "a");
+        write(&v, "A/notes/n.md", "n");
+        let ids = existing_doc_ids_cached(&v).unwrap();
+        assert!(ids.contains("A/a.md") && ids.contains("A/notes/n.md"));
+        assert!(Arc::ptr_eq(&ids, &existing_doc_ids_cached(&v).unwrap()));
+        std::fs::remove_file(v.join(PROJECTS_DIRNAME).join("A/notes/n.md")).unwrap();
+        write(&v, "A/z.md", "z");
+        let ids2 = existing_doc_ids_cached(&v).unwrap();
+        assert!(!ids2.contains("A/notes/n.md"));
+        assert!(ids2.contains("A/z.md"));
+        assert_eq!(*ids2, existing_doc_ids(&v).unwrap());
+        std::fs::remove_dir_all(v).ok();
+    }
+
     #[test]
     fn related_lists_links_backlinks_and_skips_dangling() {
         let unique = format!(
@@ -936,3 +1124,4 @@ mod tests {
         std::fs::remove_dir_all(v).ok();
     }
 }
+
