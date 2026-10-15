@@ -741,8 +741,8 @@ fn server_instructions(scope: ToolScope, scoped_project: Option<&str>) -> String
     }
     if write {
         lines.push(match scoped_project {
-            Some(p) => format!("기록: 결정·버그 원인·TODO 는 즉시 danbi_log(content) — 자동으로 {p} 의 오늘 daily 에 `#### 시각 · 호출자` 머리말과 함께 들어갑니다. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결."),
-            None => "기록: 결정·버그 원인·TODO 는 즉시 danbi_log(project, content) — 오늘 daily 에 `#### 시각 · 호출자` 머리말과 함께. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결.".to_string(),
+            Some(p) => format!("기록: 결정·버그 원인·TODO 는 즉시 danbi_log(content) — 자동으로 {p} 의 오늘 daily 에 `_시각 · 호출자_` 줄과 함께 들어갑니다. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결."),
+            None => "기록: 결정·버그 원인·TODO 는 즉시 danbi_log(project, content) — 오늘 daily 에 `_시각 · 호출자_` 줄과 함께. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결.".to_string(),
         });
         lines.push("특정 문서 갱신은 danbi_append(누적) · danbi_replace_section(섹션 교체) · danbi_upsert_item(리스트 항목). 같은 내용을 두 번 보내지 말 것 — 응답에 deduped:true 또는 warning 이 오면 이미 저장된 것이니 재시도 금지.".to_string());
     } else {
@@ -1050,7 +1050,7 @@ fn tool_catalog() -> Vec<Value> {
                 "properties": {
                     "project": { "type": "string" },
                     "content": { "type": "string", "description": "추가할 markdown. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결" },
-                    "stamp": { "type": "boolean", "default": true, "description": "false 면 자동 머리말(`#### HH:MM · client`)을 붙이지 않음" }
+                    "stamp": { "type": "boolean", "default": true, "description": "false 면 자동 시각·호출자 줄(`_HH:MM · client_`)을 붙이지 않음" }
                 },
                 "required": ["project", "content"],
                 "additionalProperties": false
@@ -1569,7 +1569,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
             let stamp = args.get("stamp").and_then(|v| v.as_bool()).unwrap_or(true);
             let stamp_client = args.get("_client").and_then(|v| v.as_str());
             let entry = if stamp {
-                format!("{}\n{body}", log_stamp(Local::now().format("%H:%M").to_string(), stamp_client))
+                stamp_entry(body, &log_stamp(Local::now().format("%H:%M").to_string(), stamp_client))
             } else {
                 body.to_string()
             };
@@ -2423,12 +2423,26 @@ fn write_result(mut body: Value, commit: Option<String>, warning: Option<String>
     body.to_string()
 }
 
-/// `#### HH:MM · <client>` heading for a `danbi_log` entry, so a daily
-/// note several agents wrote stays readable for a human.
+/// `_HH:MM · <client>_` line for a `danbi_log` entry, so a daily note
+/// several agents wrote stays readable for a human. A plain line, not a
+/// heading: a heading would split every entry in two for the Auto-Journal
+/// parser and fall inside the previous `###` section.
 fn log_stamp(hhmm: String, client: Option<&str>) -> String {
     match client.filter(|c| !c.is_empty() && *c != "unknown") {
-        Some(c) => format!("#### {hhmm} · {}", c.replace('_', "-")),
-        None => format!("#### {hhmm}"),
+        Some(c) => format!("_{hhmm} · {}_", c.replace('_', "-")),
+        None => format!("_{hhmm}_"),
+    }
+}
+
+/// Puts the stamp right under the entry's first heading (so it belongs to
+/// that entry), or on top when the entry has no heading.
+fn stamp_entry(body: &str, stamp: &str) -> String {
+    match body.split_once('\n') {
+        Some((first, rest)) if first.trim_start().starts_with('#') => {
+            format!("{first}\n{stamp}\n{rest}")
+        }
+        None if body.trim_start().starts_with('#') => format!("{body}\n{stamp}"),
+        _ => format!("{stamp}\n{body}"),
     }
 }
 
@@ -2436,8 +2450,27 @@ fn log_stamp(hhmm: String, client: Option<&str>) -> String {
 /// too generic to treat a repeat as a retry.
 const LOG_DEDUPE_MIN_CHARS: usize = 8;
 
+/// A retry, not a new record: the note's last entry is exactly this body
+/// (stamp lines ignored). A repeated line further up — a heartbeat logged
+/// twice a day, a sentence quoted from an earlier entry — is kept.
 fn log_is_duplicate(current: &str, body: &str) -> bool {
-    body.chars().count() >= LOG_DEDUPE_MIN_CHARS && current.contains(body)
+    let strip = |s: &str| -> String {
+        s.lines()
+            .filter(|l| !daily::is_log_stamp(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    };
+    let body = strip(body);
+    if body.chars().count() < LOG_DEDUPE_MIN_CHARS {
+        return false;
+    }
+    let current = strip(current);
+    match current.strip_suffix(body.as_str()) {
+        Some(before) => before.is_empty() || before.ends_with('\n'),
+        None => false,
+    }
 }
 
 fn string_arg(args: &Value, key: &str) -> Result<String, DanbiError> {
@@ -2627,8 +2660,9 @@ mod tests {
         assert!(first["commit"].is_string(), "{first}");
         assert!(first.get("warning").is_none());
         let note = today_note(&vault, "보니");
-        assert!(note.contains("· claude-code\n### 결정\n- JWT refresh 7일"), "{note}");
-        assert!(note.lines().any(|l| l.starts_with("#### ") && l.contains(" · claude-code")));
+        assert!(note.contains("### 결정\n_"), "{note}");
+        assert!(note.contains(" · claude-code_\n- JWT refresh 7일"), "{note}");
+        assert!(!note.contains("#### "), "stamp is not a heading: {note}");
 
         let again = log(&vault, "보니", "  ### 결정\n- JWT refresh 7일\n");
         assert_eq!(again["deduped"], true);
@@ -2651,7 +2685,31 @@ mod tests {
         assert_eq!(v["stamped"], false);
         let note = today_note(&vault, "상식이");
         assert!(note.ends_with("\nplain body here\n"), "{note}");
-        assert!(!note.contains("#### "));
+        assert!(!note.contains(" · claude-code_"));
+    }
+
+    #[test]
+    fn log_dedupe_only_catches_an_immediate_identical_retry() {
+        let vault = temp_vault("dedupe");
+        log(&vault, "보니", "- JWT refresh 7일로 정함. 이유: 모바일");
+        // A sentence from the previous entry is a new record, not a retry.
+        assert!(log(&vault, "보니", "JWT refresh 7일로 정함").get("deduped").is_none());
+        log(&vault, "보니", "### 하트비트\n- 정상 동작");
+        log(&vault, "보니", "### 다른 기록\n- 중간에 들어온 것");
+        // Same heartbeat later in the day, with entries in between → kept.
+        assert!(log(&vault, "보니", "### 하트비트\n- 정상 동작").get("deduped").is_none());
+        assert_eq!(today_note(&vault, "보니").matches("### 하트비트").count(), 2);
+    }
+
+    #[test]
+    fn stamped_entries_parse_as_one_journal_entry_each() {
+        let vault = temp_vault("stamp-journal");
+        log(&vault, "보니", "### 결정: JWT 7일\n- 근거");
+        log(&vault, "보니", "### 버그 원인\n- CORS preflight");
+        let note = today_note(&vault, "보니");
+        let entries = crate::journal_view::parse_entries("2026-10-15", &note);
+        assert_eq!(entries.len(), 2, "{note}");
+        assert!(!entries[0].preview.contains("claude-code"), "{:?}", entries[0].preview);
     }
 
     #[test]
@@ -2673,9 +2731,17 @@ mod tests {
 
     #[test]
     fn log_stamp_formats() {
-        assert_eq!(log_stamp("14:32".into(), Some("claude_code")), "#### 14:32 · claude-code");
-        assert_eq!(log_stamp("14:32".into(), Some("unknown")), "#### 14:32");
-        assert_eq!(log_stamp("14:32".into(), None), "#### 14:32");
+        assert_eq!(log_stamp("14:32".into(), Some("claude_code")), "_14:32 · claude-code_");
+        assert_eq!(log_stamp("14:32".into(), Some("unknown")), "_14:32_");
+        assert_eq!(log_stamp("14:32".into(), None), "_14:32_");
+        assert_eq!(stamp_entry("### a\nb", "_s_"), "### a\n_s_\nb");
+        assert_eq!(stamp_entry("### a", "_s_"), "### a\n_s_");
+        assert_eq!(stamp_entry("plain", "_s_"), "_s_\nplain");
+        assert!(crate::daily::is_log_stamp("_14:32 · claude-code_"));
+        assert!(crate::daily::is_log_stamp("#### 14:32 · codex"));
+        assert!(crate::daily::is_log_stamp("_14:32_"));
+        assert!(!crate::daily::is_log_stamp("_강조한 문장_"));
+        assert!(!crate::daily::is_log_stamp("#### 결정"));
     }
 
     #[test]

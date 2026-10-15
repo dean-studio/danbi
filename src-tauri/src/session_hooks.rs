@@ -590,7 +590,7 @@ async fn session_end_inner(project_hint: &str, payload: &Value) -> DanbiResult<(
             bullets.join("\n"),
         );
         // 본문에 이미 '### 세션 자동 기록 · HH:MM' 머리말이 있어 danbi_log 의
-        // 자동 머리말('#### HH:MM · danbi')은 끈다 — 두 줄 중복 방지.
+        // 자동 시각·호출자 줄('_HH:MM · danbi_')은 끈다 — 두 줄 중복 방지.
         crate::mcp::dispatch(
             "danbi_log",
             json!({ "project": project, "content": content, "_client": crate::vcs::CLIENT_DANBI, "stamp": false }),

@@ -39,7 +39,7 @@ MCP endpoint: `{{MCP_URL}}` (이미 등록돼 있으면 무시. 안 등록돼 �
 - `danbi_list_projects` — 프로젝트 목록 (기본 요약형, `project` 를 주면 그 프로젝트의 파일 트리)
 
 **쓰기** (현재 cwd 의 프로젝트로 자동 clamp — 다른 프로젝트로 잘못 쓸 위험 0):
-- `danbi_log` — 오늘 daily 노트에 append. project 파라미터 **생략**. `#### 시각 · 호출자` 머리말은 자동, 같은 날 같은 본문은 `deduped`. 응답에 `warning` 이 오면 저장은 된 것 — 재시도 금지.
+- `danbi_log` — 오늘 daily 노트에 append. project 파라미터 **생략**. `_시각 · 호출자_` 줄은 자동(첫 제목 바로 아래), 직전 기록과 같은 본문은 `deduped`. 응답에 `warning` 이 오면 저장은 된 것 — 재시도 금지.
 - `danbi_append` — 임의 도메인 파일에 append (없으면 자동 생성). project 파라미터 **생략**.
 - `danbi_create_folder` — 1~2단계 sub-folder 생성. 카테고리·시기별 누적용.
 - `danbi_create_file` — 폴더+파일+내용을 한 번에 보장. 매일 통계 자동 기록 같은 자동화에 적합.

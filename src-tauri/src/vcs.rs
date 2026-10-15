@@ -841,8 +841,8 @@ fn preview_line(old: Option<&str>, new: Option<&str>) -> Option<String> {
         text.lines()
             .map(str::trim)
             .filter(|l| !l.is_empty() && !skip.contains(l))
-            // The automatic `#### HH:MM · client` stamp says nothing.
-            .find(|l| !(l.starts_with("#### ") && l[5..].chars().take(5).filter(|c| c.is_ascii_digit() || *c == ':').count() == 5))
+            // The automatic `_HH:MM · client_` stamp says nothing.
+            .find(|l| !crate::daily::is_log_stamp(l))
             .map(|l| {
                 let mut out: String = l.chars().take(PREVIEW_CHARS).collect();
                 if l.chars().count() > PREVIEW_CHARS {

@@ -269,7 +269,7 @@ curl -s -X POST http://127.0.0.1:47921/mcp \
 
 | 도구 | 파라미터 | 용도 |
 |---|---|---|
-| `danbi_log` | `project`, `content`, `stamp?` | 오늘 `daily/YYYY-MM-DD.md` 에 append. `#### HH:MM · claude-code` 머리말 자동 (`stamp:false` 로 끔). 같은 날 같은 본문은 다시 쓰지 않고 `deduped:true` |
+| `danbi_log` | `project`, `content`, `stamp?` | 오늘 `daily/YYYY-MM-DD.md` 에 append. 첫 제목 바로 아래에 `_HH:MM · claude-code_` 줄 자동 (`stamp:false` 로 끔). 직전 기록과 본문이 같으면(재시도) 다시 쓰지 않고 `deduped:true` |
 | `danbi_append` | `project`, `domain`, `content` | 파일 끝에 append. 없으면 생성 |
 | `danbi_create_file` | `project`, `domain`, `content?` | 폴더+파일+내용을 한 번에 보장 (idempotent) |
 | `danbi_create_folder` | `project`, `folder` | 1~2단계 sub-folder 생성 |
