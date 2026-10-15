@@ -28,7 +28,76 @@ pub fn write_guard() -> MutexGuard<'static, ()> {
 /// Pre-edit snapshots carry this marker; they exist only so undo has a
 /// known state and should never count as user activity.
 pub fn is_pre_snapshot(summary: &str) -> bool {
-    summary.contains("(pre)")
+    if summary.contains("(pre)") {
+        return true;
+    }
+    // Older writers spelled it differently: `quick-capture pre · …`,
+    // `capture pre · …`, `pre-edit snapshot · …`, `pre-compound · …`.
+    let head = summary_head(summary);
+    head.ends_with(" pre") || head.starts_with("pre-")
+}
+
+/// First `·`-separated segment after the `danbi:` prefix — the verb.
+fn summary_head(summary: &str) -> &str {
+    let body = summary
+        .trim()
+        .strip_prefix("danbi:")
+        .map(str::trim)
+        .unwrap_or(summary);
+    body.split('·').next().unwrap_or("").trim()
+}
+
+// ---------- Origin token ----------------------------------------------------
+//
+// Every writer appends ` [client]` to its commit summary so the activity
+// feed can say who wrote: a UA bucket for agents (`claude-code`, `codex`,
+// `cursor`), `human` for the app's own editor/popover/undo, `danbi` for
+// automated jobs. The token sits last so the older `·`-split parsers and
+// the `(pre)` check keep working on the part before it.
+
+pub const CLIENT_HUMAN: &str = "human";
+pub const CLIENT_DANBI: &str = "danbi";
+/// Agent whose client could not be identified (REST from curl, old UA).
+pub const CLIENT_AGENT: &str = "agent";
+
+/// Normalises a `usage::classify_user_agent` bucket into a commit token.
+pub fn client_token(ua_bucket: &str) -> String {
+    match ua_bucket {
+        "" | "unknown" => CLIENT_AGENT.to_string(),
+        other => other.replace('_', "-"),
+    }
+}
+
+/// `msg` with the origin token appended.
+pub fn with_client(msg: &str, client: &str) -> String {
+    let client = client.trim();
+    if client.is_empty() || msg.ends_with(&format!(" [{client}]")) {
+        return msg.to_string();
+    }
+    format!("{msg} [{client}]")
+}
+
+/// Splits a summary into (summary without token, token).
+pub fn split_client(summary: &str) -> (&str, Option<&str>) {
+    let s = summary.trim_end();
+    if let Some(open) = s.rfind(" [") {
+        if s.ends_with(']') {
+            let token = &s[open + 2..s.len() - 1];
+            let ok = !token.is_empty()
+                && token
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            if ok {
+                return (&s[..open], Some(token));
+            }
+        }
+    }
+    (s, None)
+}
+
+/// `snapshot` with the origin token on the message.
+pub fn snapshot_as(vault: &Path, msg: &str, client: &str) -> DanbiResult<Option<String>> {
+    snapshot(vault, &with_client(msg, client))
 }
 
 fn open_or_init(path: &Path) -> DanbiResult<Repository> {
@@ -467,6 +536,7 @@ pub fn doc_history(
 ///   `danbi: mcp append · <project>/<domain>`
 ///   `danbi: <op_label> · <project>/<domain> · <summary>`  (UI edits)
 fn classify_commit_summary(s: &str) -> (String, Option<String>, Option<String>) {
+    let (s, _client) = split_client(s);
     // Tokens after "danbi:" prefix.
     let body = s
         .trim()
@@ -599,12 +669,363 @@ pub fn undo_last(vault: &Path) -> DanbiResult<Option<String>> {
     if restored == 0 {
         return Ok(None);
     }
-    let msg = format!(
-        "{UNDO_PREFIX}{} · {}",
-        target.id(),
-        target.summary().unwrap_or("")
+    let msg = with_client(
+        &format!("{UNDO_PREFIX}{} · {}", target.id(), target.summary().unwrap_or("")),
+        CLIENT_HUMAN,
     );
     Ok(commit_all(&repo, &msg)?.map(|o| o.to_string()))
+}
+
+// ---------- Activity feed ----------------------------------------------------
+//
+// One row per real commit (pre-edit snapshots skipped), newest first, with
+// who/what/where parsed from the summary and the touched paths from the
+// tree diff. Cursor pagination by timestamp; the walk itself is bounded so
+// a narrow project scope on a long history still returns quickly.
+
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct ActivityEntry {
+    pub id: String,
+    pub ts: i64,
+    /// Origin token: `claude-code` / `codex` / `cursor` / `agent` /
+    /// `human` / `danbi`.
+    pub client: String,
+    /// `agent` | `human` | `danbi`.
+    pub actor: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// Normalised verb: `log`, `append`, `replace_section`, `upsert_item`,
+    /// `save`, `quick_capture`, `undo`, `restore`, `revert`, `migration`…
+    pub op: String,
+    /// Section heading / item key / original summary, when the op has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// First line this commit added to the document (≤ 60 chars).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// Repo-relative paths the commit touched (`Projects/<p>/<d>`).
+    pub files: Vec<String>,
+}
+
+const FEED_MAX_LIMIT: usize = 200;
+/// Commits inspected per call before giving up on filling `limit`.
+const FEED_WALK_CAP: usize = 5_000;
+const PREVIEW_CHARS: usize = 60;
+
+/// Who a legacy (token-less) commit came from, by its verb.
+fn actor_for(client: &str, head: &str) -> &'static str {
+    match client {
+        CLIENT_HUMAN => "human",
+        CLIENT_DANBI => "danbi",
+        CLIENT_AGENT => "agent",
+        "" => {
+            if head.starts_with("mcp ") || head.starts_with("rest ") {
+                "agent"
+            } else if head.starts_with("compound")
+                || head.starts_with("weekly")
+                || head.starts_with("initialize")
+                || head.starts_with("스냅샷")
+            {
+                "danbi"
+            } else {
+                "human"
+            }
+        }
+        _ => "agent",
+    }
+}
+
+/// Verb for the feed: the classified op, with the few special commits
+/// named explicitly.
+fn feed_op(summary: &str, head: &str) -> String {
+    if summary.starts_with(UNDO_PREFIX) {
+        return "undo".into();
+    }
+    if head.starts_with("스냅샷 범위") {
+        return "migration".into();
+    }
+    if head == "initialize vault" {
+        return "init".into();
+    }
+    let (kind, _, _) = classify_commit_summary(summary);
+    kind.split_whitespace()
+        .next()
+        .unwrap_or("edit")
+        .replace('-', "_")
+}
+
+/// `<project>/<domain>` out of the summary's second segment.
+fn doc_from_summary(summary: &str) -> Option<(String, String)> {
+    let (s, _) = split_client(summary);
+    let body = s.trim().strip_prefix("danbi:").map(str::trim).unwrap_or(s);
+    let seg = body.split('·').nth(1)?.trim();
+    let (p, d) = seg.split_once('/')?;
+    if p.is_empty() || d.is_empty() || !d.ends_with(".md") {
+        return None;
+    }
+    Some((p.to_string(), d.to_string()))
+}
+
+fn preview_line(old: Option<&str>, new: Option<&str>) -> Option<String> {
+    let old_lines: std::collections::HashSet<&str> =
+        old.map(|o| o.lines().map(str::trim).collect()).unwrap_or_default();
+    let pick = |text: &str, skip: &std::collections::HashSet<&str>| -> Option<String> {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !skip.contains(l))
+            // The automatic `#### HH:MM · client` stamp says nothing.
+            .find(|l| !(l.starts_with("#### ") && l[5..].chars().take(5).filter(|c| c.is_ascii_digit() || *c == ':').count() == 5))
+            .map(|l| {
+                let mut out: String = l.chars().take(PREVIEW_CHARS).collect();
+                if l.chars().count() > PREVIEW_CHARS {
+                    out.push('…');
+                }
+                out
+            })
+    };
+    match (old, new) {
+        (_, Some(n)) => pick(n, &old_lines).or_else(|| {
+            // Nothing added (pure removal / revert): show what went away.
+            let new_lines: std::collections::HashSet<&str> =
+                n.lines().map(str::trim).collect();
+            old.and_then(|o| pick(o, &new_lines))
+        }),
+        (Some(o), None) => pick(o, &std::collections::HashSet::new()),
+        (None, None) => None,
+    }
+}
+
+pub fn activity_feed(
+    vault: &Path,
+    scope_project: Option<&str>,
+    before: Option<i64>,
+    limit: usize,
+) -> DanbiResult<Vec<ActivityEntry>> {
+    let limit = limit.clamp(1, FEED_MAX_LIMIT);
+    let mut out = Vec::new();
+    let repo = match Repository::open(vault) {
+        Ok(r) => r,
+        Err(_) => return Ok(out),
+    };
+    let mut revwalk = match repo.revwalk() {
+        Ok(r) => r,
+        Err(_) => return Ok(out),
+    };
+    if revwalk.push_head().is_err() {
+        return Ok(out);
+    }
+    let scope_prefix = scope_project.map(|p| format!("Projects/{p}/"));
+
+    for (walked, oid) in revwalk.flatten().enumerate() {
+        if out.len() >= limit || walked >= FEED_WALK_CAP {
+            break;
+        }
+        let Ok(commit) = repo.find_commit(oid) else { continue; };
+        let ts = commit.time().seconds();
+        if before.is_some_and(|b| ts >= b) {
+            continue;
+        }
+        let summary = commit.summary().unwrap_or("").to_string();
+        if is_pre_snapshot(&summary) {
+            continue;
+        }
+        // Scoped walk: the summary names the document for every writer
+        // path, so skip other projects before paying for a tree diff.
+        if let (Some(scope), Some((p, _))) = (scope_project, doc_from_summary(&summary)) {
+            if p != scope {
+                continue;
+            }
+        }
+        let Ok(tree) = commit.tree() else { continue; };
+        let parent = commit.parent(0).ok();
+        let parent_tree = parent.as_ref().and_then(|p| p.tree().ok());
+        let Ok(diff) = repo.diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), None) else {
+            continue;
+        };
+        let mut files: Vec<String> = diff
+            .deltas()
+            .filter_map(|d| d.new_file().path().or_else(|| d.old_file().path()))
+            .map(|p| p.to_string_lossy().to_string())
+            .filter(|p| p.starts_with("Projects/"))
+            .collect();
+        files.sort();
+        if let Some(prefix) = scope_prefix.as_deref() {
+            if !files.iter().any(|f| f.starts_with(prefix)) {
+                continue;
+            }
+        }
+
+        let (bare, token) = split_client(&summary);
+        let head = summary_head(bare).to_string();
+        let client = token.unwrap_or("").to_string();
+        let actor = actor_for(&client, &head).to_string();
+        let client = if client.is_empty() {
+            if actor == "agent" { CLIENT_AGENT } else if actor == "danbi" { CLIENT_DANBI } else { CLIENT_HUMAN }.to_string()
+        } else {
+            client
+        };
+        let op = feed_op(bare, &head);
+        let (_, _, target) = classify_commit_summary(bare);
+        let target = if op == "undo" {
+            bare.strip_prefix(UNDO_PREFIX).and_then(|r| r.split_once(" · ")).map(|(_, orig)| orig.to_string())
+        } else {
+            target
+        };
+
+        // The document this row is about: from the summary, else the first
+        // in-scope markdown file the commit touched.
+        let doc = doc_from_summary(bare).or_else(|| {
+            files
+                .iter()
+                .filter(|f| scope_prefix.as_deref().map(|p| f.starts_with(p)).unwrap_or(true))
+                .find(|f| f.ends_with(".md"))
+                .and_then(|f| {
+                    let rest = f.strip_prefix("Projects/")?;
+                    let (p, d) = rest.split_once('/')?;
+                    Some((p.to_string(), d.to_string()))
+                })
+        });
+        let preview = doc.as_ref().and_then(|(p, d)| {
+            let rel = format!("Projects/{p}/{d}");
+            let new = blob_text(&repo, &tree, &rel).ok().flatten();
+            let old = parent_tree
+                .as_ref()
+                .and_then(|t| blob_text(&repo, t, &rel).ok().flatten());
+            preview_line(old.as_deref(), new.as_deref())
+        });
+
+        out.push(ActivityEntry {
+            id: commit.id().to_string(),
+            ts,
+            client,
+            actor,
+            project: doc.as_ref().map(|(p, _)| p.clone()),
+            domain: doc.as_ref().map(|(_, d)| d.clone()),
+            op,
+            target,
+            preview,
+            files,
+        });
+    }
+    Ok(out)
+}
+
+// ---------- Single-change revert ---------------------------------------------
+
+#[derive(Debug, serde::Serialize, Clone)]
+pub struct RevertResult {
+    /// False when later commits touched the file and `force` was not set —
+    /// nothing was written; call again with `force` to proceed anyway.
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// Commits after `commit` that also changed the file.
+    pub later_commits: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// Undoes what one commit did to one file: the file goes back to that
+/// commit's parent version (or is removed if the commit created it) and
+/// the result is a new commit — nothing else in the vault moves. When
+/// newer commits changed the same file the caller is warned; without
+/// `force` the revert is not applied.
+pub fn revert_doc_change(
+    vault: &Path,
+    commit: &str,
+    rel_path: &str,
+    force: bool,
+) -> DanbiResult<RevertResult> {
+    let rel = rel_path.trim_matches('/');
+    if !rel.starts_with("Projects/") || rel.split('/').any(|s| s == "..") {
+        return Err(DanbiError::Config(format!(
+            "path 는 Projects/<프로젝트>/<파일> 형식이어야 해요 (받은 값: {rel_path})"
+        )));
+    }
+    let _guard = write_guard();
+    let repo = Repository::open(vault)
+        .map_err(|e| DanbiError::Other(format!("git open: {e}")))?;
+    let target = resolve_commit(&repo, commit)?;
+    let target_tree = target
+        .tree()
+        .map_err(|e| DanbiError::Other(format!("git tree: {e}")))?;
+    let parent_tree = match target.parent(0) {
+        Ok(p) => Some(p.tree().map_err(|e| DanbiError::Other(format!("git tree: {e}")))?),
+        Err(_) => None,
+    };
+    let before = match parent_tree.as_ref() {
+        Some(t) => blob_text(&repo, t, rel)?,
+        None => None,
+    };
+    let after = blob_text(&repo, &target_tree, rel)?;
+    if before.as_deref() == after.as_deref() {
+        return Err(DanbiError::Config(format!(
+            "커밋 {} 은 {rel} 을 바꾸지 않았어요.",
+            &target.id().to_string()[..7]
+        )));
+    }
+
+    // Newer commits that touched the same file.
+    let mut later_commits = 0usize;
+    if let Ok(mut walk) = repo.revwalk() {
+        if walk.push_head().is_ok() {
+            for oid in walk.flatten() {
+                if oid == target.id() {
+                    break;
+                }
+                let Ok(c) = repo.find_commit(oid) else { continue; };
+                let Ok(t) = c.tree() else { continue; };
+                let pt = c.parent(0).ok().and_then(|p| p.tree().ok());
+                let a = pt.as_ref().and_then(|t| t.get_path(Path::new(rel)).ok()).map(|e| e.id());
+                let b = t.get_path(Path::new(rel)).ok().map(|e| e.id());
+                if a != b {
+                    later_commits += 1;
+                }
+            }
+        }
+    }
+    let warning = (later_commits > 0).then(|| {
+        format!(
+            "그 뒤에 이 문서를 바꾼 기록이 {later_commits}건 더 있어요 — 되돌리면 그 변경도 함께 사라질 수 있어요."
+        )
+    });
+    if later_commits > 0 && !force {
+        return Ok(RevertResult {
+            applied: false,
+            commit: None,
+            later_commits,
+            warning,
+        });
+    }
+
+    let short7: String = target.id().to_string().chars().take(7).collect();
+    drop(target_tree);
+    drop(parent_tree);
+    drop(target);
+    drop(repo);
+    let abs = vault.join(rel);
+    match before {
+        Some(content) => {
+            if let Some(dir) = abs.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&abs, content)?;
+        }
+        None => {
+            if abs.exists() {
+                std::fs::remove_file(&abs)?;
+            }
+        }
+    }
+    let commit = snapshot_as(vault, &format!("danbi: revert · {short7} · {rel}"), CLIENT_HUMAN)?;
+    Ok(RevertResult {
+        applied: true,
+        commit,
+        later_commits,
+        warning,
+    })
 }
 
 #[cfg(test)]
@@ -715,7 +1136,7 @@ mod tests {
         let head = recent_commits(&vault, 1).unwrap().remove(0);
         assert_eq!(head.id, undo1);
         assert!(head.summary.starts_with("danbi: undo · "));
-        assert!(head.summary.ends_with("· danbi: c2"));
+        assert!(head.summary.ends_with("· danbi: c2 [human]"), "{}", head.summary);
 
         // Second undo walks further back (reverts c1), not the undo itself.
         undo_last(&vault).unwrap().expect("second undo");
@@ -772,6 +1193,147 @@ mod tests {
             h.join().unwrap();
         }
         assert_eq!(overlap.load(Ordering::SeqCst), 0);
+    }
+
+    // ---------- origin token · activity feed · revert ----------
+
+    #[test]
+    fn client_token_round_trips_and_parsers_ignore_it() {
+        assert_eq!(client_token("claude_code"), "claude-code");
+        assert_eq!(client_token("unknown"), CLIENT_AGENT);
+        assert_eq!(client_token(""), CLIENT_AGENT);
+        let msg = with_client("danbi: mcp log · p/daily/2026-10-15.md", "claude-code");
+        assert_eq!(msg, "danbi: mcp log · p/daily/2026-10-15.md [claude-code]");
+        assert_eq!(with_client(&msg, "claude-code"), msg, "no double token");
+        assert_eq!(split_client(&msg), ("danbi: mcp log · p/daily/2026-10-15.md", Some("claude-code")));
+        assert_eq!(split_client("danbi: mcp upsert_item · p/a.md · add · [#abc] x"), ("danbi: mcp upsert_item · p/a.md · add · [#abc] x", None));
+        assert_eq!(split_client("danbi: x · p/a.md · note [draft 2]"), ("danbi: x · p/a.md · note [draft 2]", None));
+        let (op, mode, target) = classify_commit_summary("danbi: mcp upsert_item · p/a.md · update · key1 [codex]");
+        assert_eq!((op.as_str(), mode.as_deref(), target.as_deref()), ("upsert_item", Some("update"), Some("key1")));
+        assert!(is_pre_snapshot("danbi: mcp log · p/a.md (pre) [codex]"));
+        for legacy in ["danbi: quick-capture pre · p/a.md", "danbi: capture pre · p/a.md", "danbi: pre-edit snapshot · p/a.md", "danbi: pre-compound · p/a.md", "danbi: pre-ghost-accept · p"] {
+            assert!(is_pre_snapshot(legacy), "{legacy}");
+        }
+        assert!(!is_pre_snapshot("danbi: compound · p/a.md · x"));
+        assert!(!is_pre_snapshot("danbi: mcp append · p/prepare.md"));
+    }
+
+    #[test]
+    fn preview_skips_stamp_and_unchanged_lines() {
+        let old = "# day\n\n## 결정\n- a\n";
+        let new = "# day\n\n## 결정\n- a\n\n#### 14:32 · claude-code\n### 완료: MCP 그래프 공개\n- 상세\n";
+        assert_eq!(preview_line(Some(old), Some(new)).as_deref(), Some("### 완료: MCP 그래프 공개"));
+        assert_eq!(preview_line(None, Some("# new doc\n")).as_deref(), Some("# new doc"));
+        // Pure removal falls back to what disappeared.
+        assert_eq!(preview_line(Some("- gone\n- kept\n"), Some("- kept\n")).as_deref(), Some("- gone"));
+        let long = "x".repeat(80);
+        assert_eq!(preview_line(None, Some(&long)).unwrap().chars().count(), PREVIEW_CHARS + 1);
+    }
+
+    #[test]
+    fn activity_feed_rows_carry_actor_op_preview_and_paginate() {
+        let vault = temp_vault("feed");
+        std::fs::create_dir_all(vault.join("Projects/q")).unwrap();
+        ensure_repo(&vault).unwrap();
+        write(&vault, "Projects/p/daily/d.md", "# d\n");
+        snapshot(&vault, "danbi: mcp log · p/daily/d.md (pre)").unwrap();
+        write(&vault, "Projects/p/daily/d.md", "# d\n\n#### 10:00 · claude-code\n### 결정 A\n");
+        let c1 = snapshot_as(&vault, "danbi: mcp log · p/daily/d.md", "claude-code").unwrap().unwrap();
+        write(&vault, "Projects/q/notes/n.md", "## API\n- v2\n");
+        snapshot(&vault, "danbi: mcp replace_section · q/notes/n.md · ## API").unwrap();
+        write(&vault, "Projects/p/ui.md", "saved\n");
+        snapshot_as(&vault, "danbi: save · p/ui.md", CLIENT_HUMAN).unwrap();
+        write(&vault, "Projects/p/ui.md", "compounded\n");
+        snapshot_as(&vault, "danbi: compound · p/ui.md · 요약", CLIENT_DANBI).unwrap();
+        undo_last(&vault).unwrap().unwrap();
+
+        let rows = activity_feed(&vault, None, None, 50).unwrap();
+        let ops: Vec<&str> = rows.iter().map(|r| r.op.as_str()).collect();
+        assert_eq!(ops, vec!["undo", "compound", "save", "replace_section", "log", "init"], "{ops:?}");
+        assert!(rows.iter().all(|r| !r.op.contains("pre")));
+
+        let undo = &rows[0];
+        assert_eq!((undo.actor.as_str(), undo.client.as_str()), ("human", "human"));
+        assert_eq!(undo.target.as_deref(), Some("danbi: compound · p/ui.md · 요약 [danbi]"));
+        assert_eq!(undo.preview.as_deref(), Some("saved"));
+        assert_eq!(rows[1].actor, "danbi");
+        assert_eq!(rows[2].actor, "human");
+        assert_eq!(rows[2].domain.as_deref(), Some("ui.md"));
+        let legacy_mcp = &rows[3];
+        assert_eq!((legacy_mcp.actor.as_str(), legacy_mcp.client.as_str()), ("agent", CLIENT_AGENT));
+        assert_eq!(legacy_mcp.target.as_deref(), Some("## API"));
+        assert_eq!(legacy_mcp.files, vec!["Projects/q/notes/n.md"]);
+        let log = &rows[4];
+        assert_eq!(log.id, c1);
+        assert_eq!((log.client.as_str(), log.project.as_deref(), log.domain.as_deref()), ("claude-code", Some("p"), Some("daily/d.md")));
+        assert_eq!(log.preview.as_deref(), Some("### 결정 A"), "stamp line skipped");
+        assert_eq!(rows[5].actor, "danbi");
+
+        // Scope + cursor.
+        let q = activity_feed(&vault, Some("q"), None, 50).unwrap();
+        assert_eq!(q.len(), 1);
+        assert_eq!(q[0].op, "replace_section");
+        let first = activity_feed(&vault, None, None, 2).unwrap();
+        assert_eq!(first.len(), 2);
+        let next = activity_feed(&vault, None, Some(first[1].ts), 50).unwrap();
+        assert!(next.iter().all(|r| r.ts < first[1].ts));
+        assert!(activity_feed(&vault, Some("nope"), None, 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn revert_doc_change_touches_one_file_and_warns_about_later_commits() {
+        let vault = temp_vault("revert");
+        ensure_repo(&vault).unwrap();
+        write(&vault, "Projects/p/a.md", "a1\n");
+        write(&vault, "Projects/p/b.md", "b1\n");
+        snapshot(&vault, "danbi: c1").unwrap();
+        write(&vault, "Projects/p/a.md", "a2\n");
+        write(&vault, "Projects/p/new.md", "new\n");
+        let c2 = snapshot(&vault, "danbi: c2").unwrap().unwrap();
+        write(&vault, "Projects/p/b.md", "b2\n");
+        snapshot(&vault, "danbi: c3").unwrap();
+
+        // a.md: nothing after c2 touched it → applied without warning.
+        let r = revert_doc_change(&vault, &c2, "Projects/p/a.md", false).unwrap();
+        assert!(r.applied && r.warning.is_none() && r.later_commits == 0);
+        assert_eq!(read(&vault, "Projects/p/a.md").unwrap(), "a1\n");
+        assert_eq!(read(&vault, "Projects/p/b.md").unwrap(), "b2\n", "other file untouched");
+        let head = recent_commits(&vault, 1).unwrap().remove(0);
+        assert_eq!(head.id, r.commit.unwrap());
+        assert_eq!(head.summary, format!("danbi: revert · {} · Projects/p/a.md [human]", &c2[..7]));
+        let row = &activity_feed(&vault, None, None, 1).unwrap()[0];
+        assert_eq!((row.op.as_str(), row.actor.as_str(), row.domain.as_deref()), ("revert", "human", Some("a.md")));
+
+        // new.md was created by c2 → reverting removes it (short hash ok).
+        let r = revert_doc_change(&vault, &c2[..7], "Projects/p/new.md", false).unwrap();
+        assert!(r.applied);
+        assert!(!vault.join("Projects/p/new.md").exists());
+
+        // b.md changed again in c3 → not applied without force.
+        let c1 = recent_commits(&vault, 10).unwrap().into_iter().find(|c| c.summary == "danbi: c1").unwrap().id;
+        let r = revert_doc_change(&vault, &c1, "Projects/p/b.md", false).unwrap();
+        assert!(!r.applied && r.commit.is_none() && r.later_commits == 1);
+        assert!(r.warning.as_deref().unwrap().contains("1건"));
+        assert_eq!(read(&vault, "Projects/p/b.md").unwrap(), "b2\n");
+        let r = revert_doc_change(&vault, &c1, "Projects/p/b.md", true).unwrap();
+        assert!(r.applied && r.warning.is_some());
+        assert!(!vault.join("Projects/p/b.md").exists(), "c1 created b.md → removed");
+
+        assert!(revert_doc_change(&vault, &c2, "Projects/p/b.md", false).is_err(), "c2 did not touch b.md");
+        assert!(revert_doc_change(&vault, &c2, "../x", false).is_err());
+    }
+
+    #[test]
+    fn editor_save_command_commits_as_human() {
+        let vault = temp_vault("save");
+        ensure_repo(&vault).unwrap();
+        let vp = vault.to_string_lossy().to_string();
+        crate::commands::write_doc(vp.clone(), "p".into(), "ui.md".into(), "# v1\n".into()).unwrap();
+        let head = recent_commits(&vault, 1).unwrap().remove(0);
+        assert_eq!(head.summary, "danbi: save · p/ui.md [human]");
+        // Unchanged content → no new commit.
+        crate::commands::write_doc(vp, "p".into(), "ui.md".into(), "# v1\n".into()).unwrap();
+        assert_eq!(recent_commits(&vault, 1).unwrap().remove(0).id, head.id);
     }
 }
 

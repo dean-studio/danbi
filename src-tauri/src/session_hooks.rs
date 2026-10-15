@@ -589,7 +589,10 @@ async fn session_end_inner(project_hint: &str, payload: &Value) -> DanbiResult<(
             chrono::Local::now().format("%H:%M"),
             bullets.join("\n"),
         );
-        crate::mcp::dispatch("danbi_log", json!({ "project": project, "content": content }))
+        crate::mcp::dispatch(
+            "danbi_log",
+            json!({ "project": project, "content": content, "_client": crate::vcs::CLIENT_DANBI }),
+        )
             .map(|_| ())
     });
     if let Ok(mut s) = in_flight().lock() {

@@ -575,6 +575,8 @@ pub fn run() {
             commands::apply_plan,
             commands::undo_last,
             commands::recent_commits,
+            commands::activity_feed,
+            commands::activity_revert,
             commands::build_link_index,
             commands::vault_suggestions,
             commands::daily_snapshot,

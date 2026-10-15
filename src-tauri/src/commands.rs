@@ -582,6 +582,10 @@ pub fn read_doc(
     vault::read_doc(&PathBuf::from(vault_path), &project, &domain)
 }
 
+/// Editor save. Until now this wrote the file and left the commit to the
+/// next writer's `(pre)` snapshot, so a human edit never had a row of its
+/// own; the activity feed needs one. Same lock as every other writer; an
+/// unchanged document makes no commit (autosave fires often).
 #[tauri::command]
 pub fn write_doc(
     vault_path: String,
@@ -589,7 +593,21 @@ pub fn write_doc(
     domain: String,
     content: String,
 ) -> DanbiResult<()> {
-    vault::write_doc(&PathBuf::from(vault_path), &project, &domain, &content)
+    let vault = PathBuf::from(vault_path);
+    let _write_guard = vcs::write_guard();
+    vault::write_doc(&vault, &project, &domain, &content)?;
+    // Commit failure must not surface as a failed save — the file is on
+    // disk; the next successful snapshot carries it.
+    if let Err(e) = vcs::ensure_repo(&vault).and_then(|_| {
+        vcs::snapshot_as(
+            &vault,
+            &format!("danbi: save · {project}/{domain}"),
+            vcs::CLIENT_HUMAN,
+        )
+    }) {
+        eprintln!("[vcs] save commit deferred for {project}/{domain}: {e}");
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -987,7 +1005,7 @@ pub fn apply_plan(
         "danbi: {} · {}/{} · {}",
         op_label, project, domain, summary
     );
-    let commit_after = vcs::snapshot(&vault_path, &commit_msg)?;
+    let commit_after = vcs::snapshot_as(&vault_path, &commit_msg, vcs::CLIENT_HUMAN)?;
 
     // log.md — human-readable timeline
     let log_entry = format!(
@@ -1263,6 +1281,53 @@ pub fn recent_commits(limit: Option<usize>) -> DanbiResult<Vec<crate::vcs::Commi
         None => return Ok(Vec::new()),
     };
     vcs::recent_commits(&vault_path, limit.unwrap_or(100))
+}
+
+/// Activity feed rows (newest first). `before` is the `ts` cursor from the
+/// last row of the previous page; `scope_project` narrows to commits that
+/// touched that project.
+#[tauri::command]
+pub fn activity_feed(
+    scope_project: Option<String>,
+    before: Option<i64>,
+    limit: Option<usize>,
+) -> DanbiResult<Vec<crate::vcs::ActivityEntry>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?;
+    let vault_path = match cfg.and_then(|c| c.vault_path) {
+        Some(p) => PathBuf::from(p),
+        None => return Ok(Vec::new()),
+    };
+    let scope = scope_project.filter(|p| !p.trim().is_empty());
+    vcs::activity_feed(&vault_path, scope.as_deref(), before, limit.unwrap_or(50))
+}
+
+/// Undo what one feed row did to one file (`path` = a `files` entry of
+/// the row). Later changes to the same file are reported as a warning;
+/// `force` applies the revert regardless.
+#[tauri::command]
+pub fn activity_revert(
+    commit_id: String,
+    path: String,
+    force: Option<bool>,
+) -> DanbiResult<crate::vcs::RevertResult> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let result = vcs::revert_doc_change(&vault_path, &commit_id, &path, force.unwrap_or(false))?;
+    if result.applied {
+        let _ = journal::append_log(
+            &vault_path,
+            &format!(
+                "**revert** `{}` · {} → `{}`",
+                &commit_id.chars().take(7).collect::<String>(),
+                path,
+                result.commit.as_deref().unwrap_or("—")
+            ),
+        );
+    }
+    Ok(result)
 }
 
 /// How many commits each project has received since the user last looked
@@ -1757,9 +1822,10 @@ pub async fn quick_capture(
         &format!("danbi: quick-capture pre · {}/{}", proj, dom),
     )?;
     vault::write_doc(&vault_path, &proj, &dom, &after)?;
-    let commit_after = vcs::snapshot(
+    let commit_after = vcs::snapshot_as(
         &vault_path,
         &format!("danbi: quick-capture · {}/{} · {}", proj, dom, plan.summary),
+        vcs::CLIENT_HUMAN,
     )?;
 
     let _ = journal::append_log(
@@ -1839,9 +1905,10 @@ async fn capture_append_no_llm(
         &format!("danbi: capture pre · {}/{}", project, domain),
     )?;
     vault::write_doc(vault_path, project, domain, &after)?;
-    let commit_after = vcs::snapshot(
+    let commit_after = vcs::snapshot_as(
         vault_path,
         &format!("danbi: capture · {}/{}", project, domain),
+        vcs::CLIENT_HUMAN,
     )?;
 
     // summary: 메시지의 첫 줄만 잘라서 알림에 쓴다.
@@ -2045,9 +2112,10 @@ pub fn compound_apply(
 
     vault::write_doc(&vault_path, &project, &domain, &draft)?;
 
-    let commit_after = vcs::snapshot(
+    let commit_after = vcs::snapshot_as(
         &vault_path,
         &format!("danbi: compound · {}/{} · {}", project, domain, summary),
+        vcs::CLIENT_DANBI,
     )?;
 
     let _ = journal::append_log(
@@ -2328,9 +2396,10 @@ pub async fn summarize_weekly(
     );
     let final_body = format!("{header}{summary_md}\n");
     crate::vault::write_doc(&vault_path, &project, &domain, &final_body)?;
-    let commit = crate::vcs::snapshot(
+    let commit = crate::vcs::snapshot_as(
         &vault_path,
         &format!("danbi: weekly summary · {project}/{domain}"),
+        crate::vcs::CLIENT_DANBI,
     )?;
 
     Ok(serde_json::json!({
@@ -3156,9 +3225,10 @@ pub fn ghost_accept(project: String, id: String) -> DanbiResult<GhostStore> {
         &format!("danbi: pre-ghost-accept · {project}"),
     )?;
     let store = ghost_links::accept(&vault_path, &project, &id)?;
-    let commit_after = vcs::snapshot(
+    let commit_after = vcs::snapshot_as(
         &vault_path,
         &format!("danbi: ghost-accept · {project} · {id}"),
+        vcs::CLIENT_HUMAN,
     )?;
     let _ = journal::append_log(
         &vault_path,
@@ -4638,9 +4708,10 @@ pub fn danbi_log_quick(
     crate::vault::write_doc(&vault_path, &project, &domain, &next)?;
     // Saved already — a commit failure is a warning, not a reason to
     // make the user re-send the memo.
-    let (commit, warning) = match crate::vcs::snapshot(
+    let (commit, warning) = match crate::vcs::snapshot_as(
         &vault_path,
         &format!("danbi: popover quick · {project}/{domain}"),
+        crate::vcs::CLIENT_HUMAN,
     ) {
         Ok(c) => (c, None),
         Err(e) => (None, Some(format!("저장됐지만 git 커밋 실패: {e}"))),

@@ -253,7 +253,6 @@ fn compute_project_activity_overview(
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let from_ms = now_ms - days * 86_400_000;
-    let now_s = now_ms / 1000;
     let from_s = from_ms / 1000;
 
     // Discover known projects from the filesystem so quiet projects still

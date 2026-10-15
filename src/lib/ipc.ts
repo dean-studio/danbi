@@ -499,6 +499,36 @@ export type CommitSummary = {
   ts: number;
 };
 
+/** 활동 피드 한 행 (`activity_feed`). `(pre)` 스냅샷은 빠져 있다. */
+export type ActivityEntry = {
+  id: string;
+  /** unix seconds */
+  ts: number;
+  /** claude-code · codex · cursor · agent(식별 안 됨) · human · danbi */
+  client: string;
+  actor: "agent" | "human" | "danbi";
+  project?: string;
+  domain?: string;
+  /** log · append · replace_section · upsert_item · create_file · save ·
+   *  quick_capture · capture · compound · undo · restore · revert ·
+   *  migration · init … (`changeOpLabel` 로 표시) */
+  op: string;
+  /** 섹션 헤딩 / 항목 키 / undo 가 되돌린 원래 요약 */
+  target?: string;
+  /** 이 커밋이 문서에 추가한 첫 줄 (≤ 60자) */
+  preview?: string;
+  /** 커밋이 건드린 경로 (`Projects/<p>/<d>`) — `activityRevert` 의 path */
+  files: string[];
+};
+
+export type RevertResult = {
+  /** false = 이후 변경이 있어 적용하지 않음 (force 로 재호출) */
+  applied: boolean;
+  commit?: string;
+  later_commits: number;
+  warning?: string;
+};
+
 export type ExportRecord = {
   id: string;
   project: string;
@@ -1176,6 +1206,18 @@ export const ipc = {
   undoLast: () => invoke<string | null>("undo_last"),
   recentCommits: (limit?: number) =>
     invoke<CommitSummary[]>("recent_commits", { limit: limit ?? 100 }),
+  /** 활동 피드. `before` = 이전 페이지 마지막 행의 ts (커서). */
+  activityFeed: (opts?: { scopeProject?: string; before?: number; limit?: number }) =>
+    invoke<ActivityEntry[]>("activity_feed", {
+      scopeProject: opts?.scopeProject ?? null,
+      before: opts?.before ?? null,
+      limit: opts?.limit ?? 50,
+    }),
+  /** 피드 행 하나가 `path` 에 한 변경만 되돌린다 (문서 단위, 새 커밋).
+   *  이후 커밋이 같은 파일을 또 바꿨으면 applied:false + warning →
+   *  확인 후 force:true 로 재호출. */
+  activityRevert: (commitId: string, path: string, force = false) =>
+    invoke<RevertResult>("activity_revert", { commitId, path, force }),
   buildLinkIndex: () => invoke<LinkIndex>("build_link_index"),
   vaultSuggestions: () => invoke<VaultSuggestion[]>("vault_suggestions"),
 

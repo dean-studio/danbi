@@ -473,9 +473,13 @@ async fn handle_v1_vault_put(
         body.len()
     };
 
+    let rest_client = vcs::client_token(crate::usage::classify_user_agent(
+        headers.get("user-agent").and_then(|v| v.to_str().ok()),
+    ));
     let (commit, warning) = commit_or_warn(
         &vault_path,
         &format!("danbi: rest {mode} · {resolved_project}/{domain}"),
+        &rest_client,
     );
 
     // Token-track this write under a synthetic tool name so the
@@ -1474,6 +1478,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
     // One writer at a time across MCP, REST and the popover: the read →
     // edit → write → commit sequence below must not interleave.
     let _write_guard = is_write_tool(name).then(vcs::write_guard);
+    let client = client_of(&args);
 
     match name {
         "danbi_list_projects" => {
@@ -1546,9 +1551,9 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 .to_string());
             }
             let stamp = args.get("stamp").and_then(|v| v.as_bool()).unwrap_or(true);
-            let client = args.get("_client").and_then(|v| v.as_str());
+            let stamp_client = args.get("_client").and_then(|v| v.as_str());
             let entry = if stamp {
-                format!("{}\n{body}", log_stamp(Local::now().format("%H:%M").to_string(), client))
+                format!("{}\n{body}", log_stamp(Local::now().format("%H:%M").to_string(), stamp_client))
             } else {
                 body.to_string()
             };
@@ -1562,6 +1567,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
             let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp log · {project}/{domain}"),
+            &client,
             );
             Ok(write_result(
                 json!({
@@ -1597,6 +1603,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
             let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp append · {project}/{domain_norm}"),
+            &client,
             );
             Ok(write_result(
                 json!({
@@ -1638,6 +1645,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 &format!(
                     "danbi: mcp replace_section · {project}/{domain_norm} · {heading}"
                 ),
+            &client,
             );
             Ok(write_result(
                 json!({
@@ -1686,6 +1694,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 &format!(
                     "danbi: mcp upsert_item · {project}/{domain_norm} · {mode} · {key}"
                 ),
+            &client,
             );
             Ok(write_result(
                 json!({
@@ -1759,6 +1768,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
             let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp create_file · {project}/{domain_norm}"),
+            &client,
             );
             let final_bytes = vault::read_doc(&vault_path, &project, &domain_norm)
                 .unwrap_or_default()
@@ -1796,6 +1806,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
             let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp create_folder · {project}/{folder}"),
+            &client,
             );
             Ok(write_result(
                 json!({
@@ -2276,17 +2287,24 @@ fn doc_not_found_error(vault_path: &std::path::Path, project: &str, domain: &str
 
 // ---------- Write helpers ----------
 
-/// `danbi_log` stamps each entry with the calling client; the name is
-/// derived from the User-Agent here and passed down as a private arg so
-/// the sync dispatcher stays header-free.
+/// Write tools stamp the calling client on their commit (and `danbi_log`
+/// on the entry itself); the name is derived from the User-Agent here and
+/// passed down as a private arg so the sync dispatcher stays header-free.
 fn attach_client(tool: &str, args: &mut Value, user_agent: Option<&str>) {
-    if tool != "danbi_log" {
+    if !is_write_tool(tool) {
         return;
     }
     if let Value::Object(map) = args {
         let client = crate::usage::classify_user_agent(user_agent);
         map.insert("_client".into(), Value::String(client.to_string()));
     }
+}
+
+/// Origin token for the commit: the UA bucket the caller attached, or
+/// `agent` when the request came without one (direct `dispatch` callers
+/// pass their own, e.g. `danbi` for the session-end summary).
+fn client_of(args: &Value) -> String {
+    vcs::client_token(args.get("_client").and_then(|v| v.as_str()).unwrap_or(""))
 }
 
 fn normalize_md(domain: &str) -> String {
@@ -2363,8 +2381,12 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// (index.lock held by another process, odd permissions) is reported as a
 /// warning on the successful response — never as an error that would make
 /// the agent retry and duplicate the write.
-fn commit_or_warn(vault: &std::path::Path, msg: &str) -> (Option<String>, Option<String>) {
-    match vcs::snapshot(vault, msg) {
+fn commit_or_warn(
+    vault: &std::path::Path,
+    msg: &str,
+    client: &str,
+) -> (Option<String>, Option<String>) {
+    match vcs::snapshot_as(vault, msg, client) {
         Ok(c) => (c, None),
         Err(e) => (
             None,
@@ -2614,6 +2636,23 @@ mod tests {
         let note = today_note(&vault, "상식이");
         assert!(note.ends_with("\nplain body here\n"), "{note}");
         assert!(!note.contains("#### "));
+    }
+
+    #[test]
+    fn write_tools_tag_the_commit_with_the_client() {
+        let vault = temp_vault("token");
+        log(&vault, "보니", "tagged entry body");
+        let head = vcs::recent_commits(&vault, 1).unwrap().remove(0);
+        assert!(head.summary.ends_with(" [claude-code]"), "{}", head.summary);
+        dispatch_in(&vault, "danbi_append", json!({ "project": "보니", "domain": "x.md", "content": "no ua" })).unwrap();
+        let head = vcs::recent_commits(&vault, 1).unwrap().remove(0);
+        assert_eq!(head.summary, "danbi: mcp append · 보니/x.md [agent]");
+        let mut args = json!({ "project": "보니", "content": "c" });
+        attach_client("danbi_append", &mut args, Some("codex/1.0"));
+        assert_eq!(args["_client"], "codex");
+        let mut args = json!({ "query": "q" });
+        attach_client("danbi_search", &mut args, Some("codex/1.0"));
+        assert!(args.get("_client").is_none());
     }
 
     #[test]
@@ -2968,8 +3007,10 @@ mod scope_tests {
     }
 }
 
-/// Read-only measurements against the user's real vault — run by hand:
+/// Measurements against the user's real vault — run by hand:
 /// `cargo test --lib real_vault_sizes -- --ignored --nocapture`.
+/// Not strictly read-only: `list_tree` runs `ensure_repo`, which on an
+/// old vault performs the one-time `.danbi/`·`config.json` untrack commit.
 #[cfg(test)]
 mod real_vault {
     use super::*;
@@ -3005,6 +3046,15 @@ mod real_vault {
         let t = std::time::Instant::now();
         let brief = crate::session_hooks::session_brief(&vault, Some("단비"), 2500).unwrap();
         println!("session_brief(단비): {:?}, {} chars", t.elapsed(), brief.chars().count());
+        let t = std::time::Instant::now();
+        let feed = vcs::activity_feed(&vault, None, None, 50).unwrap();
+        println!("activity_feed(50): {:?}, {} rows, {} chars", t.elapsed(), feed.len(), serde_json::to_string(&feed).unwrap().chars().count());
+        let t = std::time::Instant::now();
+        let feed = vcs::activity_feed(&vault, Some("단비"), None, 50).unwrap();
+        println!("activity_feed(단비,50): {:?}, {} rows", t.elapsed(), feed.len());
+        for r in feed.iter().take(3) {
+            println!("  {} {} {} {:?}/{:?} {} {:?}", r.ts, r.actor, r.client, r.project, r.domain, r.op, r.preview);
+        }
         let t = std::time::Instant::now();
         let w = vector_mixed_warning(&vault);
         println!("vector_mixed_warning (cold): {:?} → {:?}", t.elapsed(), w);
