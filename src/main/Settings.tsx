@@ -787,6 +787,13 @@ function McpPanel() {
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [writeProject, setWriteProject] = useState<string>("");
+  // 토큰 회전 — 인라인 확인 (webview 의 window.confirm 은 못 믿는다).
+  // 확인창에 단비가 기록한 연결 파일 수를 보여주고, 결과로 갱신/실패
+  // 목록을 보여준다.
+  const [rotateConfirm, setRotateConfirm] = useState<number | null>(null);
+  const [rotateResult, setRotateResult] = useState<
+    import("@/lib/ipc").McpRotateResult | null
+  >(null);
 
   useEffect(() => {
     ipc.mcpStatus().then(setStatus).catch((e) => setErr(String(e)));
@@ -807,11 +814,25 @@ function McpPanel() {
     }
   }
 
+  async function askRotate() {
+    setErr(null);
+    setRotateResult(null);
+    try {
+      const list = await ipc.mcpConnectionsList();
+      setRotateConfirm(list.length);
+    } catch {
+      setRotateConfirm(0);
+    }
+  }
+
   async function rotate() {
     setBusy(true);
     setErr(null);
+    setRotateConfirm(null);
     try {
-      setStatus(await ipc.mcpRotateToken());
+      const res = await ipc.mcpRotateToken();
+      setStatus(res.status);
+      setRotateResult(res);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -1070,8 +1091,8 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
                 <Copy size={11} />
               </button>
               <button
-                onClick={rotate}
-                disabled={busy}
+                onClick={askRotate}
+                disabled={busy || rotateConfirm !== null}
                 className="grid h-6 w-6 place-items-center rounded-sm text-stone hover:text-on-dark"
                 title="새 토큰 생성"
               >
@@ -1079,6 +1100,58 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
               </button>
             </div>
           </Row>
+          {rotateConfirm !== null && (
+            <div className="mt-2 rounded-md border border-hairline bg-surface-elevated p-3">
+              <div className="text-[13px] font-medium text-on-dark">
+                토큰을 새로 만들까요?
+              </div>
+              <div className="mt-1 text-caption-sm leading-[1.6] text-mute">
+                지금 토큰으로 붙어 있는 에이전트는 끊겨요. 단비가 기록한 연결
+                파일 {rotateConfirm}개(.mcp.json · .cursor/mcp.json ·
+                .codex/config.toml)는 자동으로 갱신되고, 터미널에서 직접{" "}
+                <code>claude mcp add</code> 한 등록은 새 토큰으로 다시
+                등록해야 해요.
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={rotate}
+                  disabled={busy}
+                  className="inline-flex h-7 items-center rounded-sm bg-primary px-2.5 text-[12px] font-medium text-on-primary hover:bg-primary-pressed"
+                >
+                  새 토큰 만들기
+                </button>
+                <button
+                  onClick={() => setRotateConfirm(null)}
+                  className="inline-flex h-7 items-center rounded-sm px-2 text-[12px] text-mute hover:text-on-dark"
+                >
+                  취소
+                </button>
+              </div>
+            </div>
+          )}
+          {rotateResult && (
+            <div className="mt-2 rounded-md border border-hairline bg-surface-elevated p-3 text-caption-sm leading-[1.6]">
+              <div className="text-on-dark">
+                새 토큰으로 바꿨어요 · 연결 파일 {rotateResult.updated.length}개
+                갱신
+                {rotateResult.removed.length > 0 &&
+                  ` · 사라진 파일 ${rotateResult.removed.length}개 정리`}
+              </div>
+              {rotateResult.updated.map((p) => (
+                <div key={p} className="truncate font-mono text-[11px] text-mute">
+                  {p}
+                </div>
+              ))}
+              {rotateResult.failed.map((p) => (
+                <div key={p} className="font-mono text-[11px] text-accent-red">
+                  갱신 실패: {p}
+                </div>
+              ))}
+              <div className="mt-1 text-mute">
+                에이전트를 재시작하면 새 토큰으로 붙어요.
+              </div>
+            </div>
+          )}
 
           <div className="mt-4 rounded-md border border-accent-blue/40 bg-surface-elevated p-3">
             <div className="text-[13px] font-medium text-on-dark">
@@ -1087,7 +1160,9 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
             <div className="mt-1 text-caption-sm leading-[1.6] text-mute">
               프로젝트마다 단비 서버를 통째로 붙이면 세션마다 도구가 수십
               개씩 늘어나요. 읽기는 전역으로 한 번, 쓰기는 코드 폴더마다 그
-              프로젝트로만 붙이세요.
+              프로젝트로만 붙이세요. 프로젝트 홈의 [연결] 버튼은 이 두 서버를
+              코드 폴더의 <code>.mcp.json</code> 에 바로 기록해요 (Cursor 는{" "}
+              <code>.cursor/mcp.json</code>).
             </div>
 
             <div className="mt-3 mb-1 flex items-center justify-between">
