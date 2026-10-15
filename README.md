@@ -18,7 +18,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.7-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.7" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.8-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.8" />
   </a>
 </p>
 
@@ -34,7 +34,7 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
-  <img src="https://img.shields.io/badge/version-0.8.7-success" alt="version 0.8.7" />
+  <img src="https://img.shields.io/badge/version-0.8.8-success" alt="version 0.8.8" />
 </p>
 
 ---
@@ -51,9 +51,9 @@ AI는 새 대화창을 열 때마다 어제 한 결정을 잊습니다. 그래�
 - **필요한 것만 꺼내 줍니다** — 다음 세션에서 브리핑·검색으로 관련 노트만 골라 AI에게 건넵니다.
 - **프로젝트끼리 섞이지 않습니다** — 프로젝트마다 연결이 따로라서, A 프로젝트 작업에 B의 노트가 끼어들지 않습니다.
 
-## 최근 업데이트 — v0.8.7
+## 최근 업데이트 — v0.8.8
 
-Claude Code 계정을 여러 개(`~/.claude-*`) 써도 사용량을 모두 합산하고 계정별로 보여 줍니다. 응답 하나를 여러 번 세서 사용량이 약 2배로 보이던 문제와, macOS 27 다중 모니터에서 팝오버가 엉뚱한 화면에 열리던 문제도 고쳤습니다.
+홈이 "오늘"로 바뀌었습니다. 에이전트가 언제 어떤 문서에 무엇을 썼는지 한 피드에서 보고, 그 자리에서 diff를 확인하거나 그 변경만 되돌릴 수 있습니다. ⌘K 통합 팔레트, 문서 인스펙터(⌘I), 검토함, 연결 시트가 새로 생겼고 Claude Code·Cursor는 코드 폴더만 고르면 연결됩니다. 에이전트 쪽에서는 세션 시작 브리핑이 약 1/8로 줄고, 여러 에이전트가 동시에 써도 기록이 사라지지 않으며, 문서를 고친 직후 검색이 2.7초에서 0.01초대로 빨라졌습니다.
 
 [전체 변경 기록 →](CHANGELOG.md)
 
