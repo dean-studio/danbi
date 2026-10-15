@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 const REVIEW_FILE: &str = ".danbi/reviews.json";
+
+/// Tauri event fired when a review item is enqueued. `.danbi/` is
+/// excluded from the vault watcher, so the sidebar badge listens to this
+/// instead of polling `reviews_list`.
+pub const REVIEWS_CHANGED_EVENT: &str = "reviews:changed";
 const MAX_ITEMS: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

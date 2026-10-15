@@ -79,6 +79,62 @@ fn is_tree_relevant(vault: &Path, path: &Path) -> bool {
     is_md || path.extension().is_none()
 }
 
+/// Upper bound on the paths carried in one `vault:changed` payload. A
+/// bulk operation (git checkout, template apply) can touch thousands of
+/// files; past this the frontend should just refresh everything, so we
+/// flag `truncated` instead of shipping the whole list over IPC.
+const MAX_CHANGED_PATHS: usize = 200;
+
+/// Build the `vault:changed` payload for one debounce batch, or `None`
+/// when nothing tree-relevant changed. `paths` are vault-relative with
+/// `/` separators; `projects` are the project folders those paths live in
+/// (empty for a path outside `Projects/`, e.g. a new top-level folder).
+/// The frontend refreshes only those projects when `truncated` is false
+/// and every path mapped to a project.
+fn changed_payload<'a>(
+    vault: &Path,
+    paths: impl Iterator<Item = &'a Path>,
+) -> Option<serde_json::Value> {
+    let mut rel_paths: std::collections::BTreeSet<String> = Default::default();
+    let mut projects: std::collections::BTreeSet<String> = Default::default();
+    // Paths that are tree-relevant but not under Projects/<name>/ —
+    // the sidebar can't scope those, so the whole tree is refreshed.
+    let mut unscoped = false;
+    let mut total = 0usize;
+    for p in paths {
+        if !is_tree_relevant(vault, p) {
+            continue;
+        }
+        let Ok(rel) = p.strip_prefix(vault) else {
+            continue;
+        };
+        total += 1;
+        let segs: Vec<&str> = rel.iter().filter_map(|s| s.to_str()).collect();
+        match segs.as_slice() {
+            [root, project, _rest @ ..]
+                if *root == crate::vault::PROJECTS_DIRNAME && !_rest.is_empty() =>
+            {
+                projects.insert((*project).to_string());
+            }
+            _ => unscoped = true,
+        }
+        if rel_paths.len() < MAX_CHANGED_PATHS {
+            rel_paths.insert(segs.join("/"));
+        }
+    }
+    if total == 0 {
+        return None;
+    }
+    let truncated = total > MAX_CHANGED_PATHS || unscoped;
+    Some(serde_json::json!({
+        "vault": vault.to_string_lossy().to_string(),
+        "count": total,
+        "paths": rel_paths.into_iter().collect::<Vec<_>>(),
+        "projects": projects.into_iter().collect::<Vec<_>>(),
+        "truncated": truncated,
+    }))
+}
+
 /// Shared "next scheduled backup" timestamp. Every vault-change event
 /// pushes this forward by `debounce_ms`; a tiny worker thread polls it
 /// and runs the backup when the deadline has passed with no further
@@ -164,21 +220,14 @@ fn build_debouncer(
                     // would otherwise fire vault:changed and trigger a full
                     // tree+linkIndex+groups refresh — the source of the
                     // perceived "lag" when expanding folders or selecting
-                    // files in big vaults).
-                    let tree_relevant = events.iter().any(|ev| {
-                        ev.event
-                            .paths
-                            .iter()
-                            .any(|p| is_tree_relevant(&watch_path, p))
-                    });
-                    if tree_relevant {
-                        let _ = app.emit(
-                            VAULT_CHANGED_EVENT,
-                            serde_json::json!({
-                                "vault": watch_path.to_string_lossy().to_string(),
-                                "count": events.len(),
-                            }),
-                        );
+                    // files in big vaults). The payload names the changed
+                    // paths/projects so the frontend can refresh only those.
+                    let payload = changed_payload(
+                        &watch_path,
+                        events.iter().flat_map(|ev| ev.event.paths.iter().map(|p| p.as_path())),
+                    );
+                    if let Some(payload) = payload {
+                        let _ = app.emit(VAULT_CHANGED_EVENT, payload);
                     }
 
                     // Count *distinct markdown paths* that showed up in
@@ -313,4 +362,86 @@ pub fn stop(app: &AppHandle) -> DanbiResult<()> {
     let mut slot = state.inner.lock().map_err(|_| DanbiError::Other("watcher lock".into()))?;
     slot.take();
     Ok(())
+}
+
+#[cfg(test)]
+mod payload_tests {
+    use super::{changed_payload, MAX_CHANGED_PATHS};
+    use std::path::{Path, PathBuf};
+
+    fn vault() -> PathBuf {
+        PathBuf::from("/tmp/danbi-vault")
+    }
+
+    fn strs(v: &serde_json::Value, key: &str) -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn ignores_noise_and_returns_none() {
+        let v = vault();
+        let paths = [
+            v.join(".git/index"),
+            v.join(".danbi/vectors.json"),
+            v.join("config.json"),
+            v.join("Projects/A/_assets/x.png"),
+        ];
+        assert!(changed_payload(&v, paths.iter().map(|p| p.as_path())).is_none());
+    }
+
+    #[test]
+    fn scopes_to_projects_and_dedups() {
+        let v = vault();
+        let paths = [
+            v.join("Projects/보니/ui.md"),
+            v.join("Projects/보니/ui.md"),
+            v.join("Projects/단비/daily/2026-10-15.md"),
+            v.join(".git/HEAD"),
+        ];
+        let p = changed_payload(&v, paths.iter().map(|p| p.as_path())).unwrap();
+        assert_eq!(p["count"], 3);
+        assert_eq!(
+            strs(&p, "paths"),
+            vec!["Projects/단비/daily/2026-10-15.md", "Projects/보니/ui.md"]
+        );
+        assert_eq!(strs(&p, "projects"), vec!["단비", "보니"]);
+        assert_eq!(p["truncated"], false);
+        assert_eq!(p["vault"], v.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn project_folder_itself_is_unscoped() {
+        // A new/renamed/deleted project folder shows up as `Projects/<name>`
+        // with no further segment — the sidebar must rescan everything.
+        let v = vault();
+        let paths = [v.join("Projects/새프로젝트")];
+        let p = changed_payload(&v, paths.iter().map(|p| p.as_path())).unwrap();
+        assert!(strs(&p, "projects").is_empty());
+        assert_eq!(p["truncated"], true);
+    }
+
+    #[test]
+    fn caps_path_list_and_flags_truncation() {
+        let v = vault();
+        let paths: Vec<PathBuf> = (0..(MAX_CHANGED_PATHS + 5))
+            .map(|i| v.join(format!("Projects/A/n{i}.md")))
+            .collect();
+        let p = changed_payload(&v, paths.iter().map(|p| p.as_path())).unwrap();
+        assert_eq!(p["count"], MAX_CHANGED_PATHS + 5);
+        assert_eq!(strs(&p, "paths").len(), MAX_CHANGED_PATHS);
+        assert_eq!(strs(&p, "projects"), vec!["A"]);
+        assert_eq!(p["truncated"], true);
+    }
+
+    #[test]
+    fn path_outside_vault_is_skipped() {
+        let v = vault();
+        let other = Path::new("/tmp/elsewhere/Projects/A/x.md");
+        assert!(changed_payload(&v, std::iter::once(other)).is_none());
+    }
 }

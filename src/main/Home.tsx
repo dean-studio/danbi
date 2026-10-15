@@ -1,359 +1,386 @@
-import { useEffect, useMemo, useState } from "react";
-import {
-  Activity,
-  CalendarDays,
-  Clock4,
-  FileText,
-  GitCommit,
-  HardDrive,
-  Layers,
-  Plus,
-  Sparkles,
-} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CheckCheck, ChevronDown, Clock4, Send, Server } from "lucide-react";
 import {
   ipc,
-  type ActivityOverview,
-  type CommitSummary,
+  type ActivityEntry,
   type DailySnapshot,
 } from "@/lib/ipc";
+import { ActivityFeed, clientLabel, type ActivityStats } from "@/main/ActivityFeed";
+import { useMcpSummary } from "@/main/ConnectSheet";
+import { ReviewMini } from "@/main/ReviewMini";
+import { Keycap } from "@/main/ShortcutsHelp";
+import { markVaultAllRead } from "@/main/Sidebar";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
-import { McpInboundCard } from "./McpInboundCard";
-import { ClaudeCodeUsageCard } from "./ClaudeCodeUsageCard";
-import { DanbiLlmUsageCard } from "./DanbiLlmUsageCard";
-import { ErrorBoundary } from "@/components/ErrorBoundary";
-import {
-  PROJECT_COLOR_KEYS,
-  projectColorVars,
-} from "@/components/ProjectColorPicker";
 
-export function Home() {
+/** ⌘J — Workspace 가 쏘고 빠른 메모 입력이 듣는 포커스 신호. */
+export const FOCUS_MEMO_EVENT = "danbi:focus-memo";
+
+/** 오늘(홈, 화면 A). 아침에 열면 30초 안에 "어제 이후 누가 무엇을 썼고
+ *  내가 봐야 할 게 몇 개인지" 를 알고, 떠오른 메모를 바로 남긴다.
+ *  빠른 메모(흰 CTA 1개) → 요약 한 줄 → 활동 피드 | 검토함·지난 오늘·
+ *  에이전트. LLM 없이 동작(피드=git, 검토=ghost store+healing, 메모=
+ *  quick capture 의 LLM 우회 경로). */
+export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
   const tree = useApp((s) => s.tree);
   const selectDomain = useApp((s) => s.selectDomain);
-  const selectProject = useApp((s) => s.selectProject);
+  const setView = useApp((s) => s.setView);
+  const openConnectSheet = useApp((s) => s.openConnectSheet);
 
-  const [commits, setCommits] = useState<CommitSummary[]>([]);
-  const [daily, setDaily] = useState<DailySnapshot | null>(null);
+  const [scope, setScope] = useState<string | null>(null);
+  const [stats, setStats] = useState<ActivityStats | null>(null);
+  const [reviewCount, setReviewCount] = useState(0);
+  const [optimistic, setOptimistic] = useState<ActivityEntry[]>([]);
+  const [marking, setMarking] = useState(false);
 
-  useEffect(() => {
-    ipc
-      .recentCommits(200)
-      .then(setCommits)
-      .catch(() => setCommits([]));
-    ipc
-      .dailySnapshot()
-      .then(setDaily)
-      .catch(() => setDaily(null));
-  }, [tree]);
+  const projects = useMemo(() => tree?.projects.map((p) => p.name) ?? [], [tree]);
+  const hasProjects = projects.length > 0;
+  const today = new Date();
+  const dateLabel = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")} (${"일월화수목금토"[today.getDay()]})`;
 
-
-  const stats = useMemo(() => {
-    const projects = tree?.projects ?? [];
-    const domainCount = projects.reduce((a, p) => a + p.domains.length, 0);
-    const bytes = projects.reduce(
-      (a, p) => a + p.domains.reduce((b, d) => b + d.bytes, 0),
-      0,
-    );
-    return {
-      projectCount: projects.length,
-      domainCount,
-      bytes,
-    };
-  }, [tree]);
-
-  const activity = useMemo(() => build30DayActivity(commits), [commits]);
-
-  // 빈 vault (프로젝트 0개) 에선 사용량/집계 카드를 감춘다. 특히 Claude
-  // Code 사용량 카드는 `~/.claude` 전역 통계라 vault 와 무관하게 뜨는데,
-  // 갓 만든 vault 에선 "이전 데이터가 남았다" 는 오해를 준다. 첫 프로젝트를
-  // 만들기 전까진 환영 + 시작 안내만 보여준다.
-  const hasProjects = (tree?.projects?.length ?? 0) > 0;
+  // 메모 전송 직후 피드 맨 위에 넣는 옵티미스틱 행. 워처 → 피드 갱신이
+  // 수 초 안에 실제 커밋 행을 가져오면 id 가 달라 중복되니 8초 뒤 거둔다.
+  const pushOptimistic = useCallback((e: ActivityEntry) => {
+    setOptimistic((rows) => [e, ...rows]);
+    window.setTimeout(() => {
+      setOptimistic((rows) => rows.filter((r) => r.id !== e.id));
+    }, 8000);
+  }, []);
 
   return (
     <div className="flex h-full flex-col">
       <header
         data-tauri-drag-region
-        className="flex h-12 shrink-0 items-center border-b border-hairline px-6"
+        className="flex h-12 shrink-0 items-center justify-between border-b border-hairline px-6"
       >
-        <span className="text-[15px] font-medium tracking-[0.2px] text-ink">
-          홈
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[15px] font-medium tracking-[0.2px] text-ink">
+            오늘
+          </span>
+          <span className="font-mono text-[12px] text-stone">{dateLabel}</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {hasProjects && (
+            <ScopeSelect projects={projects} value={scope} onChange={setScope} />
+          )}
+          <button
+            onClick={async () => {
+              setMarking(true);
+              try {
+                await markVaultAllRead();
+              } finally {
+                setMarking(false);
+              }
+            }}
+            disabled={marking}
+            title="사이드바의 변경 표시를 모두 읽음으로"
+            className="inline-flex h-7 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-2.5 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark disabled:opacity-50"
+          >
+            <CheckCheck size={12} /> 읽음 처리
+          </button>
+          {onOpenShortcuts && (
+            <button
+              onClick={onOpenShortcuts}
+              title="단축키 표"
+              className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] text-mute hover:bg-surface-elevated hover:text-on-dark"
+            >
+              <Keycap>⌘</Keycap>
+              <Keycap>/</Keycap>
+            </button>
+          )}
+        </div>
       </header>
 
       <div className="flex-1 min-h-0 overflow-auto">
-        <div className="mx-auto max-w-[960px] px-7 py-9">
-          <h1 className="text-[32px] font-medium leading-tight text-ink">
-            {hasProjects ? "좋은 하루예요 👋" : "단비에 오신 걸 환영해요 👋"}
-          </h1>
-          <p className="mt-2 text-[15px] text-mute">
-            {hasProjects
-              ? "좌측에서 도메인을 고르거나 바로 명령해도 돼요."
-              : "아직 vault 가 비어 있어요. 좌측 사이드바의 + 로 첫 프로젝트를 만들면 여기에 활동과 사용량이 채워집니다."}
-          </p>
+        <div className="mx-auto max-w-[1040px] px-6 py-6">
+          {!hasProjects ? (
+            <>
+              <h1 className="text-[32px] font-medium leading-tight text-ink">
+                단비에 오신 걸 환영해요 👋
+              </h1>
+              <p className="mt-2 text-[15px] text-mute">
+                아직 vault 가 비어 있어요. 좌측 사이드바의 + 로 첫 프로젝트를
+                만들면 여기에 활동이 채워집니다.
+              </p>
+            </>
+          ) : (
+            <>
+              <QuickMemo projects={projects} onStored={pushOptimistic} />
 
-          {/* 사용량/집계 카드들은 신규 데이터 소스(transcript·usage.jsonl·
-              MCP 로그) 를 파싱하므로, 한 카드가 예기치 못한 데이터에 터져도
-              홈 전체(사이드바·에디터)가 검은 화면이 되지 않도록 각각 개별
-              ErrorBoundary 로 격리한다. 프로젝트가 하나도 없으면(갓 만든
-              vault) 아래 카드들은 통째로 감춘다. */}
-          {hasProjects && (
-          <>
-          {/* Claude Code 사용량 — transcript 기반 정확값. v0.7.0 신규. */}
-          <ErrorBoundary scope="ClaudeCodeUsageCard" fallback={cardFallback}>
-            <ClaudeCodeUsageCard />
-          </ErrorBoundary>
+              <SummaryLine
+                stats={stats}
+                reviewCount={reviewCount}
+                onOpenReview={() => setView("review")}
+              />
 
-          {/* 단비 자체 LLM 사용량 — 라우팅/writer/embed. v0.7.0 신규. */}
-          <ErrorBoundary scope="DanbiLlmUsageCard" fallback={cardFallback}>
-            <DanbiLlmUsageCard />
-          </ErrorBoundary>
-
-          {/* MCP inbound — Claude Code / Codex 가 단비에 저장한 콘텐츠 추정량. */}
-          <ErrorBoundary scope="McpInboundCard" fallback={cardFallback}>
-            <McpInboundCard onOpenProject={selectProject} />
-          </ErrorBoundary>
-
-          {/* 프로젝트별 활동 분포 — MCP 인바운드 바로 아래에 둬서 "외부에서
-              들어온 토큰" → "전체 활동량" 흐름이 위에서 아래로 자연스럽게
-              이어지게. */}
-          <div className="mt-6">
-            <ProjectActivityCard />
-          </div>
-
-          {/* Claude Code 통합 셋업 — Skill 한 번 설치 / CLAUDE.md 프로젝트별 */}
-          <SkillSetupCard />
-
-          {/* Daily */}
-          {daily && <DailyCard snapshot={daily} onOpen={selectDomain} />}
-
-          {/* Stats row — accent strip 4종 */}
-          <div className="mt-7 grid grid-cols-4 gap-3">
-            <Stat
-              icon={<Layers size={16} />}
-              label="프로젝트"
-              value={String(stats.projectCount)}
-              hint="projects"
-              accent="blue"
-            />
-            <Stat
-              icon={<FileText size={16} />}
-              label="도메인"
-              value={String(stats.domainCount)}
-              hint="markdown"
-              accent="green"
-            />
-            <Stat
-              icon={<HardDrive size={16} />}
-              label="총 용량"
-              value={prettyBytes(stats.bytes)}
-              hint="all text"
-              accent="yellow"
-            />
-            <Stat
-              icon={<GitCommit size={16} />}
-              label="최근 작업"
-              value={commits.length > 0 ? timeAgo(commits[0].ts * 1000) : "—"}
-              hint="last commit"
-              accent="red"
-            />
-          </div>
-
-          {/* 30일 활동 — 사용량 카드는 0.1 정체성 (LLM 키 0개) 와 안 어울려서 제거 */}
-          <div className="mt-6">
-            <ActivityCard commits={commits.length} data={activity} />
-          </div>
-
-          {/* Project grid 는 사이드바와 정보가 중복돼서 v0.5.0 부터 제거.
-              "프로젝트 활동 분포" 카드의 행이 클릭 가능 + 사이드바 트리가
-              항상 떠있어서 진입 경로는 충분. */}
-
-          {/* Recent activity — table */}
-          {commits.length > 0 && (
-            <section className="mt-7 overflow-hidden rounded-lg border border-hairline bg-surface">
-              <header className="flex items-center justify-between border-b border-hairline px-4 py-2.5">
-                <div className="flex items-center gap-1.5">
-                  <GitCommit size={13} className="text-accent-blue" />
-                  <h2 className="text-[14px] font-medium text-ink">
-                    최근 작업
-                  </h2>
+              <div className="mt-4 grid gap-5" style={{ gridTemplateColumns: "minmax(0,1fr) 320px" }}>
+                <ActivityFeed
+                  scopeProject={scope}
+                  limit={50}
+                  onOpenDoc={selectDomain}
+                  onStats={setStats}
+                  optimistic={optimistic}
+                  className="rounded-lg border border-hairline bg-surface"
+                />
+                <div className="flex min-w-0 flex-col gap-4">
+                  <ReviewMini
+                    project={scope}
+                    max={4}
+                    onOpenDoc={selectDomain}
+                    onOpenAll={() => setView("review")}
+                    onCount={setReviewCount}
+                  />
+                  <PastTodayCard onOpen={selectDomain} />
+                  <AgentsCard
+                    stats={stats}
+                    onManage={() => openConnectSheet(scope)}
+                  />
                 </div>
-                <span className="text-caption-sm text-stone">
-                  {commits.length.toLocaleString()} commits
-                </span>
-              </header>
-              <table className="w-full table-fixed text-caption-md">
-                <colgroup>
-                  <col style={{ width: 78 }} />
-                  <col />
-                  <col style={{ width: 88 }} />
-                </colgroup>
-                <tbody className="divide-y divide-hairline">
-                  {commits.slice(0, 8).map((c) => (
-                    <tr key={c.id} className="hover:bg-surface-elevated">
-                      <td className="px-4 py-2 font-mono text-[11px] text-stone">
-                        {c.id.slice(0, 7)}
-                      </td>
-                      <td className="truncate px-2 py-2 text-body">
-                        {c.summary}
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-2 text-right text-caption-sm text-stone">
-                        {timeAgo(c.ts * 1000)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </section>
+              </div>
+            </>
           )}
-          </>
-          )}
-
         </div>
       </div>
     </div>
   );
 }
 
-/** Home 의 사용량 카드가 렌더 중 터졌을 때 그 자리에만 그리는 작은
- *  안내. 앱 전체는 살아있고, "다시 시도" 로 그 카드만 재마운트한다. */
-function cardFallback(error: Error, reset: () => void) {
+/** 헤더 [전체 ▾] — 피드·검토함 범위. */
+function ScopeSelect({
+  projects,
+  value,
+  onChange,
+}: {
+  projects: string[];
+  value: string | null;
+  onChange: (v: string | null) => void;
+}) {
   return (
-    <section className="mt-7 rounded-lg border border-hairline bg-surface px-4 py-4">
-      <div className="text-[13px] text-on-dark">
-        이 카드를 표시하는 중 문제가 생겼어요.
-      </div>
-      <div className="mt-1 truncate text-[11px] text-stone" title={error.message}>
-        {error.message}
-      </div>
-      <button
-        type="button"
-        onClick={reset}
-        className="mt-2 inline-flex h-7 items-center rounded-md border border-hairline bg-surface-elevated px-2.5 text-[11px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark"
+    <label className="relative inline-flex h-7 items-center rounded-md border border-hairline bg-surface-elevated pl-2.5 pr-6 text-[12px] text-body hover:border-hairline-strong">
+      <select
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value || null)}
+        className="absolute inset-0 cursor-pointer opacity-0"
+        aria-label="범위"
       >
-        다시 시도
-      </button>
-    </section>
+        <option value="">전체</option>
+        {projects.map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
+        ))}
+      </select>
+      <span className="pointer-events-none truncate">{value ?? "전체"}</span>
+      <ChevronDown size={11} className="pointer-events-none absolute right-2 text-mute" />
+    </label>
   );
 }
 
-function DailyCard({
-  snapshot,
-  onOpen,
+/** 빠른 메모 — ⌃Space 팝업과 같은 백엔드(quick_capture, LLM 없음)의
+ *  메인 윈도우 입구. 프로젝트 칩 기본 = 마지막 사용 프로젝트, 도메인 칩
+ *  기본 = daily(오늘 노트, 백엔드가 자동 라우팅). ↵ 전송, ⇧↵ 줄바꿈,
+ *  ⌘J 포커스. 흰 CTA 는 이 [기록] 하나. */
+function QuickMemo({
+  projects,
+  onStored,
 }: {
-  snapshot: DailySnapshot;
-  onOpen: (project: string, domain: string) => void;
+  projects: string[];
+  onStored: (e: ActivityEntry) => void;
 }) {
   const tree = useApp((s) => s.tree);
-  const [creating, setCreating] = useState(false);
+  const lastProject = useApp((s) => s.cfg?.capture?.last_project ?? null);
+  const showToast = useApp((s) => s.showToast);
+  const [project, setProject] = useState<string>(
+    () => (lastProject && projects.includes(lastProject) ? lastProject : projects[0]) ?? "",
+  );
+  const [domain, setDomain] = useState<string>("daily");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  async function createForProject(project: string) {
-    setCreating(true);
+  // 프로젝트 목록이 바뀌었는데(삭제 등) 현재 값이 사라졌으면 첫 항목으로.
+  useEffect(() => {
+    if (!projects.includes(project)) setProject(projects[0] ?? "");
+  }, [projects, project]);
+
+  useEffect(() => {
+    function onFocus() {
+      inputRef.current?.focus();
+    }
+    window.addEventListener(FOCUS_MEMO_EVENT, onFocus);
+    return () => window.removeEventListener(FOCUS_MEMO_EVENT, onFocus);
+  }, []);
+
+  // 도메인 후보 — daily + 그 프로젝트의 최상위 .md.
+  const domains = useMemo(() => {
+    const node = tree?.projects.find((p) => p.name === project);
+    return ["daily", ...(node?.domains.map((d) => d.name) ?? [])];
+  }, [tree, project]);
+  useEffect(() => {
+    if (!domains.includes(domain)) setDomain("daily");
+  }, [domains, domain]);
+
+  async function send() {
+    const message = text.trim();
+    if (!message || !project || busy) return;
+    setBusy(true);
     try {
-      const domain = await ipc.ensureTodayNote(project);
-      onOpen(project, domain);
+      const res = await ipc.quickCapture(
+        message,
+        project,
+        domain === "daily" ? undefined : domain,
+      );
+      if (res.status !== "stored") {
+        showToast("err", "프로젝트를 먼저 골라주세요.");
+        return;
+      }
+      setText("");
+      onStored({
+        id: `local-${Date.now()}`,
+        ts: Math.floor(Date.now() / 1000),
+        client: "human",
+        actor: "human",
+        project: res.project,
+        domain: res.domain,
+        op: "quick_capture",
+        preview: message.split("\n")[0].slice(0, 60),
+        files: [`Projects/${res.project}/${res.domain}`],
+      });
+      inputRef.current?.focus();
+    } catch (e) {
+      showToast("err", `기록 실패: ${String(e).slice(0, 120)}`);
     } finally {
-      setCreating(false);
+      setBusy(false);
     }
   }
 
-  const hasPast =
-    snapshot.one_week_ago.length +
-      snapshot.one_month_ago.length +
-      snapshot.one_year_ago.length >
-    0;
-
-  const projects = tree?.projects ?? [];
+  const chip =
+    "h-7 max-w-[160px] cursor-pointer appearance-none truncate rounded-full border border-hairline bg-surface-elevated pl-2.5 pr-6 text-[12px] text-body hover:border-hairline-strong focus:outline-none";
 
   return (
-    <section className="mt-7 rounded-lg border border-hairline bg-surface p-5">
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <CalendarDays size={16} className="text-accent-blue" />
-          <h2 className="text-[18px] font-medium text-ink">오늘</h2>
-          <span className="font-mono text-[13px] text-stone">
-            {snapshot.today}
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          {snapshot.today_notes.length === 0 &&
-            projects.length > 0 &&
-            projects.slice(0, 3).map((p) => (
-              <button
-                key={p.name}
-                onClick={() => createForProject(p.name)}
-                disabled={creating}
-                className="inline-flex h-6 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-              >
-                <Plus size={10} />
-                {p.name}
-              </button>
-            ))}
-        </div>
-      </header>
-
-      {snapshot.today_notes.length > 0 ? (
-        <ul className="mt-3 flex flex-col gap-1">
-          {[...snapshot.today_notes]
-            .sort((a, b) => (b.modified_ms ?? 0) - (a.modified_ms ?? 0))
-            .map((n) => (
-            <li key={`${n.project}/${n.domain}`}>
-              <button
-                onClick={() => onOpen(n.project, n.domain)}
-                className="flex w-full items-center gap-2.5 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-surface-elevated"
-              >
-                <FileText size={13} className="text-mute" />
-                <span className="text-[14px] text-mute">{n.project}</span>
-                <span className="text-stone">/</span>
-                <span className="font-mono text-[14px] text-body">
-                  {n.domain}
-                </span>
-                <span className="ml-auto flex items-center gap-3 text-[12px] text-stone">
-                  {n.modified_ms && (
-                    <span className="font-mono" title={new Date(n.modified_ms).toLocaleString()}>
-                      {formatHM(n.modified_ms)}
-                    </span>
-                  )}
-                  <span>
-                    {n.bytes > 0 ? `${(n.bytes / 1024).toFixed(1)}KB` : "empty"}
-                  </span>
-                </span>
-              </button>
-            </li>
+    <div className="flex items-center gap-2 rounded-md border border-hairline bg-surface-elevated px-2.5 focus-within:border-hairline-strong">
+      <span className="relative shrink-0">
+        <select
+          value={project}
+          onChange={(e) => setProject(e.target.value)}
+          className={chip}
+          aria-label="프로젝트"
+        >
+          {projects.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
           ))}
-        </ul>
-      ) : (
-        <div className="mt-3 text-[13px] text-stone">
-          오늘 작성한 데일리 노트가 없어요. 프로젝트별로 시작할 수 있어요.
-        </div>
-      )}
+        </select>
+        <ChevronDown size={11} className="pointer-events-none absolute right-2 top-2 text-mute" />
+      </span>
+      <span className="relative shrink-0">
+        <select
+          value={domain}
+          onChange={(e) => setDomain(e.target.value)}
+          className={chip}
+          aria-label="도메인"
+        >
+          {domains.map((d) => (
+            <option key={d} value={d}>
+              {d === "daily" ? "daily (오늘)" : d}
+            </option>
+          ))}
+        </select>
+        <ChevronDown size={11} className="pointer-events-none absolute right-2 top-2 text-mute" />
+      </span>
+      <textarea
+        ref={inputRef}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            send();
+          }
+        }}
+        rows={1}
+        placeholder="지금 떠오른 것… (↵ 기록 · ⇧↵ 줄바꿈 · ⌘J 포커스)"
+        className="min-h-[44px] flex-1 resize-none bg-transparent py-3 text-[14px] text-ink outline-none placeholder:text-stone"
+        style={{ maxHeight: 140 }}
+      />
+      <button
+        onClick={send}
+        disabled={busy || !text.trim() || !project}
+        title="기록 (↵)"
+        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-on-primary transition-colors hover:bg-primary-pressed disabled:opacity-40"
+      >
+        <Send size={12} /> 기록
+      </button>
+    </div>
+  );
+}
 
-      {hasPast && (
-        <div className="mt-4 border-t border-hairline pt-3">
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <Clock4 size={11} className="text-accent-yellow" />
-            <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
-              지난 오늘
-            </span>
-          </div>
-          <div className="flex flex-col gap-1">
-            <ReminiscenceRow
-              label="1주 전"
-              notes={snapshot.one_week_ago}
-              onOpen={onOpen}
-            />
-            <ReminiscenceRow
-              label="1개월 전"
-              notes={snapshot.one_month_ago}
-              onOpen={onOpen}
-            />
-            <ReminiscenceRow
-              label="1년 전"
-              notes={snapshot.one_year_ago}
-              onOpen={onOpen}
-            />
-          </div>
-        </div>
+/** "어제 이후 14건 · Claude Code 9 · Codex 3 · 사람 2 · 검토 대기 6". */
+function SummaryLine({
+  stats,
+  reviewCount,
+  onOpenReview,
+}: {
+  stats: ActivityStats | null;
+  reviewCount: number;
+  onOpenReview: () => void;
+}) {
+  const parts: string[] = [];
+  if (stats) {
+    parts.push(`어제 이후 ${stats.sinceYesterday}건`);
+    const by = Object.entries(stats.byClient).sort((a, b) => b[1] - a[1]);
+    for (const [client, n] of by) parts.push(`${clientLabel(client)} ${n}`);
+  }
+  return (
+    <div className="mt-2.5 flex flex-wrap items-center gap-x-1.5 px-1 text-[12px] text-mute">
+      {parts.map((p, i) => (
+        <span key={p} className="flex items-center gap-1.5">
+          {i > 0 && <span className="text-stone">·</span>}
+          <span>{p}</span>
+        </span>
+      ))}
+      {reviewCount > 0 && (
+        <>
+          {parts.length > 0 && <span className="text-stone">·</span>}
+          <button onClick={onOpenReview} className="text-body hover:text-on-dark">
+            검토 대기 {reviewCount}
+          </button>
+        </>
       )}
+      {parts.length === 0 && reviewCount === 0 && <span>&nbsp;</span>}
+    </div>
+  );
+}
+
+/** 지난 오늘 — 1주/1달/1년 전 daily. 기존 ReminiscenceRow 그대로. */
+function PastTodayCard({
+  onOpen,
+}: {
+  onOpen: (project: string, domain: string) => void;
+}) {
+  const tree = useApp((s) => s.tree);
+  const [snap, setSnap] = useState<DailySnapshot | null>(null);
+  useEffect(() => {
+    ipc.dailySnapshot().then(setSnap).catch(() => setSnap(null));
+  }, [tree]);
+  if (!snap) return null;
+  const total =
+    snap.one_week_ago.length + snap.one_month_ago.length + snap.one_year_ago.length;
+  if (total === 0) return null;
+  return (
+    <section className="rounded-lg border border-hairline bg-surface px-4 py-3">
+      <div className="mb-2 flex items-center gap-1.5">
+        <Clock4 size={11} className="text-stone" />
+        <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
+          지난 오늘
+        </span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <ReminiscenceRow label="1주 전" notes={snap.one_week_ago} onOpen={onOpen} />
+        <ReminiscenceRow label="1개월 전" notes={snap.one_month_ago} onOpen={onOpen} />
+        <ReminiscenceRow label="1년 전" notes={snap.one_year_ago} onOpen={onOpen} />
+      </div>
     </section>
   );
 }
@@ -386,595 +413,53 @@ function ReminiscenceRow({
   );
 }
 
-/** Stat card with a left-edge accent strip so the four-up row reads as
- *  distinct buckets without relying on heavy color fills. */
-function Stat({
-  icon,
-  label,
-  value,
-  hint,
-  accent,
+/** 에이전트 — MCP 상태 + 어제 이후 에이전트별 기록 수 + [연결 관리]. */
+function AgentsCard({
+  stats,
+  onManage,
 }: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  hint: string;
-  accent: "blue" | "green" | "yellow" | "red";
+  stats: ActivityStats | null;
+  onManage: () => void;
 }) {
-  const stripMap: Record<typeof accent, string> = {
-    blue: "bg-accent-blue",
-    green: "bg-accent-green",
-    yellow: "bg-accent-yellow",
-    red: "bg-accent-red",
-  };
-  const iconMap: Record<typeof accent, string> = {
-    blue: "text-accent-blue",
-    green: "text-accent-green",
-    yellow: "text-accent-yellow",
-    red: "text-accent-red",
-  };
+  const mcp = useMcpSummary();
+  const agents = ["claude-code", "codex", "cursor"] as const;
   return (
-    <div className="relative overflow-hidden rounded-lg border border-hairline bg-surface px-4 py-4 pl-5">
-      <span
-        className={cn(
-          "absolute inset-y-0 left-0 w-0.5",
-          stripMap[accent],
-        )}
-      />
-      <div className="flex items-center gap-2">
-        <span className={iconMap[accent]}>{icon}</span>
-        <span className="text-[12px] uppercase tracking-[0.4px] text-stone">
-          {label}
-        </span>
-      </div>
-      <span className="mt-1.5 block text-[26px] font-medium leading-none text-ink">
-        {value}
-      </span>
-      <span className="mt-1.5 block text-[12px] text-mute">{hint}</span>
-    </div>
-  );
-}
-
-function ActivityCard({
-  commits,
-  data,
-}: {
-  commits: number;
-  data: number[];
-}) {
-  return (
-    <section className="overflow-hidden rounded-lg border border-hairline bg-surface">
-      <header className="flex items-center justify-between border-b border-hairline px-5 py-3">
-        <div className="flex items-center gap-2">
-          <GitCommit size={15} className="text-accent-blue" />
-          <h2 className="text-[16px] font-medium text-ink">30일 활동</h2>
-        </div>
-        <span className="rounded-xs bg-accent-blue-soft px-2 py-0.5 text-[12px] font-medium text-accent-blue">
-          {commits.toLocaleString()} commits
-        </span>
-      </header>
-      <div className="px-5 py-4">
-        <Sparkline data={data} />
-      </div>
-    </section>
-  );
-}
-
-function Sparkline({ data }: { data: number[] }) {
-  const max = Math.max(1, ...data);
-  return (
-    <div className="flex h-14 items-end gap-[3px]">
-      {data.map((v, i) => {
-        const pct = (v / max) * 100;
-        return (
-          <div
-            key={i}
+    <section className="rounded-lg border border-hairline bg-surface px-4 py-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">에이전트</span>
+        <span className="flex items-center gap-1.5 text-[11px] text-mute">
+          <span
             className={cn(
-              "flex-1 rounded-xs transition-colors",
-              v === 0
-                ? "bg-hairline"
-                : v / max > 0.66
-                  ? "bg-accent-blue"
-                  : "bg-accent-blue-soft",
+              "h-1.5 w-1.5 rounded-full",
+              mcp.running ? "bg-accent-green" : "bg-stone",
             )}
-            style={{ height: `${Math.max(pct, v === 0 ? 6 : 12)}%` }}
-            title={`${v} commits · ${i + 1}일 전`}
           />
-        );
-      })}
-    </div>
-  );
-}
-
-function build30DayActivity(commits: CommitSummary[]): number[] {
-  const bins = new Array(30).fill(0);
-  const now = Date.now();
-  for (const c of commits) {
-    const age = now - c.ts * 1000;
-    const day = Math.floor(age / (24 * 60 * 60 * 1000));
-    if (day >= 0 && day < 30) {
-      bins[29 - day] += 1;
-    }
-  }
-  return bins;
-}
-
-function prettyBytes(n: number): string {
-  if (n < 1024) return `${n}B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-function formatHM(ms: number): string {
-  const d = new Date(ms);
-  const h = String(d.getHours()).padStart(2, "0");
-  const m = String(d.getMinutes()).padStart(2, "0");
-  return `${h}:${m}`;
-}
-
-function timeAgo(ms: number): string {
-  const diff = Date.now() - ms;
-  if (diff < 60 * 1000) return "방금";
-  if (diff < 60 * 60 * 1000) return `${Math.floor(diff / (60 * 1000))}분 전`;
-  if (diff < 24 * 60 * 60 * 1000)
-    return `${Math.floor(diff / (60 * 60 * 1000))}시간 전`;
-  if (diff < 7 * 24 * 60 * 60 * 1000)
-    return `${Math.floor(diff / (24 * 60 * 60 * 1000))}일 전`;
-  const d = new Date(ms);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-/** Top-of-Home card explaining the two-step Claude Code 통합:
- *   1. MCP 서버 등록 (사이드바 → 프로젝트 우클릭 → Claude Code 설치 명령)
- *   2. Skill 설치 (각 프로젝트 홈 헤더의 "Skill 설치" 버튼)
- *  Skill 은 프로젝트별로 분리돼서 각 SKILL 안에 그 프로젝트의 scoped
- *  endpoint URL 이 박힘. 여기서는 일괄 설치/갱신 단축 버튼 + 현재
- *  설치 현황만 보여준다.
- */
-function SkillSetupCard() {
-  const tree = useApp((s) => s.tree);
-  const projects = useMemo(
-    () => tree?.projects.map((p) => p.name) ?? [],
-    [tree],
-  );
-  const [installed, setInstalled] = useState<Record<string, boolean>>({});
-  const [busy, setBusy] = useState(false);
-  const [flash, setFlash] = useState<string | null>(null);
-
-  // Refresh per-project install status whenever the project list changes.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const next: Record<string, boolean> = {};
-      for (const p of projects) {
-        try {
-          next[p] = await ipc.skillStatus(p);
-        } catch {
-          next[p] = false;
-        }
-      }
-      if (!cancelled) setInstalled(next);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [projects]);
-
-  useEffect(() => {
-    if (!flash) return;
-    const t = setTimeout(() => setFlash(null), 4000);
-    return () => clearTimeout(t);
-  }, [flash]);
-
-  const installAll = async () => {
-    setBusy(true);
-    try {
-      for (const p of projects) {
-        await ipc.installSkill(p);
-      }
-      const next: Record<string, boolean> = {};
-      for (const p of projects) next[p] = true;
-      setInstalled(next);
-      setFlash(`${projects.length} 개 프로젝트 Skill 설치/갱신 완료`);
-    } catch (e) {
-      setFlash(`실패: ${e}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const installedCount = Object.values(installed).filter(Boolean).length;
-
-  return (
-    <section className="mt-6 rounded-lg border border-hairline bg-surface p-4">
-      <header className="flex items-start justify-between gap-3">
-        <div className="flex items-start gap-2.5 min-w-0">
-          <Sparkles size={16} className="mt-[2px] shrink-0 text-accent-blue" />
-          <div className="min-w-0">
-            <div className="text-[14px] font-semibold text-ink">
-              Claude Code 통합
-            </div>
-            <div className="mt-0.5 text-[12px] leading-[1.6] text-mute">
-              <strong className="text-on-dark">Skill</strong> 은 프로젝트별로 만들어져요 — 각
-              SKILL 에 그 프로젝트의 scoped MCP endpoint 가 박혀서, Claude
-              가 "Bonny 어제 뭐 했지" 같은 발화에 정확한 vault 로 라우팅.
-              모든 프로젝트 한 번에 설치하려면 오른쪽 버튼.
-              <strong className="text-on-dark"> CLAUDE.md</strong> 는 프로젝트별 강제 규칙이
-              필요할 때만 보조 (사이드바 우클릭 메뉴).
-            </div>
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={installAll}
-          disabled={busy || projects.length === 0}
-          className={cn(
-            "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-3 text-[12px] transition-colors disabled:opacity-60",
-            installedCount === projects.length && projects.length > 0
-              ? "border-accent-green/40 bg-accent-green-soft text-accent-green hover:border-accent-green"
-              : "border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark",
-          )}
-        >
-          <Sparkles size={12} />
-          {projects.length === 0
-            ? "프로젝트 없음"
-            : busy
-              ? "설치 중…"
-              : installedCount === projects.length
-                ? "모두 갱신"
-                : `Skill ${projects.length} 개 설치`}
-        </button>
-      </header>
-      {flash && (
-        <div className="mt-2 text-[11px] text-accent-green">✓ {flash}</div>
-      )}
-      {projects.length > 0 && (
-        <div className="mt-3 grid grid-cols-3 gap-2 text-[11px]">
-          {projects.map((p) => (
-            <div
-              key={p}
-              className={cn(
-                "flex items-center gap-1.5 rounded-md border px-2 py-1.5",
-                installed[p]
-                  ? "border-accent-green/40 bg-accent-green-soft/30"
-                  : "border-hairline bg-surface-elevated",
-              )}
-            >
-              <span
-                className={cn(
-                  "h-1.5 w-1.5 shrink-0 rounded-full",
-                  installed[p] ? "bg-accent-green" : "bg-stone",
-                )}
-              />
-              <span className="truncate text-body">{p}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ─── ProjectActivityCard ────────────────────────────────────────────────
-//
-// "어느 프로젝트에 시간 쓰고 있나" 를 가장 cheap 한 두 신호 — vault git
-// commit 수 + MCP 외부 쓰기 호출 수 — 의 합으로 시각화. 타이머가 아니라
-// "활동량" 이라 절대 시간(분) 은 아니지만 트렌드 비교는 정확하다.
-
-const RANGE_OPTIONS: Array<{ days: number; label: string }> = [
-  { days: 7, label: "7일" },
-  { days: 30, label: "30일" },
-  { days: 90, label: "90일" },
-];
-
-function ProjectActivityCard() {
-  const [days, setDays] = useState(30);
-  const [data, setData] = useState<ActivityOverview | null>(null);
-  const [loading, setLoading] = useState(false);
-  const projectColors = useApp((s) => s.cfg?.project_colors ?? {});
-  const selectProject = useApp((s) => s.selectProject);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    ipc
-      .projectActivityOverview(days)
-      .then((res) => {
-        if (!cancelled) setData(res);
-      })
-      .catch(() => {
-        if (!cancelled) setData(null);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [days]);
-
-  const active = useMemo(
-    () => (data?.by_project ?? []).filter((p) => p.activity_score > 0),
-    [data],
-  );
-
-  const totalScore = useMemo(
-    () => active.reduce((acc, p) => acc + p.activity_score, 0),
-    [active],
-  );
-
-  // 프로젝트별 cfg 색을 우선 쓰되, 같은 도넛 안에서 색이 충돌하면
-  // 팔레트 남은 키 중에서 채워서 segment 구분이 명확하게.
-  const colorByProject = useMemo(
-    () => assignDistinctColors(active.map((p) => p.project), projectColors),
-    [active, projectColors],
-  );
-
-  return (
-    <section className="overflow-hidden rounded-lg border border-hairline bg-surface">
-      <header className="flex items-center justify-between border-b border-hairline px-5 py-3">
-        <div className="flex items-center gap-2">
-          <Activity size={14} className="text-stone" />
-          <span className="text-[12px] font-semibold uppercase tracking-[0.6px] text-mute">
-            프로젝트 활동 분포
-          </span>
-        </div>
-        <div className="flex items-center gap-1">
-          {RANGE_OPTIONS.map((opt) => (
-            <button
-              key={opt.days}
-              onClick={() => setDays(opt.days)}
-              className={cn(
-                "rounded-sm px-2 py-1 text-[11px] transition-colors",
-                days === opt.days
-                  ? "bg-surface-elevated text-ink"
-                  : "text-stone hover:text-mute",
-              )}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-      </header>
-
-      {loading && !data && <ActivityCardSkeleton />}
-
-      {data && active.length === 0 && (
-        <div className="px-5 py-10 text-center text-[13px] text-stone">
-          이 기간에 활동이 없어요.
-        </div>
-      )}
-
-      {data && active.length > 0 && (
-        <div className="grid gap-6 p-5 md:grid-cols-[180px_1fr]">
-          {/* Donut */}
-          <div className="flex flex-col items-center gap-3">
-            <ActivityDonut
-              segments={active.map((p) => ({
-                key: p.project,
-                value: p.activity_score,
-                color: colorByProject[p.project],
-              }))}
-            />
-            <div className="flex flex-col items-center text-center">
-              <span className="text-[20px] font-medium text-ink">
-                {totalScore.toLocaleString()}
-              </span>
-              <span className="text-[11px] text-stone">
-                {days}일 활동량
-              </span>
-            </div>
-          </div>
-
-          {/* Ranked bars — clickable rows that jump straight into the
-              project's dashboard. */}
-          <ul className="flex flex-col gap-1">
-            {active.map((p) => {
-              const pct =
-                totalScore > 0 ? (p.activity_score / totalScore) * 100 : 0;
-              const color = colorByProject[p.project];
-              return (
-                <li key={p.project}>
-                  <button
-                    type="button"
-                    onClick={() => selectProject(p.project)}
-                    className="group flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-surface-elevated"
-                  >
-                    <span
-                      className="h-2.5 w-2.5 shrink-0 rounded-full"
-                      style={{ background: color }}
-                    />
-                    <span className="w-28 truncate text-[13px] text-ink">
-                      {p.project}
-                    </span>
-                    <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-surface-elevated">
-                      <div
-                        className="absolute inset-y-0 left-0 rounded-full"
-                        style={{
-                          width: `${Math.max(pct, 1.5)}%`,
-                          background: color,
-                        }}
-                      />
-                    </div>
-                    <span className="w-20 shrink-0 whitespace-nowrap text-right font-mono text-[11px] tabular-nums text-mute">
-                      {p.activity_score.toLocaleString()}
-                    </span>
-                    <span className="w-12 shrink-0 whitespace-nowrap text-right text-[10px] text-stone">
-                      {pct.toFixed(0)}%
-                    </span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
-
-      {data && (
-        <footer className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-hairline bg-surface-elevated/30 px-5 py-2.5 text-[11px] text-stone">
-          <span>
-            commit{" "}
-            <span className="font-mono text-mute">
-              {data.total_commits.toLocaleString()}
-            </span>
-          </span>
-          <span>
-            MCP 호출{" "}
-            <span className="font-mono text-mute">
-              {data.total_mcp_calls.toLocaleString()}
-            </span>
-          </span>
-          <span>
-            MCP 토큰{" "}
-            <span className="font-mono text-mute">
-              {compactNumber(data.total_mcp_tokens)}
-            </span>
-          </span>
-        </footer>
-      )}
-    </section>
-  );
-}
-
-function ActivityCardSkeleton() {
-  return (
-    <div className="grid gap-6 p-5 md:grid-cols-[180px_1fr]">
-      <div className="flex flex-col items-center gap-3">
-        <div className="h-[140px] w-[140px] animate-pulse rounded-full border-[18px] border-surface-elevated" />
-        <div className="flex flex-col items-center gap-1.5">
-          <div className="h-5 w-16 animate-pulse rounded-sm bg-surface-elevated" />
-          <div className="h-3 w-14 animate-pulse rounded-sm bg-surface-elevated" />
-        </div>
+          {mcp.running ? `MCP :${mcp.port}` : "MCP 꺼짐"}
+        </span>
       </div>
-      <ul className="flex flex-col gap-2">
-        {[0, 1, 2, 3, 4].map((i) => (
-          <li key={i} className="flex items-center gap-3 py-1">
-            <span className="h-2.5 w-2.5 shrink-0 animate-pulse rounded-full bg-surface-elevated" />
-            <span
-              className="h-3 animate-pulse rounded-sm bg-surface-elevated"
-              style={{ width: `${50 + ((i * 7) % 30)}%` }}
-            />
-            <span className="ml-auto h-3 w-10 animate-pulse rounded-sm bg-surface-elevated" />
-          </li>
-        ))}
+      <ul className="flex flex-col gap-1 text-[12px]">
+        {agents.map((a) => {
+          const n = stats?.byClient[a] ?? 0;
+          return (
+            <li key={a} className="flex items-center justify-between">
+              <span className={n > 0 ? "text-body" : "text-mute"}>{clientLabel(a)}</span>
+              <span className="font-mono text-[11px] text-stone">
+                {n > 0 ? `${n}건` : "—"}
+              </span>
+            </li>
+          );
+        })}
+        <li className="flex items-center justify-between">
+          <span className="text-mute">연결 파일</span>
+          <span className="font-mono text-[11px] text-stone">{mcp.connectionCount}개</span>
+        </li>
       </ul>
-    </div>
-  );
-}
-
-function compactNumber(n: number): string {
-  if (n < 1000) return n.toString();
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
-}
-
-/** Build a `project → hex` map for the donut so adjacent slices can't
- *  share a color. We seed with each project's configured color when it's
- *  unique; collisions and unset projects get filled deterministically
- *  from the remaining palette keys (in declaration order). When the
- *  palette runs out (>8 active projects) we wrap, which is fine — the
- *  ranked-list label below the donut disambiguates. */
-function assignDistinctColors(
-  projects: string[],
-  cfg: Record<string, string | undefined> = {},
-): Record<string, string> {
-  const palette = PROJECT_COLOR_KEYS;
-  const result: Record<string, string> = {};
-  const used = new Set<string>();
-  const pending: string[] = [];
-
-  // Pass 1: take cfg color when free.
-  for (const p of projects) {
-    const key = cfg[p];
-    if (key && (palette as readonly string[]).includes(key) && !used.has(key)) {
-      used.add(key);
-      result[p] = projectColorVars(key).fg;
-    } else {
-      pending.push(p);
-    }
-  }
-
-  // Pass 2: unique fallback from palette in declaration order.
-  let cursor = 0;
-  for (const p of pending) {
-    let pick: string | null = null;
-    for (let tries = 0; tries < palette.length; tries++) {
-      const candidate = palette[cursor % palette.length];
-      cursor++;
-      if (!used.has(candidate)) {
-        pick = candidate;
-        used.add(candidate);
-        break;
-      }
-    }
-    if (!pick) {
-      // Wrap — palette exhausted. Hue-shift via cursor so we still vary.
-      pick = palette[cursor % palette.length];
-      cursor++;
-    }
-    result[p] = projectColorVars(pick).fg;
-  }
-  return result;
-}
-
-/** SVG donut. Each segment is a stroke-dasharray slice on a centered
- *  circle. 1.5° gap between slices keeps colors visually distinct on
- *  the dark surface without losing tiny segments. */
-function ActivityDonut({
-  segments,
-}: {
-  segments: Array<{ key: string; value: number; color: string }>;
-}) {
-  const size = 140;
-  const stroke = 18;
-  const radius = (size - stroke) / 2;
-  const cx = size / 2;
-  const cy = size / 2;
-  const circumference = 2 * Math.PI * radius;
-  const total = segments.reduce((acc, s) => acc + s.value, 0);
-
-  let offset = 0;
-  const arcs = segments
-    .filter((s) => s.value > 0)
-    .map((s) => {
-      const fraction = total > 0 ? s.value / total : 0;
-      const length = fraction * circumference;
-      const dasharray = `${length} ${circumference - length}`;
-      const dashoffset = -offset;
-      offset += length;
-      return { ...s, dasharray, dashoffset };
-    });
-
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox={`0 0 ${size} ${size}`}
-      className="block"
-    >
-      <circle
-        cx={cx}
-        cy={cy}
-        r={radius}
-        fill="none"
-        stroke="var(--color-surface-elevated, #1d1f21)"
-        strokeWidth={stroke}
-      />
-      {arcs.map((a, i) => (
-        <circle
-          key={a.key + i}
-          cx={cx}
-          cy={cy}
-          r={radius}
-          fill="none"
-          stroke={a.color}
-          strokeWidth={stroke}
-          strokeDasharray={a.dasharray}
-          strokeDashoffset={a.dashoffset}
-          strokeLinecap="butt"
-          transform={`rotate(-90 ${cx} ${cy})`}
-        />
-      ))}
-    </svg>
+      <button
+        onClick={onManage}
+        className="mt-2.5 inline-flex h-7 w-full items-center justify-center gap-1.5 rounded-md border border-hairline bg-surface-elevated text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
+      >
+        <Server size={12} /> 연결 관리
+      </button>
+    </section>
   );
 }

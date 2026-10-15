@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Check, ChevronDown, ChevronUp, Copy, FileText, Link2, Loader2, Save, Sparkles, Undo2, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronDown, ChevronUp, Copy, FileText, Loader2, MoreHorizontal, PanelRight, Save, Sparkles, X } from "lucide-react";
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { BlockNoteEditor, type PartialBlock } from "@blocknote/core";
@@ -10,11 +10,15 @@ import {
   exportBlocksToMarkdown,
   parseMarkdownRestoringImages,
 } from "@/main/imageRoundTrip";
-import { ipc } from "@/lib/ipc";
+import { DOC_CONFLICT, ipc } from "@/lib/ipc";
+import { DocInspector } from "@/main/DocInspector";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 import { resolveTheme, type ThemeChoice } from "@/lib/theme";
 import { isWikiHref, parseWikiHref } from "@/main/wikiLinks";
+
+/** 마지막 입력 뒤 이만큼 조용하면 자동 저장. */
+const AUTOSAVE_DELAY_MS = 1500;
 
 function useResolvedTheme(): "dark" | "light" {
   const choice = useApp(
@@ -33,14 +37,21 @@ function useResolvedTheme(): "dark" | "light" {
   return resolved;
 }
 
+const INSPECTOR_OPEN_KEY = "danbi:inspector-open";
+
 export function DocView({
   refreshKey,
   onOpenGraph,
+  onRenameDomain,
+  onDeleteDomain,
 }: {
   refreshKey: number;
-  /** 도메인 헤더의 "그래프" 버튼이 호출. 그래프 뷰가 현재 프로젝트로
-   *  spotlight 된 상태로 열림. */
+  /** ··· 메뉴 "그래프에서 보기". 그래프 뷰가 현재 프로젝트로 spotlight
+   *  된 상태로 열림. */
   onOpenGraph?: () => void;
+  /** ··· 메뉴 이름 바꾸기 / 삭제 — Workspace 의 다이얼로그를 연다. */
+  onRenameDomain?: (project: string, domain: string) => void;
+  onDeleteDomain?: (project: string, domain: string) => void;
 }) {
   const cfg = useApp((s) => s.cfg);
   const selection = useApp((s) => s.selection);
@@ -100,37 +111,177 @@ export function DocView({
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [bytes, setBytes] = useState(0);
+  /** 이 세션에서 마지막으로 저장한 시각 — 헤더 "저장됨 14:32". */
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  /** 인스펙터 복원 뒤 강제 재로드용. */
+  const [reloadTick, setReloadTick] = useState(0);
+  /** 편집 중에 다른 곳(에이전트 등)이 이 문서를 바꿔 저장을 보류한 상태.
+   *  풀릴 때까지 자동 저장을 멈추고 배너로 선택을 받는다. */
+  const [conflict, setConflict] = useState(false);
+  const conflictRef = useRef(false);
+  const setConflictState = useCallback((v: boolean) => {
+    conflictRef.current = v;
+    setConflict(v);
+  }, []);
 
-  // Last markdown we synced to disk — dirty = (current markdown !== lastSynced).
+  // Last markdown we synced to disk. `dirty` 는 onChange 플래그 — 키 입력마다
+  // 전체 마크다운을 직렬화해 비교하지 않는다 (큰 문서에서 타이핑이 끊기던
+  // 원인). 실제 "바뀐 게 없음" 판정은 save() 에서 한 번만 한다.
   const lastSyncedMd = useRef<string>("");
   // Suppress the onChange handler when we rehydrate from disk.
   const suppressChange = useRef(false);
+  // 타이머·load() 처럼 stale closure 를 피해야 하는 곳에서 읽는 미러.
+  const dirtyRef = useRef(false);
+  const markDirty = useCallback((v: boolean) => {
+    dirtyRef.current = v;
+    setDirty(v);
+  }, []);
 
   // Track which doc the *current* editor content represents. Used so a
   // watcher-triggered refreshKey bump doesn't rebuild the editor when
   // we'd just be replacing the document with itself — the rebuild
   // visibly flickers because BlockNote rerenders the entire tree.
+  //
+  // 저장은 항상 *이 문서* 로 간다 (selection 이 아니라). 사이드바에서 다른
+  // 문서를 고른 직후엔 selection 은 이미 B 인데 에디터 본문은 아직 A 라서,
+  // selection 기준으로 쓰면 A 본문이 B 경로에 저장되는 사고가 났다.
   const loadedKey = useRef<string | null>(null);
+  const loadedDoc = useRef<{
+    vault: string;
+    project: string;
+    domain: string;
+  } | null>(null);
+  // 진행 중인 저장. load() 는 전환 전에 이걸 기다린 뒤 flush 한다.
+  const saveInFlight = useRef<Promise<void> | null>(null);
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelAutosave = useCallback(() => {
+    if (autosaveTimer.current) {
+      clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+    }
+  }, []);
+
+  /** 에디터 본문을 `loadedDoc` 경로에 저장. 바뀐 게 없으면 쓰기 없이
+   *  dirty 만 내린다. 동시 호출은 진행 중인 저장을 그대로 돌려준다. */
+  const save = useCallback((overwrite = false): Promise<void> => {
+    if (saveInFlight.current) return saveInFlight.current;
+    const target = loadedDoc.current;
+    if (!target || !dirtyRef.current) return Promise.resolve();
+    cancelAutosave();
+    if (conflictRef.current && !overwrite) {
+      return Promise.reject(new Error(`${DOC_CONFLICT}: 저장 보류 중`));
+    }
+    const run = (async () => {
+      setSaving(true);
+      try {
+        const live = exportBlocksToMarkdown(editor);
+        const md = rewriteMdAbsoluteToRelative(live);
+        if (md === lastSyncedMd.current) {
+          // 타이핑 후 되돌린 경우 — 디스크와 같으니 커밋을 만들지 않는다.
+          if (loadedDoc.current === target) markDirty(false);
+          return;
+        }
+        // 우리가 만든 저장이라는 marker — Workspace 의 watcher refresh 가
+        // 이 직후 발화하는 vault:changed 를 한 번 무시하게 해서 사이드바
+        // listTree + linkIndex 재빌드를 건너뛴다.
+        useApp
+          .getState()
+          .markSelfSave(`Projects/${target.project}/${target.domain}`);
+        try {
+          // 마지막으로 읽거나 쓴 본문을 base 로 넘겨, 그 사이 에이전트가 쓴
+          // 내용을 덮어쓰지 않게 한다. 사용자가 덮어쓰기를 고르면 base 없이.
+          await ipc.writeDoc(
+            target.vault,
+            target.project,
+            target.domain,
+            md,
+            overwrite ? undefined : lastSyncedMd.current,
+          );
+        } catch (e) {
+          if (String(e).startsWith(DOC_CONFLICT) && loadedDoc.current === target) {
+            setConflictState(true);
+          }
+          throw e;
+        }
+        // 저장 중에 문서가 바뀌지 않았을 때만 상태를 내린다 (load() 가
+        // flush 를 기다리므로 보통은 항상 같다).
+        if (loadedDoc.current === target) {
+          lastSyncedMd.current = md;
+          setBytes(md.length);
+          markDirty(false);
+          setLastSavedAt(Date.now());
+          setConflictState(false);
+        }
+      } finally {
+        setSaving(false);
+        saveInFlight.current = null;
+      }
+    })();
+    saveInFlight.current = run;
+    return run;
+  }, [editor, cancelAutosave, markDirty, setConflictState]);
+
+  // 실패를 toast 로 알리는 변형 — 본문은 에디터에 그대로 남아 있으므로
+  // 전체 패널을 에러로 바꾸지 않는다 (사용자가 다시 ⌘S 하면 됨).
+  const saveOrNotify = useCallback(() => {
+    const target = loadedDoc.current;
+    return save().catch((e) => {
+      // 충돌은 문서 위 배너가 알린다 — toast 를 겹쳐 띄우지 않는다.
+      if (String(e).includes(DOC_CONFLICT)) return;
+      pushNotification({
+        tone: "err",
+        title: "저장 실패",
+        body: `${target?.project}/${target?.domain} — ${String(e).slice(0, 120)}`,
+      });
+    });
+  }, [save, pushNotification]);
+
   useEffect(() => {
     let alive = true;
     async function load() {
+      const nextKey =
+        cfg?.vault_path && selection.project && selection.domain
+          ? `${cfg.vault_path}|${selection.project}|${selection.domain}`
+          : null;
+      const isSwitchingDoc = loadedKey.current !== nextKey;
+
+      // 다른 문서로 가기 전에 미저장분을 "떠나는" 문서에 flush. 실패하면
+      // 전환을 멈추고 에러를 보여줘 본문이 사라지지 않게 한다.
+      if (isSwitchingDoc && loadedDoc.current) {
+        cancelAutosave();
+        try {
+          if (saveInFlight.current) await saveInFlight.current;
+          if (dirtyRef.current) await save();
+        } catch (e) {
+          const left = loadedDoc.current;
+          pushNotification({
+            tone: "err",
+            title: "저장 실패 — 문서를 전환하지 않았어요",
+            body: `${left?.project}/${left?.domain} — ${String(e).slice(0, 120)}`,
+          });
+          if (left) selectDomain(left.project, left.domain);
+          return;
+        }
+        if (!alive) return;
+      }
+
       if (!cfg?.vault_path || !selection.project || !selection.domain) {
         suppressChange.current = true;
         await replaceEditorFromMd(editor, "", null, null);
         suppressChange.current = false;
         lastSyncedMd.current = "";
         loadedKey.current = null;
+        loadedDoc.current = null;
         setBytes(0);
-        setDirty(false);
+        markDirty(false);
         setErr(null);
         return;
       }
       // If the user has unsaved edits, don't stomp them when the watcher
       // re-fires (e.g. we just saved). Only reload when clean.
-      if (dirty) return;
+      if (!isSwitchingDoc && dirtyRef.current) return;
 
-      const selKey = `${cfg.vault_path}|${selection.project}|${selection.domain}`;
-      const isSwitchingDoc = loadedKey.current !== selKey;
+      const selKey = nextKey!;
 
       // For watcher-fired reloads on the SAME doc, peek at the file
       // first. Skip the editor rebuild entirely if bytes are identical
@@ -159,8 +310,15 @@ export function DocView({
         suppressChange.current = false;
         lastSyncedMd.current = md;
         loadedKey.current = selKey;
+        setConflictState(false);
+        if (isSwitchingDoc) setLastSavedAt(null);
+        loadedDoc.current = {
+          vault: cfg.vault_path,
+          project: selection.project,
+          domain: selection.domain,
+        };
         setBytes(md.length);
-        setDirty(false);
+        markDirty(false);
       } catch (e) {
         if (alive) setErr(String(e));
       } finally {
@@ -172,43 +330,40 @@ export function DocView({
       alive = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg?.vault_path, selection.project, selection.domain, refreshKey]);
+  }, [cfg?.vault_path, selection.project, selection.domain, refreshKey, reloadTick]);
 
-  async function save() {
-    if (
-      !cfg?.vault_path ||
-      !selection.project ||
-      !selection.domain ||
-      saving ||
-      !dirty
-    )
-      return;
-    setSaving(true);
+  // 언마운트(프로젝트 홈으로 이동 등) 시에도 미저장분을 flush.
+  useEffect(() => {
+    return () => {
+      cancelAutosave();
+      if (dirtyRef.current) saveOrNotify();
+    };
+  }, [saveOrNotify, cancelAutosave]);
+
+  /** 충돌 배너: 내 편집을 버리고 디스크(에이전트가 쓴) 버전으로 다시 연다. */
+  async function loadDiskVersion() {
+    const target = loadedDoc.current;
+    if (!target) return;
+    cancelAutosave();
     try {
-      const live = exportBlocksToMarkdown(editor);
-      const md = rewriteMdAbsoluteToRelative(live);
-      // 우리가 만든 저장이라는 marker — Workspace 의 watcher refresh 가
-      // 이 직후 발화하는 vault:changed 를 한 번 무시하게 해서 사이드바
-      // listTree + linkIndex 재빌드를 건너뛴다.
-      useApp.getState().markSelfSave();
-      await ipc.writeDoc(
-        cfg.vault_path,
-        selection.project,
-        selection.domain,
-        md,
-      );
+      const md = await ipc.readDoc(target.vault, target.project, target.domain);
+      if (loadedDoc.current !== target) return;
+      suppressChange.current = true;
+      await replaceEditorFromMd(editor, md, target.vault, target.project);
+      suppressChange.current = false;
       lastSyncedMd.current = md;
       setBytes(md.length);
-      setDirty(false);
+      markDirty(false);
+      setConflictState(false);
     } catch (e) {
+      suppressChange.current = false;
       setErr(String(e));
-    } finally {
-      setSaving(false);
     }
   }
 
   async function revert() {
     if (!dirty) return;
+    cancelAutosave();
     suppressChange.current = true;
     await replaceEditorFromMd(
       editor,
@@ -218,7 +373,7 @@ export function DocView({
     );
     suppressChange.current = false;
     setBytes(lastSyncedMd.current.length);
-    setDirty(false);
+    markDirty(false);
   }
 
   // ⌘S / Ctrl+S to save. ⌘F / Ctrl+F to open the in-doc find bar.
@@ -226,7 +381,7 @@ export function DocView({
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
-        save();
+        saveOrNotify();
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setFindOpen(true);
@@ -234,8 +389,7 @@ export function DocView({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg?.vault_path, selection.project, selection.domain, dirty]);
+  }, [saveOrNotify]);
 
   // wiki-link 클릭 — 본문에서 [[link]] 가 markdown anchor 로 변환돼서
   // <a href="danbi:..."> 로 렌더된다. 클릭을 가로채서 selection 만 바꾸고
@@ -301,14 +455,6 @@ export function DocView({
   const [exportHistory, setExportHistory] = useState<
     import("@/lib/ipc").ExportRecord[]
   >([]);
-  const [historyOpen, setHistoryOpen] = useState(false);
-  // 문서별 git 변경 히스토리 — replace_section / upsert_item 등 외부
-  // LLM 의 쓰기까지 모두 포착. 섹션·항목 단위로 어떤 것이 언제 갱신됐는지
-  // 보여주는 사이드 카드의 데이터 소스.
-  const [changeHistory, setChangeHistory] = useState<
-    import("@/lib/ipc").DocChangeEntry[]
-  >([]);
-  const [changeHistoryOpen, setChangeHistoryOpen] = useState(false);
   const isDailyNote = (() => {
     const d = selection.domain ?? "";
     // daily/YYYY-MM-DD.md 형식
@@ -341,28 +487,6 @@ export function DocView({
     selection.domain,
     summaryResult,
   ]);
-
-  // 변경 히스토리 자동 로드 — 문서가 바뀌거나 저장이 끝나면 다시 받음.
-  // refreshKey 도 의존성에 넣어서 외부 LLM 의 mcp upsert/replace 직후에도
-  // 바로 반영. 실패는 silent (히스토리 없음).
-  useEffect(() => {
-    if (!selection.project || !selection.domain) {
-      setChangeHistory([]);
-      return;
-    }
-    let alive = true;
-    ipc
-      .docChangeHistory(selection.project, selection.domain, 30)
-      .then((rs) => {
-        if (alive) setChangeHistory(rs);
-      })
-      .catch(() => {
-        if (alive) setChangeHistory([]);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [selection.project, selection.domain, refreshKey, dirty]);
 
   const [findIndex, setFindIndex] = useState(0);
   const [findCount, setFindCount] = useState(0);
@@ -419,7 +543,7 @@ export function DocView({
           }
           const m = document.createElement("mark");
           m.setAttribute("data-danbi-match", String(total));
-          m.style.backgroundColor = "rgba(250, 204, 21, 0.35)";
+          m.style.backgroundColor = "var(--color-accent-yellow-soft)";
           m.style.color = "inherit";
           m.style.borderRadius = "2px";
           m.style.padding = "0 1px";
@@ -467,16 +591,11 @@ export function DocView({
     marks.forEach((m, i) => {
       const active = i === findIndex;
       m.style.backgroundColor = active
-        ? "rgba(250, 204, 21, 1)"
-        : "rgba(250, 204, 21, 0.35)";
-      m.style.color = active ? "#0a0a0a" : "inherit";
-      m.style.outline = active
-        ? "2px solid rgba(245, 158, 11, 1)"
-        : "";
+        ? "var(--color-accent-yellow)"
+        : "var(--color-accent-yellow-soft)";
+      m.style.color = active ? "var(--color-canvas)" : "inherit";
+      m.style.outline = active ? "2px solid var(--color-accent-yellow)" : "";
       m.style.outlineOffset = active ? "1px" : "";
-      m.style.boxShadow = active
-        ? "0 0 0 4px rgba(250, 204, 21, 0.25)"
-        : "";
     });
     const active = marks[findIndex];
     if (active) {
@@ -516,11 +635,24 @@ export function DocView({
     setFindIndex((i) => (i + delta + findCount) % findCount);
   }
 
-  // Autosave on editor blur — the safest trigger. A commit snapshot already
-  // fires inside `save()` via the Rust `writeDoc` pipeline (editor changes
-  // go through vcs), so undo via ⌘Z-equivalent is preserved. Only runs when
-  // the user opted in via Settings > 편집 > 자동 저장.
-  const autosaveEnabled = cfg?.editor.autosave ?? false;
+  // 자동 저장 — 입력이 멈추고 AUTOSAVE_DELAY_MS 뒤 + 에디터 blur 시. 커밋은
+  // Rust `writeDoc` 파이프라인(vcs) 안에서 만들어지므로 되돌리기는 그대로.
+  // Settings > 편집 > 자동 저장 으로 끌 수 있다 (기본 켜짐). 꺼도 문서 전환
+  // 시 flush 는 항상 한다.
+  const autosaveEnabled = cfg?.editor.autosave ?? true;
+  const autosaveRef = useRef(autosaveEnabled);
+  useEffect(() => {
+    autosaveRef.current = autosaveEnabled;
+    if (!autosaveEnabled) cancelAutosave();
+  }, [autosaveEnabled, cancelAutosave]);
+  const scheduleAutosave = useCallback(() => {
+    if (!autosaveRef.current || conflictRef.current) return;
+    cancelAutosave();
+    autosaveTimer.current = setTimeout(() => {
+      autosaveTimer.current = null;
+      saveOrNotify();
+    }, AUTOSAVE_DELAY_MS);
+  }, [saveOrNotify, cancelAutosave]);
   useEffect(() => {
     if (!autosaveEnabled) return;
     // We target the editor's outermost container. `focusout` bubbles
@@ -532,15 +664,160 @@ export function DocView({
       // moving between internal blocks — not a true blur.
       const nextTarget = e.relatedTarget as HTMLElement | null;
       if (nextTarget && nextTarget.closest(".danbi-editor")) return;
-      if (!dirty || saving) return;
-      save();
+      if (!dirtyRef.current) return;
+      saveOrNotify();
     }
     const el = document.querySelector(".danbi-editor");
     if (!el) return;
     el.addEventListener("focusout", onFocusOut as EventListener);
     return () => el.removeEventListener("focusout", onFocusOut as EventListener);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autosaveEnabled, dirty, saving, cfg?.vault_path, selection.project, selection.domain]);
+  }, [autosaveEnabled, saveOrNotify, loading, selection.project, selection.domain]);
+
+  // 헤더 ··· 메뉴 · 인스펙터(⌘I, 마지막 상태 기억) · 브레드크럼.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(INSPECTOR_OPEN_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleInspector = useCallback(() => {
+    setInspectorOpen((v) => {
+      try {
+        localStorage.setItem(INSPECTOR_OPEN_KEY, v ? "0" : "1");
+      } catch {
+        /* ignore */
+      }
+      return !v;
+    });
+  }, []);
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey) return;
+      // ⌥ 를 누르면 Mac 은 e.key 가 바뀌므로 물리 키로 본다.
+      if (e.code !== "KeyI") return;
+      // 에디터·입력 안에서 ⌘I 는 기울임 — 인스펙터는 ⌥⌘I 로만.
+      const t = e.target as HTMLElement | null;
+      const editable = !!t?.closest?.(
+        '[contenteditable="true"], input, textarea, select',
+      );
+      if (editable && !e.altKey) return;
+      e.preventDefault();
+      toggleInspector();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [toggleInspector]);
+  const crumbs = (() => {
+    const segs = (selection.domain ?? "").split("/");
+    return { folders: segs.slice(0, -1), file: segs[segs.length - 1] ?? "" };
+  })();
+
+  async function revealInFinder() {
+    if (!cfg?.vault_path || !selection.project || !selection.domain) return;
+    try {
+      const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+      await revealItemInDir(
+        [cfg.vault_path, "Projects", selection.project, selection.domain].join("/"),
+      );
+    } catch {
+      /* opener unavailable */
+    }
+  }
+
+  async function runSummarize() {
+    if (!aiConnected) {
+      setSummaryError(
+        "AI 연동이 꺼져있어요. Settings → 임베딩 에서 Gemini 또는 Bedrock 을 연결하면 활성화됩니다.",
+      );
+      return;
+    }
+    if (!selection.project || !selection.domain) return;
+    const proj = selection.project;
+    const dom = selection.domain;
+    setSummaryError(null);
+    // 백그라운드 패턴 — IPC 를 fire-and-forget 로 시작하고
+    // store 의 bgJob 에 진행 상태만 띄운다. 사용자는 그 사이
+    // 다른 노트 편집·검색·설정 다 가능. 완료 시 macOS 알림
+    // 으로 신호 + Sidebar progress pill 도 클릭 가능 결과로
+    // 전환된다.
+    setBgJob({
+      kind: "summarize",
+      status: "running",
+      project: proj,
+      domain: dom,
+      startedAt: Date.now(),
+    });
+    ipc
+      .summarizeDaily(proj, dom)
+      .then((r) => {
+        setBgJob({
+          kind: "summarize",
+          status: "done",
+          project: proj,
+          domain: dom,
+          exportId: r.export_id,
+          finishedAt: Date.now(),
+        });
+        // 사용자가 그 노트에 머물러있으면 모달도 즉시 띄움.
+        // 다른 노트로 이동했으면 알림만 받고 history 에서
+        // 클릭으로 열도록.
+        const cur = useApp.getState().selection;
+        if (cur.project === proj && cur.domain === dom) {
+          setSummaryResult(r);
+        }
+        // 단비 내부 알림만 — macOS 시스템 알림 안 띄움.
+        // 사이드바 헤더의 종 아이콘에 +1 배지 + popover
+        // list 에 누적. 클릭 시 결과 페이지로 라우팅.
+        pushNotification({
+          tone: "ok",
+          title: "요약 완료",
+          body: `${proj}/${dom}`,
+          action: { kind: "open-export", exportId: r.export_id },
+        });
+      })
+      .catch((e) => {
+        setBgJob({
+          kind: "summarize",
+          status: "error",
+          project: proj,
+          domain: dom,
+          message: String(e).slice(0, 240),
+          finishedAt: Date.now(),
+        });
+        pushNotification({
+          tone: "err",
+          title: "요약 실패",
+          body: `${proj}/${dom} — ${String(e).slice(0, 120)}`,
+        });
+      });
+  }
+
+  async function runExportHtml() {
+    if (!selection.project || !selection.domain) return;
+    const proj = selection.project;
+    const dom = selection.domain;
+    try {
+      const r = await ipc.exportDocHtml(proj, dom);
+      await ipc.openHtmlPreview(
+        r.html,
+        dom.replace(/\.md$/, ""),
+      );
+      pushNotification({
+        tone: "ok",
+        title: "HTML 추출 완료",
+        body: `${proj}/${dom}`,
+        action: { kind: "open-export", exportId: r.export_id },
+      });
+    } catch (e) {
+      pushNotification({
+        tone: "err",
+        title: "HTML 추출 실패",
+        body: `${proj}/${dom} — ${String(e).slice(0, 120)}`,
+      });
+    }
+  }
 
   if (!selection.project || !selection.domain) {
     return (
@@ -563,342 +840,193 @@ export function DocView({
     <div className="flex h-full flex-col">
       <header
         data-tauri-drag-region
-        className="flex h-10 shrink-0 items-center justify-between border-b border-hairline px-5"
+        className="flex h-10 shrink-0 items-center justify-between border-b border-hairline px-4"
       >
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
           <button
             onClick={() => {
               if (selection.project) selectProject(selection.project);
             }}
-            title="프로젝트 홈으로"
+            title="프로젝트 홈으로 (⌘[)"
             className="inline-flex h-6 w-6 shrink-0 place-items-center rounded-sm text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
           >
             <ArrowLeft size={13} />
           </button>
+          {/* 브레드크럼 — 프로젝트 › 폴더 › 파일. 프로젝트는 홈으로. */}
           <button
             onClick={() => {
               if (selection.project) selectProject(selection.project);
             }}
-            className="shrink-0 text-caption-sm uppercase tracking-[0.4px] text-mute transition-colors hover:text-on-dark"
+            className="shrink-0 text-[12px] text-mute transition-colors hover:text-on-dark"
           >
             {selection.project}
           </button>
-          <span className="text-stone">/</span>
-          <span className="truncate font-mono text-[13px] text-ink">
-            {selection.domain}
-          </span>
-          {dirty && (
-            <span className="shrink-0 rounded-xs bg-accent-yellow-soft px-1.5 py-0.5 text-[11px] uppercase tracking-[0.4px] text-accent-yellow">
-              수정됨
+          {crumbs.folders.map((f) => (
+            <span key={f} className="flex shrink-0 items-center gap-1.5">
+              <span className="text-stone">›</span>
+              <span className="text-[12px] text-mute">{f}</span>
             </span>
-          )}
+          ))}
+          <span className="text-stone">›</span>
+          <span className="truncate font-mono text-[13px] text-ink">
+            {crumbs.file}
+          </span>
+          <span
+            className={cn(
+              "ml-2 shrink-0 text-[11px]",
+              dirty ? "text-on-dark-mute" : "text-stone",
+            )}
+          >
+            {saving
+              ? "저장 중…"
+              : dirty
+                ? "수정됨 — ⌘S"
+                : lastSavedAt
+                  ? `저장됨 ${formatHM(lastSavedAt)}`
+                  : ""}
+          </span>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
           <span className="text-caption-sm text-stone">
             {bytes.toLocaleString()} chars
           </span>
-          {/* Daily 노트만 — 이 날 요약 / HTML 추출 버튼. AI 연동 안 됐으면
-              회색 disabled + 클릭 시 안내 toast. */}
-          {isDailyNote && (
-            <button
-              onClick={async () => {
-                if (!aiConnected) {
-                  setSummaryError(
-                    "AI 연동이 꺼져있어요. Settings → 임베딩 에서 Gemini 또는 Bedrock 을 연결하면 활성화됩니다.",
-                  );
-                  return;
-                }
-                if (!selection.project || !selection.domain) return;
-                const proj = selection.project;
-                const dom = selection.domain;
-                setSummaryError(null);
-                // 백그라운드 패턴 — IPC 를 fire-and-forget 로 시작하고
-                // store 의 bgJob 에 진행 상태만 띄운다. 사용자는 그 사이
-                // 다른 노트 편집·검색·설정 다 가능. 완료 시 macOS 알림
-                // 으로 신호 + Sidebar progress pill 도 클릭 가능 결과로
-                // 전환된다.
-                setBgJob({
-                  kind: "summarize",
-                  status: "running",
-                  project: proj,
-                  domain: dom,
-                  startedAt: Date.now(),
-                });
-                ipc
-                  .summarizeDaily(proj, dom)
-                  .then((r) => {
-                    setBgJob({
-                      kind: "summarize",
-                      status: "done",
-                      project: proj,
-                      domain: dom,
-                      exportId: r.export_id,
-                      finishedAt: Date.now(),
-                    });
-                    // 사용자가 그 노트에 머물러있으면 모달도 즉시 띄움.
-                    // 다른 노트로 이동했으면 알림만 받고 history 에서
-                    // 클릭으로 열도록.
-                    const cur = useApp.getState().selection;
-                    if (cur.project === proj && cur.domain === dom) {
-                      setSummaryResult(r);
-                    }
-                    // 단비 내부 알림만 — macOS 시스템 알림 안 띄움.
-                    // 사이드바 헤더의 종 아이콘에 +1 배지 + popover
-                    // list 에 누적. 클릭 시 결과 페이지로 라우팅.
-                    pushNotification({
-                      tone: "ok",
-                      title: "요약 완료",
-                      body: `${proj}/${dom}`,
-                      action: { kind: "open-export", exportId: r.export_id },
-                    });
-                  })
-                  .catch((e) => {
-                    setBgJob({
-                      kind: "summarize",
-                      status: "error",
-                      project: proj,
-                      domain: dom,
-                      message: String(e).slice(0, 240),
-                      finishedAt: Date.now(),
-                    });
-                    pushNotification({
-                      tone: "err",
-                      title: "요약 실패",
-                      body: `${proj}/${dom} — ${String(e).slice(0, 120)}`,
-                    });
-                  });
-              }}
-              disabled={!selection.project}
-              title={
-                aiConnected
-                  ? "이 daily 노트 요약 + HTML 추출 (백그라운드 진행 — 사이드바 하단에서 완료 시 알림)"
-                  : "AI 연동을 켜면 활성화됩니다"
-              }
-              className={cn(
-                "inline-flex h-7 items-center gap-1 rounded-sm px-2 text-[12px] transition-colors",
-                aiConnected
-                  ? "border border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark"
-                  : "border border-hairline bg-surface-elevated/40 text-stone",
-              )}
-            >
-              <Sparkles size={11} />
-              요약 / HTML
-            </button>
-          )}
-          {/* daily 가 아닌 일반 노트 — LLM 호출 없이 본문 그대로 카드형
-              HTML 페이지로 추출. AI 연동 여부 무관. */}
-          {!isDailyNote && selection.project && selection.domain && (
-            <button
-              onClick={async () => {
-                if (!selection.project || !selection.domain) return;
-                const proj = selection.project;
-                const dom = selection.domain;
-                try {
-                  const r = await ipc.exportDocHtml(proj, dom);
-                  await ipc.openHtmlPreview(
-                    r.html,
-                    dom.replace(/\.md$/, ""),
-                  );
-                  pushNotification({
-                    tone: "ok",
-                    title: "HTML 추출 완료",
-                    body: `${proj}/${dom}`,
-                    action: { kind: "open-export", exportId: r.export_id },
-                  });
-                } catch (e) {
-                  pushNotification({
-                    tone: "err",
-                    title: "HTML 추출 실패",
-                    body: `${proj}/${dom} — ${String(e).slice(0, 120)}`,
-                  });
-                }
-              }}
-              title="이 노트를 카드형 HTML 페이지로 추출 (AI 호출 없음)"
-              className="inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark"
-            >
-              <Sparkles size={11} />
-              HTML 추출
-            </button>
-          )}
-          {/* History — 이 노트의 이전 export 들 (요약 + 일반 추출 모두).
-              클릭으로 드롭다운, 항목 선택 시 새 webview 윈도우로 다시
-              열림. 0개면 버튼 자체 숨김. */}
-          {selection.project && selection.domain && exportHistory.length > 0 && (
-            <div className="relative">
-              <button
-                onClick={() => setHistoryOpen((v) => !v)}
-                title={`이전 요약 ${exportHistory.length}개`}
-                className={cn(
-                  "inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark",
-                  historyOpen && "border-hairline-strong text-on-dark",
-                )}
-              >
-                <FileText size={11} />
-                이전 {exportHistory.length}
-                <ChevronDown size={10} />
-              </button>
-              {historyOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-30"
-                    onClick={() => setHistoryOpen(false)}
-                  />
-                  <div className="absolute right-0 top-9 z-40 max-h-[60vh] w-[340px] overflow-y-auto rounded-md border border-hairline bg-surface shadow-xl shadow-black/40">
-                    <div className="border-b border-hairline px-3 py-2 text-[11px] uppercase tracking-[0.4px] text-stone">
-                      이 노트의 이전 요약 — 최신순
-                    </div>
-                    <ul className="flex flex-col">
-                      {exportHistory.map((rec) => {
-                        const dt = new Date(rec.created_at * 1000);
-                        const dateLabel = `${dt.getFullYear()}-${String(
-                          dt.getMonth() + 1,
-                        ).padStart(2, "0")}-${String(dt.getDate()).padStart(
-                          2,
-                          "0",
-                        )} ${String(dt.getHours()).padStart(2, "0")}:${String(
-                          dt.getMinutes(),
-                        ).padStart(2, "0")}`;
-                        const modelShort = rec.model
-                          .replace(/^us\./, "")
-                          .replace(/^anthropic\./, "")
-                          .replace(/-\d{8}.*$/, "")
-                          .replace(/:0$/, "");
-                        return (
-                          <li key={rec.id}>
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                setHistoryOpen(false);
-                                try {
-                                  await ipc.openExport(rec.id);
-                                } catch (e) {
-                                  console.error("[danbi] open export", e);
-                                }
-                              }}
-                              className="flex w-full flex-col gap-0.5 border-b border-hairline px-3 py-2 text-left transition-colors hover:bg-surface-elevated"
-                            >
-                              <span className="font-mono text-[12px] text-body">
-                                {dateLabel}
-                              </span>
-                              <span className="text-[11px] text-stone">
-                                {modelShort} ·{" "}
-                                {(rec.md_bytes / 1024).toFixed(1)}KB
-                              </span>
-                            </button>
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-          {onOpenGraph && (
-            <button
-              onClick={onOpenGraph}
-              title="이 문서의 연결을 그래프로 보기"
-              className="inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark"
-            >
-              <Link2 size={11} />
-              그래프
-            </button>
-          )}
-          {/* 변경 히스토리 — 외부 LLM 의 replace_section / upsert_item 까지
-              모두 포함. 0개면 (= git history 없는 신규 문서) 버튼 자체 숨김. */}
-          {selection.project && selection.domain && changeHistory.length > 0 && (
-            <div className="relative">
-              <button
-                onClick={() => setChangeHistoryOpen((v) => !v)}
-                title={`최근 변경 ${changeHistory.length}건`}
-                className={cn(
-                  "inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark",
-                  changeHistoryOpen && "border-hairline-strong text-on-dark",
-                )}
-              >
-                <Sparkles size={11} />
-                변경 {changeHistory.length}
-                <ChevronDown size={10} />
-              </button>
-              {changeHistoryOpen && (
-                <>
-                  <div
-                    className="fixed inset-0 z-30"
-                    onClick={() => setChangeHistoryOpen(false)}
-                  />
-                  <div className="absolute right-0 top-9 z-40 max-h-[60vh] w-[380px] overflow-y-auto rounded-md border border-hairline bg-surface shadow-xl shadow-black/40">
-                    <div className="border-b border-hairline px-3 py-2 text-[11px] uppercase tracking-[0.4px] text-stone">
-                      이 문서의 최근 변경 — 최신순
-                    </div>
-                    <ul className="flex flex-col">
-                      {changeHistory.map((c) => {
-                        const dt = new Date(c.ts * 1000);
-                        const dateLabel = `${dt.getFullYear()}-${String(
-                          dt.getMonth() + 1,
-                        ).padStart(2, "0")}-${String(dt.getDate()).padStart(
-                          2,
-                          "0",
-                        )} ${String(dt.getHours()).padStart(2, "0")}:${String(
-                          dt.getMinutes(),
-                        ).padStart(2, "0")}`;
-                        const opLabel = changeOpLabel(c.op, c.mode);
-                        const opTone = changeOpTone(c.op);
-                        return (
-                          <li
-                            key={c.commit}
-                            className="border-b border-hairline px-3 py-2"
-                          >
-                            <div className="flex items-center gap-2">
-                              <span
-                                className={cn(
-                                  "rounded-xs px-1.5 py-px text-[10px] font-medium uppercase leading-none tracking-[0.2px]",
-                                  opTone,
-                                )}
-                              >
-                                {opLabel}
-                              </span>
-                              <span className="font-mono text-[11px] text-stone">
-                                {dateLabel}
-                              </span>
-                            </div>
-                            {c.target && (
-                              <div className="mt-1 truncate text-[12px] text-body">
-                                {c.target}
-                              </div>
-                            )}
-                          </li>
-                        );
-                      })}
-                    </ul>
-                  </div>
-                </>
-              )}
-            </div>
-          )}
           {dirty && (
-            <>
-              <div className="mx-1.5 h-4 w-px bg-hairline" />
-              <button
-                onClick={revert}
-                disabled={saving}
-                className="inline-flex h-7 items-center gap-1 rounded-sm px-2 text-[12px] text-mute transition-colors hover:text-on-dark"
-                title="변경 되돌리기"
-              >
-                <Undo2 size={11} /> 되돌리기
-              </button>
-              <button
-                onClick={save}
-                disabled={saving}
-                className={cn(
-                  "inline-flex h-7 items-center gap-1 rounded-sm px-2 text-[12px] font-medium transition-colors",
-                  "bg-primary text-on-primary hover:bg-primary-pressed",
-                )}
-                title="저장 (⌘S)"
-              >
-                <Save size={11} /> {saving ? "저장 중…" : "저장"}
-              </button>
-            </>
+            <button
+              onClick={saveOrNotify}
+              disabled={saving}
+              className="inline-flex h-7 items-center gap-1 rounded-sm bg-primary px-2.5 text-[12px] font-medium text-on-primary transition-colors hover:bg-primary-pressed"
+              title="저장 (⌘S)"
+            >
+              <Save size={11} /> {saving ? "저장 중…" : "저장"}
+            </button>
           )}
+          {/* ··· 오버플로 — 헤더 컨트롤 9개를 2개로. */}
+          <div className="relative">
+            <button
+              onClick={() => setMenuOpen((v) => !v)}
+              title="더 보기"
+              className={cn(
+                "inline-flex h-7 w-7 items-center justify-center rounded-sm border border-hairline bg-surface-elevated text-body transition-colors hover:border-hairline-strong hover:text-on-dark",
+                menuOpen && "border-hairline-strong text-on-dark",
+              )}
+            >
+              <MoreHorizontal size={13} />
+            </button>
+            {menuOpen && (
+              <>
+                <div className="fixed inset-0 z-30" onClick={() => setMenuOpen(false)} />
+                <div className="absolute right-0 top-9 z-40 w-[240px] overflow-hidden rounded-md border border-hairline-strong bg-surface-card py-1">
+                  {isDailyNote && (
+                    <MenuItem
+                      label={aiConnected ? "요약 / HTML" : "요약 / HTML (AI 연동 필요)"}
+                      onClick={() => {
+                        setMenuOpen(false);
+                        runSummarize();
+                      }}
+                    />
+                  )}
+                  {!isDailyNote && (
+                    <MenuItem
+                      label="HTML 추출"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        runExportHtml();
+                      }}
+                    />
+                  )}
+                  {exportHistory.slice(0, 5).map((rec) => (
+                    <MenuItem
+                      key={rec.id}
+                      label={`이전 요약 · ${exportDateLabel(rec.created_at)}`}
+                      hint={`${(rec.md_bytes / 1024).toFixed(1)}KB`}
+                      onClick={async () => {
+                        setMenuOpen(false);
+                        try {
+                          await ipc.openExport(rec.id);
+                        } catch (e) {
+                          console.error("[danbi] open export", e);
+                        }
+                      }}
+                    />
+                  ))}
+                  <MenuDivider />
+                  {onOpenGraph && (
+                    <MenuItem
+                      label="그래프에서 보기"
+                      shortcut="⌘G"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onOpenGraph();
+                      }}
+                    />
+                  )}
+                  <MenuItem
+                    label="인스펙터 (변경 · 링크 · 정보)"
+                    shortcut="⌘I"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      toggleInspector();
+                    }}
+                  />
+                  {dirty && (
+                    <MenuItem
+                      label="수정 내용 되돌리기"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        revert();
+                      }}
+                    />
+                  )}
+                  <MenuDivider />
+                  <MenuItem
+                    label="Finder에서 보기"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      revealInFinder();
+                    }}
+                  />
+                  <MenuItem
+                    label="경로 복사 (vault 기준)"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      clipboardWriteText(`${selection.project}/${selection.domain}`).catch(() => {});
+                    }}
+                  />
+                  {onRenameDomain && (
+                    <MenuItem
+                      label="이름 바꾸기"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        if (selection.project && selection.domain)
+                          onRenameDomain(selection.project, selection.domain);
+                      }}
+                    />
+                  )}
+                  {onDeleteDomain && (
+                    <MenuItem
+                      label="삭제…"
+                      danger
+                      onClick={() => {
+                        setMenuOpen(false);
+                        if (selection.project && selection.domain)
+                          onDeleteDomain(selection.project, selection.domain);
+                      }}
+                    />
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+          <button
+            onClick={toggleInspector}
+            title="인스펙터 (⌘I · 편집 중엔 ⌥⌘I)"
+            className={cn(
+              "inline-flex h-7 w-7 items-center justify-center rounded-sm border border-hairline bg-surface-elevated text-body transition-colors hover:border-hairline-strong hover:text-on-dark",
+              inspectorOpen && "border-hairline-strong text-on-dark",
+            )}
+          >
+            <PanelRight size={13} />
+          </button>
         </div>
       </header>
 
@@ -1013,6 +1141,35 @@ export function DocView({
         </div>
       )}
 
+      {conflict && (
+        <div className="mx-6 mt-3 flex flex-wrap items-center gap-2 rounded-md border border-hairline-strong bg-surface-elevated px-3 py-2 text-[12px] text-on-dark">
+          <span className="min-w-0 flex-1">
+            편집하는 동안 다른 곳에서 이 문서가 바뀌었어요. 저장을 멈췄어요.
+          </span>
+          <button
+            type="button"
+            onClick={loadDiskVersion}
+            className="rounded-md border border-hairline px-2.5 py-1 text-[12px] text-on-dark hover:bg-surface-card"
+          >
+            디스크 버전 불러오기
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              save(true).catch((e) =>
+                pushNotification({
+                  tone: "err",
+                  title: "저장 실패",
+                  body: String(e).slice(0, 120),
+                }),
+              );
+            }}
+            className="rounded-md border border-hairline px-2.5 py-1 text-[12px] text-mute hover:bg-surface-card hover:text-on-dark"
+          >
+            내 편집으로 덮어쓰기
+          </button>
+        </div>
+      )}
       {findOpen && (
         <div className="flex shrink-0 items-center gap-1.5 border-b border-hairline bg-surface-elevated px-5 py-2">
           <input
@@ -1095,9 +1252,10 @@ export function DocView({
         }}
       />
 
-      <div className="flex-1 min-h-0 overflow-auto">
+      <div className="flex min-h-0 flex-1">
+      <div className="min-w-0 flex-1 overflow-auto">
         {loading ? (
-          <div className="px-6 py-4 text-[13px] text-mute">loading…</div>
+          <div className="px-6 py-4 text-[13px] text-mute">읽는 중…</div>
         ) : err ? (
           <div className="m-6 rounded-md border border-hairline bg-surface-elevated p-3 font-mono text-[12px] text-accent-red">
             {err}
@@ -1114,64 +1272,75 @@ export function DocView({
               theme={editorTheme}
               onChange={() => {
                 if (suppressChange.current) return;
-                try {
-                  const live = exportBlocksToMarkdown(editor);
-                  const md = rewriteMdAbsoluteToRelative(live);
-                  setDirty(md !== lastSyncedMd.current);
-                  setBytes(md.length);
-                } catch {
-                  /* ignore */
-                }
+                // 직렬화 없이 플래그만. 글자 수는 저장 시점에 갱신된다.
+                if (!dirtyRef.current) markDirty(true);
+                scheduleAutosave();
               }}
             />
           </div>
         )}
       </div>
+      {inspectorOpen && selection.project && selection.domain && (
+        <DocInspector
+          project={selection.project}
+          domain={selection.domain}
+          refreshKey={refreshKey + (lastSavedAt ?? 0)}
+          onOpenDoc={(p, d) => selectDomain(p, d)}
+          onRestored={() => {
+            // 복원 커밋 뒤 에디터를 디스크 기준으로 다시 읽는다.
+            markDirty(false);
+            loadedKey.current = null;
+            setReloadTick((t) => t + 1);
+          }}
+          onClose={toggleInspector}
+        />
+      )}
+      </div>
     </div>
   );
 }
 
-/**
- * 변경 히스토리 row 의 op label. backend 가 분류한 키(`upsert_item`,
- * `replace_section`, `append`, `apply`, …) 를 사람이 읽을 한국어로.
- * `upsert_item` 은 mode (update/add) 까지 합쳐 분간.
- */
-function changeOpLabel(op: string, mode?: string | null): string {
-  if (op === "upsert_item") {
-    if (mode === "update") return "항목 갱신";
-    if (mode === "add") return "항목 추가";
-    return "upsert";
-  }
-  if (op === "replace_section") return "섹션 교체";
-  if (op === "append") return "추가";
-  if (op === "insert_after") return "삽입";
-  if (op === "rewrite_all") return "전체 재작성";
-  if (op === "apply") return "AI 편집";
-  if (op === "undo") return "되돌리기";
-  if (op === "quick_capture") return "Quick Capture";
-  if (op === "compound") return "Compound";
-  return op;
+function MenuItem({
+  label,
+  hint,
+  shortcut,
+  danger,
+  onClick,
+}: {
+  label: string;
+  hint?: string;
+  shortcut?: string;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-[12.5px] transition-colors hover:bg-surface-elevated",
+        danger ? "text-accent-red" : "text-body hover:text-on-dark",
+      )}
+    >
+      <span className="truncate">{label}</span>
+      {(hint || shortcut) && (
+        <span className="shrink-0 font-mono text-[10px] text-stone">{hint ?? shortcut}</span>
+      )}
+    </button>
+  );
 }
 
-/**
- * op 별로 어울리는 색 토큰 매핑. 외부 LLM 의 비파괴적 갱신은 차분한
- * blue/green, 파괴적/대규모는 yellow/red.
- */
-function changeOpTone(op: string): string {
-  switch (op) {
-    case "upsert_item":
-      return "bg-accent-green-soft text-accent-green";
-    case "replace_section":
-      return "bg-accent-blue-soft text-accent-blue";
-    case "append":
-    case "insert_after":
-      return "bg-surface-elevated text-stone";
-    case "rewrite_all":
-    case "undo":
-      return "bg-accent-yellow-soft text-accent-yellow";
-    default:
-      return "bg-surface-elevated text-stone";
-  }
+function MenuDivider() {
+  return <div className="my-1 h-px bg-hairline" />;
+}
+
+function formatHM(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+function exportDateLabel(createdAtSec: number): string {
+  const dt = new Date(createdAtSec * 1000);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")} ${formatHM(dt.getTime())}`;
 }
 
 /**

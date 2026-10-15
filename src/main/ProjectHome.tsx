@@ -1,218 +1,56 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
-  CalendarDays,
   Check,
   ChevronDown,
-  Clock4,
-  Copy,
-  Edit3,
-  FileText,
-  Ghost,
-  History,
-  Link2,
+  ChevronRight,
   Loader2,
-  MessageCircle,
   Network,
   Plus,
   RefreshCw,
-  Send,
-  Server,
   Sparkles,
   Target,
   X,
 } from "lucide-react";
-import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   ipc,
-  type AgentTarget,
-  type BriefingResult,
-  type DailyNoteRef,
-  type DailySnapshot,
   type DayCounts,
-  type GhostLink,
-  type GhostStore,
   type Goal,
-  type McpProjectEndpoint,
-  type ProjectContextStatus,
   type ProjectJournalView,
   type ProjectNode,
-  type QaAnswer,
   type TriggerKind,
-  type VaultSuggestion,
 } from "@/lib/ipc";
-import { CodexIcon, ClaudeIcon } from "@/components/AgentIcons";
+import { ActivityFeed } from "@/main/ActivityFeed";
+import { ConnectStatusBand } from "@/main/ConnectSheet";
+import { ReviewMini } from "@/main/ReviewMini";
 import { projectIconOf } from "@/components/ProjectIconPicker";
 import { ReindexProgressCard } from "@/main/Settings";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 import { McpInboundProjectMini } from "./McpInboundProjectMini";
 
+/** 프로젝트 홈. 헤더(이름 · [+ 새 노트] 흰 CTA 1개) → 히어로(아이콘·
+ *  이름·목표 한 줄) → 에이전트 상태 띠(연결 시트 입구) → 이 프로젝트
+ *  액션 → 지난 7일 → MCP mini → 받아 적은 것. 연결/스킬 버튼 8개와
+ *  ConnectCard 는 연결 시트(ConnectSheet)로 흡수됐다. */
 export function ProjectHome({
   project,
   onAddDomain,
   onOpenGraph,
-  onCopyMcpInstall,
 }: {
   project: string;
   onAddDomain: (project: string) => void;
   onOpenGraph: (project: string) => void;
-  onCopyMcpInstall: (project: string, agent: AgentTarget) => void;
 }) {
   const tree = useApp((s) => s.tree);
-  const linkIndex = useApp((s) => s.linkIndex);
   const selectDomain = useApp((s) => s.selectDomain);
-  // Auto-Journal 화면 외 기존 패널들은 화면에서 빠졌지만 state/핸들러 코드는
-  // 향후 복원을 위해 보존. 현재 탭에서만 안 보이게 하는 게 목적이라 코드는
-  // 그대로 두되 lint 가 unused 라고 막지 않도록 prefix `_` 만 붙임.
-
-  const [_daily, setDaily] = useState<DailySnapshot | null>(null);
-  const [_suggestions, setSuggestions] = useState<VaultSuggestion[]>([]);
-  const [_endpoint, setEndpoint] = useState<McpProjectEndpoint | null>(null);
-  const [_ghost, setGhost] = useState<GhostStore | null>(null);
-  const [_ghostScanning, setGhostScanning] = useState(false);
-  const [_ghostError, setGhostError] = useState<string | null>(null);
-
-  const [_qaInput, _setQaInput] = useState("");
-  const [_qaAnswer, setQaAnswer] = useState<QaAnswer | null>(null);
-  const [_qaLoading, setQaLoading] = useState(false);
-  const [_qaError, setQaError] = useState<string | null>(null);
-
-  const [_briefing, setBriefing] = useState<BriefingResult | null>(null);
-  const [_briefingRange, setBriefingRange] = useState<
-    "today" | "yesterday" | "last_week"
-  >("today");
-  const [_briefingLoading, setBriefingLoading] = useState(false);
-  const [_briefingError, setBriefingError] = useState<string | null>(null);
-
-  const [_projectCtx, setProjectCtx] = useState<ProjectContextStatus | null>(
-    null,
-  );
+  const openConnectSheet = useApp((s) => s.openConnectSheet);
+  const setView = useApp((s) => s.setView);
 
   const projectNode: ProjectNode | undefined = useMemo(
     () => tree?.projects.find((p) => p.name === project),
     [tree, project],
   );
-
-  const _refreshProjectCtx = async () => {
-    try {
-      const ctx = await ipc.projectContextStatus(project);
-      setProjectCtx(ctx);
-    } catch {
-      setProjectCtx(null);
-    }
-  };
-
-  // Side-effect data load disabled now that the panels using it are
-  // hidden. Kept commented out for easy future restore.
-  /* useEffect(() => {
-    ipc.dailySnapshot().then(setDaily).catch(() => setDaily(null));
-    ipc.vaultSuggestions().then(setSuggestions).catch(() => setSuggestions([]));
-    ipc.mcpProjectEndpoint(project).then(setEndpoint).catch(() => setEndpoint(null));
-    ipc.ghostList(project).then(setGhost).catch(() => setGhost(null));
-    _refreshProjectCtx();
-  }, [project, tree]); */
-
-  // Keep references so TS doesn't strip them from the closure when
-  // someone re-enables the side effect above. Cheap no-ops.
-  void setDaily;
-  void setSuggestions;
-  void setEndpoint;
-  void setGhost;
-  void setGhostScanning;
-  void setGhostError;
-  void setQaAnswer;
-  void setQaLoading;
-  void setQaError;
-  void setBriefing;
-  void setBriefingRange;
-  void setBriefingLoading;
-  void setBriefingError;
-  void _refreshProjectCtx;
-
-  async function _askQa() {
-    const q = _qaInput.trim();
-    if (!q) return;
-    setQaLoading(true);
-    setQaError(null);
-    try {
-      const res = await ipc.projectQaAsk(project, q);
-      setQaAnswer(res);
-    } catch (e) {
-      setQaError(String(e));
-    } finally {
-      setQaLoading(false);
-    }
-  }
-  void _askQa;
-
-  async function _scanGhost() {
-    setGhostScanning(true);
-    setGhostError(null);
-    try {
-      const store = await ipc.ghostScan(project);
-      setGhost(store);
-    } catch (e) {
-      setGhostError(String(e));
-    } finally {
-      setGhostScanning(false);
-    }
-  }
-  void _scanGhost;
-
-  async function _acceptGhost(id: string) {
-    try {
-      const store = await ipc.ghostAccept(project, id);
-      setGhost(store);
-    } catch (e) {
-      setGhostError(String(e));
-    }
-  }
-  void _acceptGhost;
-
-  async function _rejectGhost(id: string) {
-    try {
-      const store = await ipc.ghostReject(project, id);
-      setGhost(store);
-    } catch (e) {
-      setGhostError(String(e));
-    }
-  }
-  void _rejectGhost;
-
-  async function _runBriefing(
-    range: "today" | "yesterday" | "last_week",
-  ) {
-    setBriefingRange(range);
-    setBriefingLoading(true);
-    setBriefingError(null);
-    try {
-      const res = await ipc.projectBriefing(project, range);
-      setBriefing(res);
-    } catch (e) {
-      setBriefingError(String(e));
-    } finally {
-      setBriefingLoading(false);
-    }
-  }
-  void _runBriefing;
-
-  // The old dashboard derived a bunch of memos from suggestions/daily/
-  // linkIndex — kept in a parked scope for future restore. Wrapped in
-  // a self-IIFE that the linter sees as "used" but does no work.
-  void useMemo(() => {
-    const _ = { tree, linkIndex, project };
-    return _;
-  }, [tree, linkIndex, project]);
-  void projectNode;
 
   if (!projectNode) {
     return (
@@ -226,134 +64,219 @@ export function ProjectHome({
     <div className="flex h-full flex-col">
       <header
         data-tauri-drag-region
-        className="flex h-10 shrink-0 items-center justify-between border-b border-hairline px-5"
+        className="flex h-12 shrink-0 items-center justify-between border-b border-hairline px-5"
       >
-        <div className="flex items-center gap-2">
-          <span className="text-[13px] font-medium tracking-[0.2px] text-ink">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="truncate text-[13px] font-medium tracking-[0.2px] text-ink">
             {project}
           </span>
-          <span className="rounded-xs bg-surface-elevated px-1.5 py-0.5 text-[10px] text-on-dark-mute">
-            Auto-Journal
-          </span>
         </div>
-        {/* 헤더 우측 액션은 ProjectActions 카드로 이동 (히어로 아래).
-            여기엔 컴팩트 버튼이 좁아서 잘 안 보였음 — 사용자 피드백
-            반영. 헤더는 라벨만 남김. */}
+        {/* 흰 CTA 는 뷰포트당 1개 — 새 노트(⌘N). */}
+        <button
+          onClick={() => onAddDomain(project)}
+          title="새 노트 (⌘N)"
+          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-on-primary hover:bg-primary-pressed"
+        >
+          <Plus size={13} /> 새 노트
+        </button>
       </header>
 
       <div className="flex-1 min-h-0 overflow-auto">
         <div className="mx-auto max-w-[820px] px-6 py-8">
-          <ProjectHero
-            project={project}
-            onCopyInstall={(agent) => onCopyMcpInstall(project, agent)}
-            onEditSkill={async () => {
-              // 사이드바에 SKILL.md 가 안 보이는 vault (예전엔
-              // ~/.claude 만 만들고 vault seed 가 없던 케이스) 도
-              // 한 번 install 을 거치면 vault SKILL.md 가 자동
-              // 생성된다. 실패해도 selectDomain 은 시도 — 빈
-              // 에디터라도 사용자가 수동 작성할 수 있게.
-              try {
-                await ipc.installSkill(project);
-              } catch (e) {
-                console.error("[danbi] ensure SKILL.md failed", e);
-              }
-              selectDomain(project, "SKILL.md");
-            }}
-          />
-          <ConnectCard project={project} />
+          <ProjectHero project={project} />
+          <div className="mt-5">
+            <ConnectStatusBand
+              project={project}
+              onOpenSheet={() => openConnectSheet(project)}
+            />
+          </div>
+          {/* 이 프로젝트 피드 | 지난 7일 · 검토 N (화면 B) */}
+          <div className="mt-6 grid gap-5" style={{ gridTemplateColumns: "minmax(0,1fr) 260px" }}>
+            <ActivityFeed
+              scopeProject={project}
+              limit={30}
+              compact
+              onOpenDoc={selectDomain}
+              className="rounded-lg border border-hairline bg-surface"
+            />
+            <div className="flex min-w-0 flex-col gap-4">
+              <div className="rounded-lg border border-hairline bg-surface px-4 py-4">
+                <SevenDayBar project={project} embedded />
+              </div>
+              <ReviewMini
+                project={project}
+                max={3}
+                onOpenDoc={selectDomain}
+                onOpenAll={() => setView("review")}
+              />
+            </div>
+          </div>
+          <div className="mt-6">
+            <RecentDocsCard project={projectNode} onOpen={(d) => selectDomain(project, d)} />
+          </div>
           <div className="mt-6">
             <ProjectActions
               project={project}
-              onAddDomain={() => onAddDomain(project)}
               onOpenGraph={() => onOpenGraph(project)}
             />
           </div>
-          <div className="mt-6">
-            <GoalsCard project={project} />
-          </div>
-          <div className="mt-6">
-            <SevenDayBar project={project} />
-          </div>
-          <div className="mt-6">
-            <McpInboundProjectMini
-              project={project}
-              onOpenDomain={(d) => selectDomain(project, d)}
-            />
-          </div>
-          <div className="mt-6">
+          <Collapsible id="journal" title="받아 적은 것" className="mt-6">
             <AutoJournalPanel
               project={project}
               onOpen={(d) => selectDomain(project, d)}
             />
-          </div>
+          </Collapsible>
+          <Collapsible id="usage" title="사용량 (이 프로젝트 MCP 저장 토큰)" className="mt-4">
+            <McpInboundProjectMini
+              project={project}
+              onOpenDomain={(d) => selectDomain(project, d)}
+            />
+          </Collapsible>
         </div>
       </div>
     </div>
   );
 }
 
-/** Big page title — group label (small uppercase) + project icon +
- *  project name (large). Single source of truth for "어느 프로젝트를
- *  보고 있는지" so the user always knows the scope at a glance. */
-function ProjectHero({
+/** 최근 문서 — daily 제외, mtime 순 2열 카드, H1 제목 표시. 뼈대 문서
+ *  (purpose/schema/SKILL) 는 아래 칩 행. */
+const SKELETON_DOCS = ["purpose.md", "schema.md", "SKILL.md"];
+function RecentDocsCard({
   project,
-  onCopyInstall,
-  onEditSkill,
+  onOpen,
 }: {
-  project: string;
-  onCopyInstall: (agent: AgentTarget) => void;
-  onEditSkill: () => void;
+  project: ProjectNode;
+  onOpen: (domain: string) => void;
 }) {
-  const groups = useApp((s) => s.cfg?.project_groups ?? []);
-  const iconName = useApp(
-    (s) => s.cfg?.project_icons?.[project] ?? null,
+  const docs = useMemo(() => {
+    const all: { name: string; ms: number; title: string | null }[] = [];
+    const push = (d: { name: string; modified_ms?: number | null; title?: string | null }) => {
+      if (d.name.startsWith("daily/") || SKELETON_DOCS.includes(d.name)) return;
+      all.push({ name: d.name, ms: d.modified_ms ?? 0, title: d.title ?? null });
+    };
+    project.domains.forEach(push);
+    for (const f of project.subfolders) {
+      if (f.name === "daily") continue;
+      f.domains.forEach(push);
+      for (const g of f.subfolders ?? []) g.domains.forEach(push);
+    }
+    all.sort((a, b) => b.ms - a.ms);
+    return all.slice(0, 6);
+  }, [project]);
+  const skeleton = SKELETON_DOCS.filter((n) => project.domains.some((d) => d.name === n));
+
+  return (
+    <section className="rounded-lg border border-hairline bg-surface p-4">
+      <div className="mb-2.5 flex items-center justify-between">
+        <span className="text-[13px] font-medium text-ink">최근 문서</span>
+        <span className="text-caption-sm text-stone">daily 제외 · 수정순</span>
+      </div>
+      {docs.length === 0 ? (
+        <div className="text-[12px] text-mute">
+          아직 문서가 없어요. 헤더의 [새 노트] 로 시작하세요.
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          {docs.map((d) => (
+            <button
+              key={d.name}
+              onClick={() => onOpen(d.name)}
+              title={d.name}
+              className="flex min-w-0 flex-col gap-0.5 rounded-md border border-hairline bg-surface-elevated px-3 py-2 text-left transition-colors hover:border-hairline-strong"
+            >
+              <span className="truncate text-[13px] text-ink">
+                {d.title ?? d.name.replace(/\.md$/, "")}
+              </span>
+              <span className="flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-[11px] text-mute">{d.name}</span>
+                <span className="shrink-0 text-[11px] text-stone">
+                  {d.ms ? relAgo(d.ms) : ""}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      {skeleton.length > 0 && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+          {skeleton.map((n) => (
+            <button
+              key={n}
+              onClick={() => onOpen(n)}
+              className="inline-flex h-6 items-center rounded-full border border-hairline bg-surface-elevated px-2.5 font-mono text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
   );
+}
+
+function relAgo(ms: number): string {
+  const diff = Math.max(0, Date.now() - ms);
+  const m = Math.floor(diff / 60_000);
+  if (m < 1) return "방금";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+/** 접힘 섹션 — 상태는 localStorage. 기본 접힘. */
+function Collapsible({
+  id,
+  title,
+  className,
+  children,
+}: {
+  id: string;
+  title: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const key = `danbi:project-home-open:${id}`;
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(key) === "1";
+    } catch {
+      return false;
+    }
+  });
+  return (
+    <section className={className}>
+      <button
+        onClick={() =>
+          setOpen((v) => {
+            try {
+              localStorage.setItem(key, v ? "0" : "1");
+            } catch {
+              /* ignore */
+            }
+            return !v;
+          })
+        }
+        className="flex w-full items-center gap-1.5 rounded-sm px-1 py-1 text-left text-[13px] font-medium text-body hover:text-on-dark"
+      >
+        {open ? <ChevronDown size={13} className="text-mute" /> : <ChevronRight size={13} className="text-mute" />}
+        {title}
+      </button>
+      {open && <div className="mt-2">{children}</div>}
+    </section>
+  );
+}
+
+/** 히어로 — 그룹 라벨(소문자 대문자) + 아이콘 + 프로젝트명 + 목표 한 줄.
+ *  Goals 의 노란 카드는 폐지하고 inline edit 한 줄로(UI 검토 #8). */
+function ProjectHero({ project }: { project: string }) {
+  const groups = useApp((s) => s.cfg?.project_groups ?? []);
+  const iconName = useApp((s) => s.cfg?.project_icons?.[project] ?? null);
   const Icon = projectIconOf(iconName);
   const groupLabel = useMemo(() => {
     const g = groups.find((g) => g.projects.includes(project));
     return g?.label ?? null;
   }, [groups, project]);
-
-  // Per-agent skill installation state. Polled once on mount for both
-  // Claude Code and Codex; re-checked after each install so the menu
-  // label flips to "갱신". "Skill 수정" shows once either agent has it
-  // (both render from the same shared vault SKILL.md source).
-  const [skillInstalled, setSkillInstalled] = useState<
-    Record<AgentTarget, boolean>
-  >({ claude: false, codex: false });
-  const [skillFlash, setSkillFlash] = useState<string | null>(null);
-  useEffect(() => {
-    let alive = true;
-    (["claude", "codex"] as const).forEach((agent) => {
-      ipc
-        .skillStatus(project, agent)
-        .then((ok) => {
-          if (alive) setSkillInstalled((s) => ({ ...s, [agent]: ok }));
-        })
-        .catch(() => {});
-    });
-    return () => {
-      alive = false;
-    };
-  }, [project]);
-  useEffect(() => {
-    if (!skillFlash) return;
-    const t = setTimeout(() => setSkillFlash(null), 3500);
-    return () => clearTimeout(t);
-  }, [skillFlash]);
-  const installSkill = async (agent: AgentTarget) => {
-    const label = agent === "codex" ? "Codex" : "Claude Code";
-    try {
-      const path = await ipc.installSkill(project, agent);
-      const was = skillInstalled[agent];
-      setSkillInstalled((s) => ({ ...s, [agent]: true }));
-      setSkillFlash(`${label} ${was ? "갱신됨" : "설치됨"}`);
-      console.log("[danbi] skill installed at", path);
-    } catch (e) {
-      console.error("[danbi] install skill failed", e);
-      setSkillFlash(`${label} 실패: ${e}`);
-    }
-  };
 
   return (
     <div className="flex flex-col gap-2">
@@ -362,452 +285,139 @@ function ProjectHero({
           {groupLabel}
         </div>
       )}
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-surface-elevated text-on-dark-mute">
-            <Icon size={20} />
-          </span>
-          <h1 className="truncate text-[28px] font-semibold leading-[1.15] tracking-[-0.01em] text-ink">
-            {project}
-          </h1>
-        </div>
-        {/* 에이전트별 연결 액션 — Codex / Claude Code 각각 한 줄씩,
-         *  [연결] [Skill] [Skill 수정] 3버튼을 그대로 노출. 드롭다운을
-         *  없애 한눈에 두 에이전트를 다 볼 수 있게 함 (사용자 요청).
-         *  - 연결: MCP 등록. Codex = 선택한 코드 폴더의 .codex/config.toml 에 기록
-         *    (이미 있으면 그 자리를 교체, 중복 X). Claude Code =
-         *    `claude mcp add` 명령 복사.
-         *  - Skill: 자동 활성화 SKILL.md 설치/갱신 (~/.codex 또는 ~/.claude).
-         *  - Skill 수정: 두 에이전트 공용 vault 원본(SKILL.md) 편집. */}
-        <div className="flex shrink-0 flex-col items-stretch gap-1.5">
-          <AgentActionRow
-            agentLabel="Codex"
-            agentIcon={<CodexIcon size={13} />}
-            connectHint={`${project} → 선택한 코드 폴더에만 연결`}
-            onConnect={() => onCopyInstall("codex")}
-            skillDone={skillInstalled.codex}
-            onSkill={() => installSkill("codex")}
-            onEditSkill={onEditSkill}
-            project={project}
-          />
-          <div className="h-px bg-hairline" />
-          <AgentActionRow
-            agentLabel="Claude Code"
-            agentIcon={<ClaudeIcon size={13} />}
-            connectHint={`${project} → claude mcp add 명령 복사`}
-            onConnect={() => onCopyInstall("claude")}
-            skillDone={skillInstalled.claude}
-            onSkill={() => installSkill("claude")}
-            onEditSkill={onEditSkill}
-            project={project}
-          />
-        </div>
+      <div className="flex min-w-0 items-center gap-3">
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-surface-elevated text-on-dark-mute">
+          <Icon size={20} />
+        </span>
+        <h1 className="truncate text-[28px] font-semibold leading-[1.15] tracking-[-0.01em] text-ink">
+          {project}
+        </h1>
       </div>
-      {skillFlash && (
-        <div
-          className={cn(
-            "self-end text-[11px]",
-            skillFlash.includes("실패")
-              ? "text-accent-red"
-              : "text-accent-green",
-          )}
-        >
-          {skillFlash.includes("실패") ? "✕" : "✓"} Skill · {skillFlash}
-        </div>
-      )}
+      <GoalsLine project={project} />
     </div>
   );
 }
 
-/** One agent's connect row: [agent label] [연결] [Skill] [Skill 수정].
- *  Rendered once per coding agent (Codex, Claude Code) so both are
- *  visible at a glance — no dropdown. The Skill button flips to the
- *  accent-green "installed" tone (with a ✓) once its SKILL.md exists;
- *  pressing it again re-renders from the shared vault source. "Skill
- *  수정" edits that shared source, so it's identical across rows. */
-function AgentActionRow({
-  agentLabel,
-  agentIcon,
-  connectHint,
-  onConnect,
-  skillDone,
-  onSkill,
-  onEditSkill,
-  project,
-}: {
-  agentLabel: string;
-  agentIcon: ReactNode;
-  connectHint: string;
-  onConnect: () => void;
-  skillDone: boolean;
-  onSkill: () => void;
-  onEditSkill: () => void;
-  project: string;
-}) {
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className="flex w-[100px] shrink-0 items-center justify-end gap-1.5 text-[11px] font-medium tracking-[0.2px] text-mute">
-        {agentIcon}
-        {agentLabel}
-      </span>
-      <button
-        type="button"
-        onClick={onConnect}
-        title={connectHint}
-        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
-      >
-        <Server size={12} /> 연결
-      </button>
-      <button
-        type="button"
-        onClick={onSkill}
-        title={
-          skillDone
-            ? `${agentLabel} 용 SKILL.md 갱신`
-            : `${agentLabel} 용 SKILL.md 설치`
-        }
-        className={cn(
-          "inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-[12px] transition-colors",
-          skillDone
-            ? "border-accent-green/40 bg-accent-green-soft text-accent-green hover:border-accent-green"
-            : "border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark",
-        )}
-      >
-        <Sparkles size={12} /> Skill
-        {skillDone && <Check size={12} className="text-accent-green" />}
-      </button>
-      <button
-        type="button"
-        onClick={onEditSkill}
-        title={`${project}/SKILL.md 편집 (Codex · Claude Code 공용 원본) — 저장 후 'Skill' 로 갱신하면 각 에이전트에 반영됩니다`}
-        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
-      >
-        <Edit3 size={12} /> Skill 수정
-      </button>
-    </div>
-  );
-}
+/** 목표 한 줄 — "목표: A · B [편집]". 편집을 열면 목록 + 추가/보관.
+ *  Claude 세션에 자동 노출되는 goals 의 가벼운 입구. accent 없음. */
+function GoalsLine({ project }: { project: string }) {
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [busyId, setBusyId] = useState<string | null>(null);
 
-/** 첫-연결 안내 카드. 단비의 핵심 사용자는 "이미 Claude Code · Codex 를
- *  쓰는 사람" 이라, 홈에 처음 들어왔을 때 "그래서 내 에이전트를 어떻게
- *  붙이지?" 가 바로 이어져야 한다. 아직 어느 에이전트에도 SKILL 이 깔려
- *  있지 않으면(=미연결로 간주) 이 카드가 히어로 바로 아래에 크게 뜨고,
- *  연결이 끝나면 자동으로 사라진다. "연결" 한 번에 MCP 등록 + SKILL 설치를
- *  함께 해서 스텝을 줄이고(#2), 성공/재시작 안내로 결과를 확인시킨다.
- *
- *  Codex 는 코드 폴더를 고른 뒤 그 안의 .codex/config.toml 에 기록.
- *  Claude 는 `claude mcp add` 가 cwd(프로젝트) 스코프라 완전 자동화가
- *  불가능 — 정직하게 명령을 복사해 "당신 프로젝트 폴더에서 실행" 하도록
- *  안내한다(프로젝트 격리 유지). */
-function ConnectCard({ project }: { project: string }) {
-  const dismissKey = `danbi:connect-card-dismissed:${project}`;
-  const [installed, setInstalled] = useState<Record<AgentTarget, boolean>>({
-    claude: false,
-    codex: false,
-  });
-  const [loaded, setLoaded] = useState(false);
-  const [busy, setBusy] = useState<AgentTarget | null>(null);
-  const [dismissed, setDismissed] = useState(false);
-  const [flash, setFlash] = useState<{ kind: "ok" | "err"; msg: string } | null>(
-    null,
-  );
-
-  useEffect(() => {
-    let alive = true;
-    setDismissed(localStorage.getItem(dismissKey) === "1");
-    Promise.all(
-      (["claude", "codex"] as const).map((a) =>
-        ipc.skillStatus(project, a).then((ok) => [a, ok] as const).catch(
-          () => [a, false] as const,
-        ),
-      ),
-    ).then((pairs) => {
-      if (!alive) return;
-      setInstalled({
-        claude: pairs.find((p) => p[0] === "claude")?.[1] ?? false,
-        codex: pairs.find((p) => p[0] === "codex")?.[1] ?? false,
-      });
-      setLoaded(true);
-    });
-    return () => {
-      alive = false;
-    };
-  }, [project, dismissKey]);
-
-  useEffect(() => {
-    if (!flash) return;
-    const t = setTimeout(() => setFlash(null), 4000);
-    return () => clearTimeout(t);
-  }, [flash]);
-
-  async function connect(agent: AgentTarget) {
-    setBusy(agent);
+  const load = useCallback(async () => {
     try {
-      const status = await ipc.mcpStatus();
-      if (!status.enabled || !status.running) {
-        setFlash({
-          kind: "err",
-          msg: "MCP 서버가 꺼져 있어요. ⌘, 설정 → MCP 에서 먼저 켜주세요.",
-        });
-        return;
-      }
-      if (agent === "codex") {
-        const targetDir = await openDialog({
-          directory: true,
-          multiple: false,
-          title: `Codex 가 실행될 코드 폴더 선택 · ${project}`,
-        });
-        if (typeof targetDir !== "string") return;
-        const res = await ipc.codexConnect(project, targetDir);
-        // MCP 등록과 함께 자동 활성화 SKILL 도 설치 — 두 스텝을 한 번에.
-        await ipc.installSkill(project, "codex").catch(() => {});
-        setInstalled((s) => ({ ...s, codex: true }));
-        setFlash({
-          kind: "ok",
-          msg:
-            (res.action === "updated"
-              ? "Codex 연결을 갱신했어요"
-              : "선택한 코드 폴더에 연결했어요") +
-            (res.global_removed ? " · 기존 전역 연결 제거" : "") +
-            " · SKILL 설치 완료 — Codex 에서 폴더를 신뢰하고 재시작하면 도구가 뜹니다.",
-        });
-      } else {
-        const endpoint = await ipc.mcpProjectEndpoint(project);
-        const slug = project
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "");
-        const serverName = slug ? `danbi-${slug}` : "danbi";
-        const cmd = `claude mcp add --transport http ${serverName} "${endpoint.url}" --header "Authorization: Bearer ${status.token}"`;
-        await clipboardWriteText(cmd);
-        await ipc.installSkill(project, "claude").catch(() => {});
-        setInstalled((s) => ({ ...s, claude: true }));
-        setFlash({
-          kind: "ok",
-          msg: "설치 명령을 복사했어요 · 이 명령을 당신 프로젝트 폴더에서 실행하세요.",
-        });
-      }
+      setGoals(await ipc.goalsList(project));
     } catch (e) {
-      setFlash({ kind: "err", msg: `연결 실패: ${e}` });
+      console.error("[danbi] goals list failed", e);
+      setGoals([]);
+    }
+  }, [project]);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function handleAdd() {
+    const title = draft.trim();
+    if (!title) return;
+    try {
+      await ipc.goalsAdd(project, title);
+      setDraft("");
+      await load();
+    } catch (e) {
+      console.error("[danbi] goals add failed", e);
+    }
+  }
+  async function handleArchive(id: string) {
+    setBusyId(id);
+    try {
+      await ipc.goalsArchive(project, id);
+      await load();
     } finally {
-      setBusy(null);
+      setBusyId(null);
     }
   }
 
-  function dismiss() {
-    localStorage.setItem(dismissKey, "1");
-    setDismissed(true);
-  }
-
-  // 상태 로드 전엔 깜빡임 방지, 이미 연결됐거나(둘 중 하나 SKILL 설치)
-  // 사용자가 숨겼으면 렌더하지 않는다.
-  if (!loaded || dismissed || installed.claude || installed.codex) return null;
-
-  const AGENTS: {
-    key: AgentTarget;
-    label: string;
-    icon: ReactNode;
-    cta: string;
-    hint: string;
-  }[] = [
-    {
-      key: "codex",
-      label: "Codex",
-      icon: <CodexIcon size={16} />,
-      cta: "지금 연결",
-      hint: "코드 폴더를 선택해 해당 폴더에만 연결",
-    },
-    {
-      key: "claude",
-      label: "Claude Code",
-      icon: <ClaudeIcon size={16} />,
-      cta: "명령 복사",
-      hint: "복사한 명령을 당신 프로젝트 폴더에서 실행",
-    },
-  ];
-
   return (
-    <div className="mt-6 rounded-lg border border-hairline bg-surface-card p-5">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Server size={15} className="text-accent-blue" />
-            <h3 className="text-[15px] font-semibold text-ink">
-              이 프로젝트를 에이전트에 연결하세요
-            </h3>
-          </div>
-          <p className="mt-1.5 text-[13px] leading-[1.6] text-body">
-            Claude Code · Codex 가{" "}
-            <span className="text-on-dark">{project}</span> 의 vault 를 직접
-            읽고 씁니다. 한 번만 붙이면, 다음부턴 새 세션에서도 맥락을 기억해요.
-          </p>
-        </div>
+    <div className="flex flex-col gap-1.5">
+      <div className="flex min-w-0 items-center gap-2 text-[13px]">
+        <Target size={13} className="shrink-0 text-mute" />
+        <span className="shrink-0 text-mute">목표:</span>
+        <span className="min-w-0 flex-1 truncate text-body">
+          {goals.length > 0
+            ? goals.map((g) => g.title).join(" · ")
+            : "아직 없어요 — 지금 뭘 하려는지 한 줄이면 Claude 세션에 자동으로 노출돼요"}
+        </span>
         <button
-          type="button"
-          onClick={dismiss}
+          onClick={() => setOpen((v) => !v)}
           className="shrink-0 text-[11px] text-mute hover:text-on-dark"
         >
-          이미 연결했어요 · 숨기기
+          {open ? "닫기" : "편집"}
         </button>
       </div>
-
-      <div className="mt-4 flex flex-col gap-2">
-        {AGENTS.map((a) => (
-          <div
-            key={a.key}
-            className="flex items-center justify-between gap-3 rounded-md border border-hairline bg-surface-elevated px-3.5 py-2.5"
-          >
-            <div className="flex min-w-0 items-center gap-2.5">
-              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-md bg-surface-card text-on-dark-mute">
-                {a.icon}
-              </span>
-              <div className="min-w-0">
-                <div className="text-[13px] font-medium text-on-dark">
-                  {a.label}
-                </div>
-                <div className="truncate text-[11px] text-mute">{a.hint}</div>
-              </div>
-            </div>
+      {open && (
+        <div className="rounded-md border border-hairline bg-surface-elevated p-3">
+          {goals.length > 0 && (
+            <ul className="flex flex-col gap-1">
+              {goals.map((g) => (
+                <li
+                  key={g.id}
+                  className="group flex items-start justify-between gap-3 text-[13px]"
+                >
+                  <div className="flex min-w-0 flex-col">
+                    <span className="truncate text-ink">{g.title}</span>
+                    {g.note && (
+                      <span className="truncate text-[11px] text-stone">{g.note}</span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busyId === g.id}
+                    onClick={() => handleArchive(g.id)}
+                    className="shrink-0 rounded-sm p-1 text-stone opacity-0 transition group-hover:opacity-100 hover:text-on-dark disabled:opacity-30"
+                    title="보관"
+                  >
+                    {busyId === g.id ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Archive className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className={cn("flex items-center gap-2", goals.length > 0 && "mt-2")}>
+            <input
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.nativeEvent.isComposing) {
+                  e.preventDefault();
+                  handleAdd();
+                } else if (e.key === "Escape") {
+                  setOpen(false);
+                }
+              }}
+              placeholder="예: v0.8.8 범위 확정"
+              className="h-8 flex-1 rounded-md border border-hairline bg-surface px-2.5 text-[13px] text-ink placeholder:text-stone focus:border-hairline-strong focus:outline-none"
+            />
             <button
               type="button"
-              disabled={busy !== null}
-              onClick={() => connect(a.key)}
-              className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-hairline bg-surface-card px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark disabled:opacity-50"
+              onClick={handleAdd}
+              disabled={!draft.trim()}
+              className="inline-flex h-8 items-center rounded-md border border-hairline bg-surface px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark disabled:opacity-50"
             >
-              {busy === a.key ? (
-                <Loader2 size={12} className="animate-spin" />
-              ) : (
-                <Server size={12} />
-              )}
-              {a.cta}
+              추가
             </button>
           </div>
-        ))}
-      </div>
-
-      {flash && (
-        <div
-          className={cn(
-            "mt-3 text-[12px]",
-            flash.kind === "err" ? "text-accent-red" : "text-accent-green",
-          )}
-        >
-          {flash.kind === "err" ? "✕" : "✓"} {flash.msg}
         </div>
       )}
     </div>
   );
 }
 
-/** Small header dropdown that fans a single action (연결 / Skill) out
- *  across coding agents (Claude Code · Codex). Keeps the header button
- *  count flat while staying extensible to future agents. Closes on
- *  outside-click or Esc. No drop-shadow (DESIGN.md) — the menu sits on
- *  the surface-card rung above surface-elevated with a hairline border.
- *  Parked (replaced by AgentActionRow) — kept for potential reuse. */
-function AgentMenu({
-  label,
-  icon,
-  title,
-  items,
-  onSelect,
-  active = false,
-}: {
-  label: string;
-  icon: ReactNode;
-  title: string;
-  items: Array<{
-    agent: AgentTarget;
-    label: string;
-    hint?: string;
-    done?: boolean;
-  }>;
-  onSelect: (agent: AgentTarget) => void;
-  active?: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    function onDown(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    }
-    function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        title={title}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        className={cn(
-          "inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-[12px] transition-colors",
-          active
-            ? "border-accent-green/40 bg-accent-green-soft text-accent-green hover:border-accent-green"
-            : "border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark",
-        )}
-      >
-        {icon}
-        {label}
-        <ChevronDown
-          size={11}
-          className={cn(
-            "opacity-60 transition-transform",
-            open && "rotate-180",
-          )}
-        />
-      </button>
-      {open && (
-        <div
-          role="menu"
-          className="absolute right-0 top-full z-30 mt-1 min-w-[210px] overflow-hidden rounded-md border border-hairline bg-surface-card py-1"
-        >
-          {items.map((it) => (
-            <button
-              key={it.agent}
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setOpen(false);
-                onSelect(it.agent);
-              }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-body transition-colors hover:bg-surface-elevated hover:text-on-dark"
-            >
-              <span className="min-w-0 flex-1">
-                <span className="text-on-dark">{it.label}</span>
-                {it.hint && (
-                  <span className="ml-1.5 text-[11px] text-stone">
-                    {it.hint}
-                  </span>
-                )}
-              </span>
-              {it.done && (
-                <Check size={12} className="shrink-0 text-accent-green" />
-              )}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** "Claude Code 가 받아 적은 것" — Auto-Journal 메인 패널.
- *  vault 의 daily/*.md 를 trigger 별로 파싱해서 오늘 카운트 +
- *  최근 항목 + 7일 막대로 보여준다. LLM 호출 없이 동작. */
 function AutoJournalPanel({
   project,
   onOpen,
@@ -1243,867 +853,17 @@ function EmptyJournal({ project }: { project: string }) {
   );
 }
 
-function _McpFooter({
-  project,
-  onCopyInstall,
-  onCopyClaudeMd,
-  embedded = false,
-}: {
-  project: string;
-  onCopyInstall: () => void;
-  onCopyClaudeMd: () => void;
-  embedded?: boolean;
-}) {
-  const inner = (
-    <div className="flex h-full items-center justify-between gap-3">
-      <span className="min-w-0 flex-1 text-[12px] font-medium text-ink">
-        Claude Code 에 연결
-      </span>
-      <div className="flex shrink-0 items-center gap-1.5">
-        <button
-          onClick={onCopyInstall}
-          title={`${project} MCP 설치 명령 복사`}
-          className="inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface px-2 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-        >
-          설치 명령
-        </button>
-        <button
-          onClick={onCopyClaudeMd}
-          title="CLAUDE.md 단비 블록 복사"
-          className="inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface px-2 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-        >
-          CLAUDE.md
-        </button>
-      </div>
-    </div>
-  );
-  if (embedded) return <div>{inner}</div>;
-  return (
-    <div className="rounded-md border border-hairline bg-surface-elevated px-4 py-3">
-      {inner}
-    </div>
-  );
-}
 
-function _DailyCard({
-  today,
-  todayNotes,
-  week,
-  month,
-  year,
-  project,
-  onOpen,
-  hasOtherProjects,
-}: {
-  today: string;
-  todayNotes: DailyNoteRef[];
-  week: DailyNoteRef[];
-  month: DailyNoteRef[];
-  year: DailyNoteRef[];
-  project: string;
-  onOpen: (domain: string) => void;
-  hasOtherProjects: boolean;
-}) {
-  const [creating, setCreating] = useState(false);
-
-  async function createToday() {
-    setCreating(true);
-    try {
-      const domain = await ipc.ensureTodayNote(project);
-      onOpen(domain);
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  const hasPast = week.length + month.length + year.length > 0;
-  void hasOtherProjects; // kept for future: could suggest linking to other projects' daily notes.
-
-  return (
-    <section className="mt-6 rounded-lg border border-hairline bg-surface p-4">
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <CalendarDays size={13} className="text-accent-blue" />
-          <h2 className="text-[14px] font-medium text-ink">오늘</h2>
-          <span className="font-mono text-caption-sm text-stone">{today}</span>
-        </div>
-        {todayNotes.length === 0 && (
-          <button
-            onClick={createToday}
-            disabled={creating}
-            className="inline-flex h-6 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-          >
-            <Plus size={10} /> 오늘 노트
-          </button>
-        )}
-      </header>
-
-      {todayNotes.length > 0 ? (
-        <ul className="mt-2 flex flex-col gap-1">
-          {todayNotes.map((n) => (
-            <li key={n.domain}>
-              <button
-                onClick={() => onOpen(n.domain)}
-                className="flex w-full items-center gap-2 rounded-sm px-2 py-1 text-left transition-colors hover:bg-surface-elevated"
-              >
-                <FileText size={11} className="text-mute" />
-                <span className="font-mono text-caption-md text-body">
-                  {n.domain}
-                </span>
-                <span className="ml-auto text-caption-sm text-stone">
-                  {n.bytes > 0 ? `${(n.bytes / 1024).toFixed(1)}KB` : "empty"}
-                </span>
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <div className="mt-2 text-caption-sm text-stone">
-          오늘 데일리 노트가 없어요.
-        </div>
-      )}
-
-      {hasPast && (
-        <div className="mt-4 border-t border-hairline pt-3">
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <Clock4 size={11} className="text-accent-yellow" />
-            <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
-              지난 오늘
-            </span>
-          </div>
-          <div className="flex flex-col gap-1">
-            <PastRow label="1주 전" notes={week} onOpen={onOpen} />
-            <PastRow label="1개월 전" notes={month} onOpen={onOpen} />
-            <PastRow label="1년 전" notes={year} onOpen={onOpen} />
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function PastRow({
-  label,
-  notes,
-  onOpen,
-}: {
-  label: string;
-  notes: DailyNoteRef[];
-  onOpen: (domain: string) => void;
-}) {
-  if (notes.length === 0) return null;
-  return (
-    <div className="flex flex-wrap items-center gap-1.5 text-caption-sm">
-      <span className="w-14 shrink-0 text-stone">{label}</span>
-      {notes.map((n) => (
-        <button
-          key={n.domain}
-          onClick={() => onOpen(n.domain)}
-          className="inline-flex items-center gap-1 rounded-full border border-hairline bg-surface-elevated px-2 py-0.5 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-        >
-          <span className="font-mono text-[10px]">{n.date}</span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function _McpCard({
-  project,
-  endpoint,
-  onCopyInstall,
-  onCopyClaudeMd,
-}: {
-  project: string;
-  endpoint: McpProjectEndpoint | null;
-  onCopyInstall: () => void;
-  onCopyClaudeMd: () => void;
-}) {
-  void project;
-  const [copiedUrl, setCopiedUrl] = useState(false);
-
-  async function copyUrl() {
-    if (!endpoint) return;
-    try {
-      await clipboardWriteText(endpoint.url);
-      setCopiedUrl(true);
-      setTimeout(() => setCopiedUrl(false), 1500);
-    } catch {
-      /* handled in parent via toast */
-    }
-  }
-
-  return (
-    <section className="rounded-lg border border-hairline bg-surface p-4">
-      <div className="mb-2 flex items-center gap-1.5">
-        <Server size={13} className="text-accent-blue" />
-        <h2 className="text-[14px] font-medium text-ink">MCP</h2>
-      </div>
-      {endpoint ? (
-        <>
-          <div className="mb-2 flex items-center gap-1.5 rounded-sm border border-hairline bg-surface-elevated px-2 py-1.5">
-            <Link2 size={11} className="shrink-0 text-stone" />
-            <span className="flex-1 truncate font-mono text-[11px] text-body">
-              {endpoint.url}
-            </span>
-            <button
-              onClick={copyUrl}
-              className="grid h-5 w-5 place-items-center rounded-xs text-stone transition-colors hover:bg-surface-card hover:text-on-dark"
-              title="URL 복사"
-            >
-              {copiedUrl ? <Check size={10} /> : <Copy size={10} />}
-            </button>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <button
-              onClick={onCopyInstall}
-              className="inline-flex h-7 items-center justify-center rounded-sm border border-hairline bg-surface-elevated text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-            >
-              Claude Code 설치 명령 복사
-            </button>
-            <button
-              onClick={onCopyClaudeMd}
-              className="inline-flex h-7 items-center justify-center rounded-sm border border-hairline bg-surface-elevated text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-            >
-              CLAUDE.md 단비 블록 복사
-            </button>
-          </div>
-        </>
-      ) : (
-        <div className="text-caption-sm text-stone">
-          MCP 서버가 꺼져 있어요. ⌘, 설정 → MCP 에서 켜주세요.
-        </div>
-      )}
-    </section>
-  );
-}
-
-function _SuggestionRow({
-  s,
-  onOpen,
-}: {
-  s: VaultSuggestion;
-  onOpen: (domain: string) => void;
-}) {
-  if (s.kind === "EmptyProject") return null;
-  const label =
-    s.kind === "Orphan" ? "ORPHAN" : s.kind === "Empty" ? "EMPTY" : "LARGE";
-  const color =
-    s.kind === "Oversized"
-      ? "text-accent-yellow bg-accent-yellow-soft"
-      : s.kind === "Orphan"
-        ? "text-accent-blue bg-accent-blue-soft"
-        : "text-mute bg-surface-elevated";
-  const hint =
-    s.kind === "Orphan"
-      ? "어디에서도 참조되지 않아요."
-      : s.kind === "Empty"
-        ? "내용이 없어요."
-        : `${(s.bytes / 1024).toFixed(1)}KB — 섹션으로 나누세요.`;
-  return (
-    <li className="flex items-center gap-2 text-caption-md">
-      <span
-        className={cn(
-          "shrink-0 rounded-xs px-1.5 py-0.5 text-[10px] uppercase tracking-[0.4px]",
-          color,
-        )}
-      >
-        {label}
-      </span>
-      <button
-        onClick={() => onOpen(s.domain)}
-        className="font-mono text-body transition-colors hover:text-on-dark"
-      >
-        {s.domain}
-      </button>
-      <span className="text-stone">— {hint}</span>
-    </li>
-  );
-}
-
-function _QaSection({
-  value,
-  onChange,
-  onAsk,
-  loading,
-  error,
-  answer,
-  onOpen,
-  llmReady,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  onAsk: () => void;
-  loading: boolean;
-  error: string | null;
-  answer: QaAnswer | null;
-  onOpen: (domain: string) => void;
-  llmReady: boolean;
-}) {
-  return (
-    <section className="mt-6 rounded-lg border border-hairline bg-surface p-4">
-      <header className="mb-2 flex items-center gap-1.5">
-        <MessageCircle size={13} className="text-accent-blue" />
-        <h2 className="text-[14px] font-medium text-ink">이 프로젝트에 물어보기</h2>
-        {!llmReady && <LlmLockBadge />}
-      </header>
-      <div className="flex items-center gap-2">
-        <input
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          onKeyDown={(e) => {
-            if (
-              e.key === "Enter" &&
-              !e.nativeEvent.isComposing &&
-              !loading &&
-              llmReady
-            ) {
-              e.preventDefault();
-              onAsk();
-            }
-          }}
-          disabled={!llmReady}
-          placeholder={
-            llmReady
-              ? "예: auth 어떻게 정했지? — 이 vault만 근거로 답해요"
-              : "LLM 미연결 — Settings 에서 Provider 연결 후 사용"
-          }
-          className="flex-1 rounded-md border border-hairline bg-surface-elevated px-3 py-1.5 text-[13px] text-on-dark outline-none focus:border-hairline-strong disabled:cursor-not-allowed disabled:opacity-60"
-        />
-        <button
-          onClick={onAsk}
-          disabled={!llmReady || loading || value.trim().length === 0}
-          title={!llmReady ? "LLM 연결 필요" : undefined}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-on-primary transition-colors hover:bg-primary-pressed disabled:opacity-60 disabled:cursor-not-allowed"
-        >
-          {loading ? (
-            <Loader2 size={12} className="animate-spin" />
-          ) : (
-            <Send size={11} />
-          )}
-          {loading ? "찾는 중…" : "물어보기"}
-        </button>
-      </div>
-
-      {error && (
-        <div className="mt-2 rounded-sm border border-hairline bg-surface-elevated p-2 font-mono text-[11px] text-accent-red">
-          {error}
-        </div>
-      )}
-
-      {answer && (
-        <div className="mt-3 rounded-md border border-hairline bg-surface-elevated p-3">
-          <div className="whitespace-pre-wrap text-[13px] leading-[1.6] text-on-dark">
-            {answer.answer}
-          </div>
-          {answer.citations.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {answer.citations.map((c, i) => (
-                <button
-                  key={`${c.domain}-${i}`}
-                  onClick={() => onOpen(c.domain)}
-                  title={c.note}
-                  className="inline-flex items-center gap-1 rounded-full border border-hairline bg-surface px-2 py-0.5 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-                >
-                  <FileText size={10} className="text-stone" />
-                  <span className="font-mono text-[10px]">{c.domain}</span>
-                </button>
-              ))}
-            </div>
-          )}
-          {answer.citations.length === 0 && answer.sources.length > 0 && (
-            <div className="mt-3 text-caption-sm text-stone">
-              참고한 문서 없음 — 검색 결과: {answer.sources.slice(0, 5).join(", ")}
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function _BriefingSection({
-  range,
-  loading,
-  error,
-  result,
-  onRun,
-  onOpen,
-  llmReady,
-}: {
-  range: "today" | "yesterday" | "last_week";
-  loading: boolean;
-  error: string | null;
-  result: BriefingResult | null;
-  onRun: (r: "today" | "yesterday" | "last_week") => void;
-  onOpen: (domain: string) => void;
-  llmReady: boolean;
-}) {
-  const rangeLabel: Record<typeof range, string> = {
-    today: "오늘",
-    yesterday: "어제",
-    last_week: "지난 7일",
-  };
-
-  return (
-    <section className="mt-6 rounded-lg border border-hairline bg-surface p-4">
-      <header className="mb-2 flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <History size={13} className="text-accent-blue" />
-          <h2 className="text-[14px] font-medium text-ink">변경 브리핑</h2>
-          {!llmReady && <LlmLockBadge />}
-        </div>
-        <div className="flex items-center gap-1">
-          {(["today", "yesterday", "last_week"] as const).map((r) => (
-            <button
-              key={r}
-              onClick={() => onRun(r)}
-              disabled={loading || !llmReady}
-              title={!llmReady ? "LLM 연결 필요" : undefined}
-              className={cn(
-                "inline-flex h-6 items-center rounded-sm px-2 text-[11px] transition-colors disabled:cursor-not-allowed disabled:opacity-50",
-                range === r && result
-                  ? "bg-primary text-on-primary hover:bg-primary-pressed"
-                  : "border border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark",
-              )}
-            >
-              {rangeLabel[r]}
-            </button>
-          ))}
-        </div>
-      </header>
-
-      {error && (
-        <div className="mt-1 rounded-sm border border-hairline bg-surface-elevated p-2 font-mono text-[11px] text-accent-red">
-          {error}
-        </div>
-      )}
-
-      {loading ? (
-        <div className="mt-1 flex items-center gap-1.5 text-caption-sm text-stone">
-          <Loader2 size={11} className="animate-spin" />
-          git 로그 훑는 중…
-        </div>
-      ) : !result ? (
-        <div className="text-caption-sm text-stone">
-          돌아왔을 때 이 프로젝트에서 뭐가 바뀌었는지 Writer가 정리해요. 버튼을 눌러보세요.
-        </div>
-      ) : (
-        <>
-          <div className="whitespace-pre-wrap text-[13px] leading-[1.6] text-on-dark">
-            {result.summary}
-          </div>
-          {result.changed_files.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-1.5">
-              {result.changed_files.map((f) => (
-                <button
-                  key={f}
-                  onClick={() => onOpen(f)}
-                  className="inline-flex items-center gap-1 rounded-full border border-hairline bg-surface-elevated px-2 py-0.5 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-                >
-                  <FileText size={10} className="text-stone" />
-                  <span className="font-mono text-[10px]">{f}</span>
-                </button>
-              ))}
-            </div>
-          )}
-        </>
-      )}
-    </section>
-  );
-}
-
-function _GhostSection({
-  store,
-  scanning,
-  error,
-  onScan,
-  onAccept,
-  onReject,
-  onOpen,
-  llmReady,
-}: {
-  store: GhostStore | null;
-  scanning: boolean;
-  error: string | null;
-  onScan: () => void;
-  onAccept: (id: string) => void;
-  onReject: (id: string) => void;
-  onOpen: (domain: string) => void;
-  llmReady: boolean;
-}) {
-  const pending = (store?.links ?? []).filter((l) => l.status === "pending");
-  const accepted = (store?.links ?? []).filter(
-    (l) => l.status === "accepted",
-  ).length;
-  const lastScan = store?.last_scan_at ?? null;
-  const hasScanned = lastScan !== null;
-
-  return (
-    <section className="mt-6 rounded-lg border border-hairline bg-surface p-4">
-      <header className="mb-2 flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <Ghost size={13} className="text-accent-blue" />
-          <h2 className="text-[14px] font-medium text-ink">Ghost Links</h2>
-          <span className="text-caption-sm text-stone">
-            {hasScanned
-              ? `${pending.length} 제안 · ${accepted} 확정`
-              : "아직 스캔 안 함"}
-          </span>
-          {!llmReady && <LlmLockBadge />}
-        </div>
-        <button
-          onClick={onScan}
-          disabled={scanning || !llmReady}
-          title={!llmReady ? "LLM 연결 필요" : undefined}
-          className="inline-flex h-7 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-on-primary transition-colors hover:bg-primary-pressed disabled:opacity-60 disabled:cursor-not-allowed"
-        >
-          {scanning ? (
-            <Loader2 size={11} className="animate-spin" />
-          ) : (
-            <Sparkles size={11} />
-          )}
-          {scanning ? "스캔 중…" : hasScanned ? "다시 스캔" : "새 제안 찾기"}
-        </button>
-      </header>
-
-      {error && (
-        <div className="mb-2 rounded-sm border border-hairline bg-surface-elevated p-2 font-mono text-[11px] text-accent-red">
-          {error}
-        </div>
-      )}
-
-      {!hasScanned ? (
-        <div className="text-caption-sm text-stone">
-          AI가 프로젝트 내 문서들을 훑어 서로 연결될 법한 쌍을 제안합니다.
-          Haiku 1회 호출(≈ 수 센트).
-        </div>
-      ) : pending.length === 0 ? (
-        <div className="text-caption-sm text-stone">
-          대기 중인 제안이 없어요. 새 문서를 쓰고 다시 스캔해 보세요.
-        </div>
-      ) : (
-        <ul className="flex flex-col gap-1.5">
-          {pending.map((l) => (
-            <GhostRow
-              key={l.id}
-              link={l}
-              onAccept={() => onAccept(l.id)}
-              onReject={() => onReject(l.id)}
-              onOpen={onOpen}
-            />
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-
-function GhostRow({
-  link,
-  onAccept,
-  onReject,
-  onOpen,
-}: {
-  link: GhostLink;
-  onAccept: () => void;
-  onReject: () => void;
-  onOpen: (domain: string) => void;
-}) {
-  return (
-    <li className="flex items-center gap-2 rounded-sm border border-hairline bg-surface-elevated px-2.5 py-2">
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <div className="flex items-center gap-1.5 text-caption-md">
-          <button
-            onClick={() => onOpen(link.source_domain)}
-            className="truncate font-mono text-body hover:text-on-dark"
-            title={link.source_domain}
-          >
-            {link.source_domain}
-          </button>
-          <Link2 size={10} className="shrink-0 text-stone" />
-          <button
-            onClick={() => onOpen(link.target_domain)}
-            className="truncate font-mono text-body hover:text-on-dark"
-            title={link.target_domain}
-          >
-            {link.target_domain}
-          </button>
-        </div>
-        {link.reason && (
-          <div className="truncate text-caption-sm text-stone" title={link.reason}>
-            {link.reason}
-          </div>
-        )}
-      </div>
-      <div className="flex shrink-0 items-center gap-1">
-        <button
-          onClick={onReject}
-          title="기각"
-          className="grid h-6 w-6 place-items-center rounded-xs text-stone transition-colors hover:bg-surface-card hover:text-on-dark"
-        >
-          <X size={11} />
-        </button>
-        <button
-          onClick={onAccept}
-          title="확정 — 소스 문서 하단에 [[target]] 추가"
-          className="grid h-6 w-6 place-items-center rounded-xs text-accent-blue transition-colors hover:bg-accent-blue-soft"
-        >
-          <Check size={11} />
-        </button>
-      </div>
-    </li>
-  );
-}
-
-function _ProjectContextSection({
-  project,
-  ctx,
-  onRefresh,
-  onOpen,
-}: {
-  project: string;
-  ctx: ProjectContextStatus | null;
-  onRefresh: () => void;
-  onOpen: (domain: string) => void;
-}) {
-  const [creating, setCreating] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const hasAny = ctx?.has_purpose || ctx?.has_schema;
-  const hasBoth = ctx?.has_purpose && ctx?.has_schema;
-
-  async function seed() {
-    setCreating(true);
-    setErr(null);
-    try {
-      await ipc.projectContextEnsure(project);
-      await onRefresh();
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  return (
-    <section className="mt-6 rounded-lg border border-hairline bg-surface p-4">
-      <header className="mb-2 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Sparkles size={13} className="text-accent-blue" />
-          <h2 className="text-[14px] font-medium text-ink">
-            프로젝트 맥락
-          </h2>
-          <span
-            className={cn(
-              "rounded-xs px-1.5 py-0.5 text-[10px] uppercase tracking-[0.4px]",
-              hasBoth
-                ? "bg-accent-green-soft text-accent-green"
-                : hasAny
-                  ? "bg-accent-yellow-soft text-accent-yellow"
-                  : "bg-surface-elevated text-mute",
-            )}
-          >
-            {hasBoth ? "Wiki-LLM 준비됨" : hasAny ? "일부 설정됨" : "미설정"}
-          </span>
-        </div>
-        {!hasBoth && (
-          <button
-            disabled={creating}
-            onClick={seed}
-            className="inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body hover:text-on-dark"
-          >
-            {creating ? "생성 중…" : "자동 생성"}
-          </button>
-        )}
-      </header>
-
-      <p className="mb-3 text-caption-sm leading-[1.6] text-mute">
-        <code className="font-mono text-on-dark-mute">purpose.md</code> 와{" "}
-        <code className="font-mono text-on-dark-mute">schema.md</code> 는 Writer
-        가 모든 편집에서 참고하는 프로젝트 규칙이에요. 설정할수록 LLM 응답이 이
-        프로젝트의 맥락에 더 잘 맞춰집니다.
-      </p>
-
-      <div className="grid grid-cols-2 gap-2">
-        <ContextFileRow
-          kind="purpose.md"
-          exists={!!ctx?.has_purpose}
-          clipped={!!ctx?.purpose_clipped}
-          onOpen={() => onOpen("purpose.md")}
-        />
-        <ContextFileRow
-          kind="schema.md"
-          exists={!!ctx?.has_schema}
-          clipped={!!ctx?.schema_clipped}
-          onOpen={() => onOpen("schema.md")}
-        />
-      </div>
-
-      {err && (
-        <div className="mt-3 rounded-md border border-hairline bg-surface-elevated p-2 font-mono text-[11px] text-accent-red">
-          {err}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function ContextFileRow({
-  kind,
-  exists,
-  clipped,
-  onOpen,
-}: {
-  kind: string;
-  exists: boolean;
-  clipped: boolean;
-  onOpen: () => void;
-}) {
-  return (
-    <button
-      onClick={onOpen}
-      disabled={!exists}
-      className={cn(
-        "flex items-center justify-between rounded-md border p-3 text-left transition-colors",
-        exists
-          ? "border-hairline bg-surface-elevated hover:border-hairline-strong"
-          : "border-dashed border-hairline bg-surface opacity-60",
-      )}
-    >
-      <div className="flex flex-col">
-        <span className="font-mono text-[12px] text-ink">{kind}</span>
-        <span className="mt-0.5 text-caption-sm text-mute">
-          {exists
-            ? clipped
-              ? "크기 초과 — 요약 권장"
-              : "Writer 에 주입 중"
-            : "없음"}
-        </span>
-      </div>
-      <span
-        className={cn(
-          "text-[11px] uppercase tracking-[0.4px]",
-          exists
-            ? clipped
-              ? "text-accent-yellow"
-              : "text-accent-green"
-            : "text-stone",
-        )}
-      >
-        {exists ? (clipped ? "CLIP" : "OK") : "—"}
-      </span>
-    </button>
-  );
-}
-
-/** Small amber "LLM 필요" chip. Goes in section headers where the
- *  primary action is gated on a configured provider. */
-function LlmLockBadge() {
-  return (
-    <span
-      className="ml-auto inline-flex items-center gap-1 rounded-xs bg-accent-yellow-soft px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.5px] text-accent-yellow"
-      title="LLM 필요 · Settings → Provider 연결"
-    >
-      LLM 필요
-    </span>
-  );
-}
-
-function _Stat({
-  label,
-  value,
-  hint,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-}) {
-  return (
-    <div className="flex flex-col rounded-lg border border-hairline bg-surface px-3 py-3">
-      <span className="text-[11px] uppercase tracking-[0.4px] text-stone">
-        {label}
-      </span>
-      <span className="mt-1 text-[20px] font-medium leading-none text-ink">
-        {value}
-      </span>
-      <span className="mt-1 text-caption-sm text-mute">{hint}</span>
-    </div>
-  );
-}
-
-function _prettyBytes(n: number): string {
-  if (n < 1024) return `${n}B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-function _timeAgo(ms: number): string {
-  const diff = Date.now() - ms;
-  if (diff < 60 * 1000) return "방금";
-  if (diff < 60 * 60 * 1000) return `${Math.floor(diff / (60 * 1000))}분 전`;
-  if (diff < 24 * 60 * 60 * 1000)
-    return `${Math.floor(diff / (60 * 60 * 1000))}시간 전`;
-  if (diff < 7 * 24 * 60 * 60 * 1000)
-    return `${Math.floor(diff / (24 * 60 * 60 * 1000))}일 전`;
-  const d = new Date(ms);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-// Parked components/helpers from the previous dashboard. Re-exported so
-// noUnusedLocals doesn't complain — keeps them in the bundle but the
-// new ProjectHome doesn't render them. Restore by importing wherever.
-export {
-  _DailyCard,
-  _McpCard,
-  _McpFooter,
-  _SuggestionRow,
-  _QaSection,
-  _BriefingSection,
-  _GhostSection,
-  _ProjectContextSection,
-  _Stat,
-  _prettyBytes,
-  _timeAgo,
-  // Parked after the header was split into per-agent AgentActionRow rows
-  // and 주간 회고 was dropped — kept in the bundle for potential reuse.
-  AgentMenu,
-  WeeklySummaryButton,
-};
-
-/** Inline action card on the project home — three big affordances:
- *  1) 검색 (this project only): search box that queries vault then
- *     filters to this project; clicking a hit jumps to the file.
- *  2) 그래프 (this project): opens GraphView scoped to this project.
- *  3) 재인덱싱 (this project): runs the per-project vector reindex
- *     with progress feedback (powered by ProjectReindexButton).
- *  + 도메인 추가 quick action.
- *
- *  Placed between ProjectHero and SevenDayBar so the user sees them
- *  immediately without scrolling. The buttons in the small header used
- *  to live here, but they were too compact to notice — the user
- *  explicitly asked for these three to "잘 보이게".
- */
+/** 이 프로젝트 안에서 — 그래프 · 관련 노트 제안 · 재인덱싱. 전부 hairline
+ *  톤(재인덱싱 accent 강조 폐지). 프로젝트 내 검색 박스는 ⌘K 팔레트가 이
+ *  화면에서 열리면 @프로젝트 칩을 자동 선택하므로 제거. */
 function ProjectActions({
   project,
-  onAddDomain,
   onOpenGraph,
 }: {
   project: string;
-  onAddDomain: () => void;
   onOpenGraph: () => void;
 }) {
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<
-    Array<{
-      project: string;
-      domain: string;
-      snippet: string;
-      relevance: number;
-    }>
-  >([]);
-  const [searching, setSearching] = useState(false);
-  const selectDomain = useApp((s) => s.selectDomain);
   const aiConnected = useApp((s) => !!s.cfg?.embed_provider);
   const setBgJob = useApp((s) => s.setBgJob);
   const pushNotification = useApp((s) => s.pushNotification);
@@ -2172,38 +932,6 @@ function ProjectActions({
       });
   }
 
-  // Debounced project-scoped search. We hit the vault-wide tantivy
-  // index then filter to this project — same UX as the global ⌘K
-  // palette but pinned to the current project.
-  useEffect(() => {
-    const q = query.trim();
-    if (!q) {
-      setResults([]);
-      return;
-    }
-    setSearching(true);
-    const id = setTimeout(async () => {
-      try {
-        const hits = await ipc.searchFull(q, 30);
-        const filtered = hits
-          .filter((h) => h.project === project)
-          .slice(0, 8)
-          .map((h) => ({
-            project: h.project,
-            domain: h.domain,
-            snippet: h.snippet ?? "",
-            relevance: h.relevance ?? 0,
-          }));
-        setResults(filtered);
-      } catch (e) {
-        console.error("[danbi] project search failed", e);
-        setResults([]);
-      } finally {
-        setSearching(false);
-      }
-    }, 200);
-    return () => clearTimeout(id);
-  }, [query, project]);
 
   return (
     <section className="rounded-lg border border-hairline bg-surface-elevated p-5">
@@ -2212,7 +940,6 @@ function ProjectActions({
           이 프로젝트 안에서
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {/* 그래프 — 보조 액션. 기본 hairline 톤. */}
           <button
             onClick={onOpenGraph}
             title={`${project} 그래프 보기`}
@@ -2220,9 +947,8 @@ function ProjectActions({
           >
             <Network size={16} /> 그래프
           </button>
-          {/* Ghost links 자동 제안 — AI 연동 켰을 때만 활성. 결과는
-              그래프에서 점선으로 자동 표시되고 ReviewPanel 에서 accept/
-              reject 가능. */}
+          {/* Ghost links 자동 제안 — AI 연동 켰을 때만 활성. 결과는 그래프
+              점선 + 검토함에서 승인/무시. */}
           <button
             onClick={runGhostScan}
             disabled={ghostScanning}
@@ -2245,15 +971,7 @@ function ProjectActions({
             )}
             {ghostScanning ? "스캔 중…" : "관련 노트 제안"}
           </button>
-          {/* 재인덱싱 — accent-blue 강조 (자주 쓸 핵심 액션). */}
           <ProjectReindexButton project={project} compact={false} />
-          {/* 도메인 추가 — primary CTA, 흰 필. 한 뷰포트에 하나만 노출. */}
-          <button
-            onClick={onAddDomain}
-            className="inline-flex h-10 items-center gap-2 rounded-md bg-primary px-4 text-[14px] font-medium text-on-primary hover:bg-primary-pressed"
-          >
-            <Plus size={16} /> 도메인 추가
-          </button>
         </div>
       </div>
       {ghostFlash && (
@@ -2261,108 +979,10 @@ function ProjectActions({
           {ghostFlash}
         </div>
       )}
-
-      {/* Project-scoped search */}
-      <div className="mt-4">
-        <div className="flex items-center gap-2 rounded-md border border-hairline bg-surface px-3">
-          <Sparkles size={15} className="shrink-0 text-mute" />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={`"${project}" 안에서 검색…`}
-            className="h-11 flex-1 bg-transparent text-[14px] text-ink placeholder:text-stone outline-none"
-          />
-          {searching && (
-            <Loader2 size={14} className="shrink-0 animate-spin text-mute" />
-          )}
-          {query && !searching && (
-            <button
-              onClick={() => setQuery("")}
-              className="grid h-6 w-6 place-items-center rounded-sm text-mute hover:bg-surface-elevated hover:text-on-dark"
-              title="지우기"
-            >
-              <X size={13} />
-            </button>
-          )}
-        </div>
-        {query.trim() && (
-          <div className="mt-2 max-h-[260px] overflow-auto rounded-md border border-hairline bg-surface">
-            {results.length === 0 && !searching && (
-              <div className="px-3 py-3 text-[12px] text-stone">
-                매칭되는 노트가 없어요.
-              </div>
-            )}
-            {results.map((hit) => (
-              <button
-                key={`${hit.project}/${hit.domain}`}
-                onClick={() => selectDomain(hit.project, hit.domain)}
-                className="flex w-full flex-col items-start gap-1 border-b border-hairline px-3 py-2 text-left last:border-b-0 hover:bg-surface-elevated"
-              >
-                <div className="flex w-full items-center justify-between gap-2">
-                  <code className="truncate font-mono text-[12px] text-ink">
-                    {hit.domain}
-                  </code>
-                  {hit.relevance > 0 && (
-                    <span
-                      className="shrink-0 rounded-xs bg-surface-elevated px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-stone"
-                      title="매칭 점수 (RRF 결합)"
-                    >
-                      {hit.relevance.toFixed(2)}
-                    </span>
-                  )}
-                </div>
-                {hit.snippet && (
-                  <span className="line-clamp-2 whitespace-pre-wrap text-[11px] leading-[1.55] text-body">
-                    <Highlighted text={hit.snippet} query={query} />
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
     </section>
   );
 }
 
-/** Highlight the user's query terms inside a search snippet. Splits the
- *  query on whitespace, escapes regex metacharacters, and wraps each
- *  match in a `<mark>` styled with accent-yellow. Case-insensitive but
- *  Korean-friendly (no \\b word boundaries — those break on CJK). */
-function Highlighted({ text, query }: { text: string; query: string }) {
-  const terms = query
-    .trim()
-    .split(/\s+/)
-    .filter((t) => t.length > 0)
-    .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  if (terms.length === 0) return <>{text}</>;
-  const re = new RegExp(`(${terms.join("|")})`, "gi");
-  const parts = text.split(re);
-  return (
-    <>
-      {parts.map((part, i) => {
-        if (i % 2 === 1) {
-          return (
-            <mark
-              key={i}
-              className="rounded-xs bg-accent-yellow/30 px-0.5 text-accent-yellow"
-            >
-              {part}
-            </mark>
-          );
-        }
-        return <span key={i}>{part}</span>;
-      })}
-    </>
-  );
-}
-
-/** Per-project reindex button. Used in two places:
- *  - inline in ProjectActions (compact = false, full label "재인덱싱")
- *  - elsewhere we may want a tiny chip-sized variant later (compact mode).
- *  The global reindex lives in Settings — this exists so users can refresh
- *  semantic search after dropping new docs into one project without
- *  paying to re-embed everything. */
 function ProjectReindexButton({
   project,
   compact = true,
@@ -2381,10 +1001,9 @@ function ProjectReindexButton({
           "inline-flex items-center gap-2 rounded-md transition-colors",
           compact
             ? "h-6 gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-            : // ProjectActions 카드의 핵심 액션 — accent-blue tint 로
-              // 그래프 (기본) 와 도메인 추가 (primary CTA) 사이에서
-              // 시각적 hierarchy 잡음.
-              "h-10 border border-accent-blue/40 bg-accent-blue-soft px-4 text-[14px] font-medium text-accent-blue hover:border-accent-blue hover:bg-accent-blue/15",
+            : // 유지보수 작업이라 그래프와 같은 hairline 톤 (accent 강조
+              // 폐지 — UI 검토 #8).
+              "h-10 border border-hairline bg-surface px-4 text-[14px] font-medium text-body hover:border-hairline-strong hover:text-on-dark",
         )}
       >
         <RefreshCw size={compact ? 10 : 16} />
@@ -2628,232 +1247,3 @@ function Stat2({ label, value }: { label: string; value: number }) {
  *  `_active_goals`) so external Claude sessions stay oriented even when
  *  the user doesn't explicitly remind them. Drift detection is not
  *  attempted — the user decides what counts as on-track. */
-function GoalsCard({ project }: { project: string }) {
-  const [goals, setGoals] = useState<Goal[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [adding, setAdding] = useState(false);
-  const [draft, setDraft] = useState("");
-  const [busyId, setBusyId] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const g = await ipc.goalsList(project);
-      setGoals(g);
-    } catch (e) {
-      console.error("[danbi] goals list failed", e);
-      setGoals([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [project]);
-
-  useEffect(() => {
-    load();
-  }, [load]);
-
-  async function handleAdd() {
-    const title = draft.trim();
-    if (!title) {
-      setAdding(false);
-      return;
-    }
-    try {
-      await ipc.goalsAdd(project, title);
-      setDraft("");
-      setAdding(false);
-      await load();
-    } catch (e) {
-      console.error("[danbi] goals add failed", e);
-    }
-  }
-
-  async function handleArchive(id: string) {
-    setBusyId(id);
-    try {
-      await ipc.goalsArchive(project, id);
-      await load();
-    } catch (e) {
-      console.error("[danbi] goals archive failed", e);
-    } finally {
-      setBusyId(null);
-    }
-  }
-
-  return (
-    <section className="overflow-hidden rounded-lg border border-accent-yellow/30 bg-accent-yellow-soft/15 p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Target className="h-3.5 w-3.5 text-accent-yellow" />
-          <span className="text-[12px] font-semibold uppercase tracking-[0.6px] text-accent-yellow">
-            Goals
-          </span>
-          {goals.length > 0 && (
-            <span className="rounded-xs bg-accent-yellow-soft px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-accent-yellow">
-              {goals.length}
-            </span>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={() => {
-            setAdding(true);
-            setDraft("");
-          }}
-          className="flex items-center gap-1 rounded-md border border-accent-yellow/40 bg-accent-yellow-soft/40 px-2 py-1 text-[11px] font-medium text-accent-yellow transition-colors hover:bg-accent-yellow-soft"
-        >
-          <Plus className="h-3 w-3" />
-          추가
-        </button>
-      </div>
-
-      {goals.length === 0 && !adding && !loading && (
-        <p className="mt-3 text-[12px] text-on-dark-mute">
-          아직 goal 이 없어요. 이 프로젝트에서 지금 뭘 하려는지 한 줄로
-          남겨두면 Claude 세션에 자동으로 노출돼요.
-        </p>
-      )}
-
-      {goals.length > 0 && (
-        <ul className="mt-3 flex flex-col gap-1.5">
-          {goals.map((g) => (
-            <li
-              key={g.id}
-              className="group flex items-start justify-between gap-3 rounded-md border border-accent-yellow/25 bg-surface-elevated px-3 py-2"
-            >
-              <div className="flex min-w-0 items-start gap-2">
-                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-accent-yellow" />
-                <div className="flex min-w-0 flex-col">
-                  <span className="truncate text-[13px] text-ink">
-                    {g.title}
-                  </span>
-                  {g.note && (
-                    <span className="mt-0.5 truncate text-[11px] text-stone">
-                      {g.note}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <button
-                type="button"
-                disabled={busyId === g.id}
-                onClick={() => handleArchive(g.id)}
-                className="shrink-0 rounded-sm p-1 text-stone opacity-0 transition group-hover:opacity-100 hover:text-accent-yellow disabled:opacity-30"
-                title="archive"
-              >
-                {busyId === g.id ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Archive className="h-3.5 w-3.5" />
-                )}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {adding && (
-        <div className="mt-3 flex items-center gap-2">
-          <input
-            autoFocus
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                handleAdd();
-              } else if (e.key === "Escape") {
-                setAdding(false);
-                setDraft("");
-              }
-            }}
-            placeholder="예: v0.5 릴리즈 노트 정리"
-            className="flex-1 rounded-md border border-accent-yellow/40 bg-surface-elevated px-2.5 py-1.5 text-[13px] text-ink placeholder:text-stone focus:border-accent-yellow focus:outline-none"
-          />
-          <button
-            type="button"
-            onClick={handleAdd}
-            className="rounded-md bg-accent-yellow px-3 py-1.5 text-[12px] font-medium text-canvas hover:opacity-90"
-          >
-            저장
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setAdding(false);
-              setDraft("");
-            }}
-            className="rounded-md p-1.5 text-stone hover:text-ink"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
-    </section>
-  );
-}
-
-/** "주간 회고" 버튼 — 지난 7일 daily 노트를 모아 LLM 한 번 호출로
- *  요약해서 weekly/YYYY-WWXX.md 에 저장. AI 미연동 / 노트 없음 등
- *  에러는 상태 메시지로 노출, 성공 시 사이드바 새로고침 + 자동
- *  결과 도메인 select. */
-function WeeklySummaryButton({ project }: { project: string }) {
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<{
-    tone: "ok" | "err";
-    msg: string;
-  } | null>(null);
-  const selectDomain = useApp((s) => s.selectDomain);
-
-  async function run() {
-    if (busy) return;
-    setBusy(true);
-    setStatus(null);
-    try {
-      const result = await ipc.summarizeWeekly(project);
-      setStatus({
-        tone: "ok",
-        msg: `${result.days_used}일치 요약 → ${result.domain}`,
-      });
-      selectDomain(project, result.domain);
-      setTimeout(() => setStatus(null), 3000);
-    } catch (e) {
-      setStatus({
-        tone: "err",
-        msg: typeof e === "string" ? e : (e as Error)?.message ?? "실패",
-      });
-      setTimeout(() => setStatus(null), 4000);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="flex items-center gap-2">
-      <button
-        type="button"
-        onClick={run}
-        disabled={busy}
-        title="지난 7일 daily 노트를 한 단락 회고로 정리해서 weekly/ 에 저장"
-        className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        {busy ? (
-          <Loader2 size={12} className="animate-spin" />
-        ) : (
-          <Sparkles size={12} />
-        )}
-        주간 회고
-      </button>
-      {status && (
-        <span
-          className={cn(
-            "text-[11px]",
-            status.tone === "ok" ? "text-accent-green" : "text-accent-red",
-          )}
-        >
-          {status.tone === "ok" ? "✓" : "✕"} {status.msg}
-        </span>
-      )}
-    </div>
-  );
-}

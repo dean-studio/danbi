@@ -239,30 +239,28 @@ Andrej Karpathy가 제시한 개인 지식 관리 원칙 4가지를 단비가 �
 **시나리오**
 > Claude Code에서 `/mcp` 로 단비를 연결 → "오늘 작업한 내용 단비 보니/daily에 정리해줘" 한 마디 → Claude Code가 `danbi_log` tool call → 세션 끝나도 **대화가 마크다운으로 남음**. 다음 날 `danbi_search` 로 "어제 토큰 만료 어떻게 하기로 했지?" 물으면 Claude가 vault에서 찾아서 답.
 
-**제공 tool 6가지**
-| tool | 설명 | LLM 호출 |
+**제공 tool 14가지** (모두 LLM 호출 없음)
+| 구분 | tool | 설명 |
 |---|---|---|
-| `danbi_list_projects` | 프로젝트/도메인 트리 | 0원 |
-| `danbi_search` | tantivy 전문 검색 | 0원 |
-| `danbi_read` | 특정 파일 내용 | 0원 |
-| `danbi_log` | 오늘 daily/ 에 append | 0원 |
-| `danbi_append` | 특정 파일에 append (+자동 git) | 0원 |
-| `danbi_recent` | 최근 수정 목록 | 0원 |
+| 읽기 | `danbi_briefing` | 세션 시작 요약 (오늘 daily·7일 활동·정리 제안 건수·링크 제안). `project` 로 한 프로젝트만 |
+| 읽기 | `danbi_context` | 질문 하나로 관련 섹션 + 링크 이웃을 글자 예산 안에서 |
+| 읽기 | `danbi_search` | BM25 + 한국어 n-gram (+ 임베딩 RRF 하이브리드). `project` 필터 |
+| 읽기 | `danbi_read` | 문서 본문 + 메타 주석. `heading` / `max_chars` / `offset` 으로 부분 읽기 |
+| 읽기 | `danbi_related` | 링크·백링크·내용상 가까운 문서·같은 주제 묶음 |
+| 읽기 | `danbi_recent` · `danbi_daily` · `danbi_list_projects` | 최근 수정 / daily 회상 / 프로젝트 목록(기본 요약형) |
+| 쓰기 | `danbi_log` | 오늘 daily/ 에 append — `#### HH:MM · client` 머리말 자동, 같은 날 같은 본문은 `deduped` |
+| 쓰기 | `danbi_append` · `danbi_create_file` · `danbi_create_folder` | 파일/폴더 생성·누적 |
+| 쓰기 | `danbi_replace_section` · `danbi_upsert_item` | 섹션 교체 / 리스트 항목 in-place 갱신 |
 
-**설정**
+쓰기는 전역 락으로 직렬화되고 자동 git 커밋. 커밋 실패는 오류가 아니라 응답의 `warning` 으로 와서 에이전트가 재시도해 중복 기록하지 않음.
+
+**연결**
 1. 단비 설정 → **MCP 섹션** → 켜기
-2. 생성된 `{url, token}` 복사
-3. Claude Code의 `~/.claude/mcp.json` 에 붙여넣기:
-```json
-{
-  "mcpServers": {
-    "danbi": {
-      "url": "http://127.0.0.1:47921/mcp",
-      "headers": { "Authorization": "Bearer ..." }
-    }
-  }
-}
-```
+2. 사이드바 프로젝트 우클릭 → **"Claude Code 설치 명령 복사"** → 코드 폴더 터미널에 붙여넣기 (`claude mcp add --transport http danbi-<hash> http://127.0.0.1:47921/mcp/<project-id> --header "Authorization: Bearer …"`)
+3. 또는 설정 → MCP → **권장 연결**: 전역 읽기 서버(`/mcp/read`) 1개 + 코드 폴더별 쓰기 서버(`/mcp/<project-id>/write`) — 세션에 보이는 도구가 읽기 8 + 쓰기 6 으로 끝남
+4. Codex 는 코드 폴더를 고르면 `.codex/config.toml` 에 직접 기록
+
+스코프 서버는 `initialize.instructions` 로 사용법 4줄을 직접 알려주고, 쓰기 도구 스키마에서 `project` 를 빼서 에이전트가 이름을 지어낼 일이 없음.
 
 **보안**
 - `127.0.0.1`만 바인딩 — 외부 네트워크에서 접근 불가

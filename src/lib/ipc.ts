@@ -76,6 +76,12 @@ export type VectorIndexStats = {
   oldest: number | null;
   newest: number | null;
   model: string | null;
+  by_model: { model: string; count: number }[];
+  configured_model?: string;
+  other_count: number;
+  mixed: boolean;
+  /** 색인에 다른 임베딩 모델의 문서가 섞여 있을 때만. */
+  warning?: string;
 };
 
 export type VectorReindexReport = {
@@ -117,8 +123,66 @@ export type ProjectContextStatus = {
 
 /** Which external coding agent we're wiring up. Claude Code installs
  *  skills under `~/.claude/skills/`, Codex under `~/.codex/skills/`;
- *  both consume the same MCP endpoint and the same SKILL.md format. */
-export type AgentTarget = "claude" | "codex";
+ *  both consume the same MCP endpoint and the same SKILL.md format.
+ *  Cursor gets an MCP connection file only (no SKILL.md). */
+export type AgentTarget = "claude" | "codex" | "cursor";
+
+/** A `claude mcp add` registration found in `~/.claude*.json` that
+ *  points at this Danbi server. Reported only — never edited. */
+export type LegacyMcpEntry = {
+  config_file: string;
+  /** "local" (this folder) | "user" (every folder). */
+  scope: "local" | "user";
+  name: string;
+  url: string;
+};
+
+/** Result of writing Danbi's servers into `<repo>/.mcp.json` (Claude
+ *  Code) or `<repo>/.cursor/mcp.json` (Cursor). */
+export type AgentConnectResult = {
+  agent: "claude" | "cursor";
+  path: string;
+  /** `danbi_read` + `danbi-<slug>` (backend-derived, hash for 한글). */
+  server_names: string[];
+  action: "added" | "updated";
+  legacy: LegacyMcpEntry[];
+};
+
+export type ConnectionFileStatus = {
+  agent: AgentTarget;
+  path: string;
+  exists: boolean;
+};
+
+/** Whether a project is really connected: server up + files written +
+ *  when an agent last actually called in. */
+export type AgentConnectionStatus = {
+  server_running: boolean;
+  port: number;
+  connections: ConnectionFileStatus[];
+  /** Last authenticated call (reads included) since app start, unix ms. */
+  last_call_at: number | null;
+  last_call_client: string | null;
+  /** Last persisted inbound write, unix ms. */
+  last_write_at: number | null;
+  last_write_client: string | null;
+};
+
+/** One connection file Danbi wrote (`~/.danbi/connections.json`). */
+export type McpConnection = {
+  agent: AgentTarget;
+  project: string;
+  path: string;
+  servers: { name: string; url: string }[];
+  connected_at: number;
+};
+
+export type McpRotateResult = {
+  status: McpStatus;
+  updated: string[];
+  failed: string[];
+  removed: string[];
+};
 
 /** Result of writing the Danbi MCP block into a project's .codex/config.toml. */
 export type CodexConnectResult = {
@@ -127,6 +191,18 @@ export type CodexConnectResult = {
   global_removed: boolean;
   /** "added" (new block) | "updated" (existing block replaced). */
   action: "added" | "updated";
+};
+
+/** Result of installing Danbi's Claude Code hooks into a code folder. */
+export type ClaudeHooksResult = {
+  /** The `.claude/settings.local.json` that was written. */
+  path: string;
+  /** `~/.danbi/bin/danbi-hook` — the helper every hook runs. */
+  helper_path: string;
+  /** "added" (first install) | "updated" (Danbi hooks replaced). */
+  action: "added" | "updated";
+  /** Whether the SessionEnd auto-log hook is installed. */
+  session_end: boolean;
 };
 
 export type McpProjectEndpoint = {
@@ -192,6 +268,8 @@ export type DanbiConfig = {
   project_icons?: Record<string, string>;
   project_colors?: Record<string, string>;
   preset?: "claude_code" | "builtin" | "minimal" | null;
+  /** 검토함에서 "제외" 한 고아 문서 (`<project>/<domain>`). */
+  review_excluded_paths?: string[];
 };
 
 export type AwsProfile = {
@@ -242,6 +320,20 @@ export type AuthInput =
   | { kind: "profile"; name: string }
   | { kind: "manual"; label: string }
   | { kind: "env" };
+
+/** 커밋 하나가 문서 하나에 가한 변경 (`doc_diff`). */
+export type DocDiff = {
+  commit: string;
+  /** 비교 기준 커밋. 루트 커밋이면 null (빈 파일 대비). */
+  base: string | null;
+  /** `Projects/<project>/<domain>` */
+  path: string;
+  /** unified diff (~200KB 상한, 넘으면 `… (truncated)` 로 끝남). */
+  unified: string;
+  added: number;
+  removed: number;
+  binary: boolean;
+};
 
 export type DocChangeEntry = {
   commit: string;
@@ -297,6 +389,14 @@ export type VaultTree = {
 export type VaultChangedPayload = {
   vault: string;
   count: number;
+  /** vault-relative paths that changed (`/` separated), capped — see
+   *  `truncated`. Only tree-relevant paths (no `.git`/`.danbi`/assets). */
+  paths: string[];
+  /** Project folders those paths live in. */
+  projects: string[];
+  /** true when the list was capped or a path sits outside `Projects/<name>/`
+   *  (new/renamed project folder) — refresh the whole tree in that case. */
+  truncated: boolean;
 };
 
 export type RoutingContext = {
@@ -397,6 +497,36 @@ export type CommitSummary = {
   id: string;
   summary: string;
   ts: number;
+};
+
+/** 활동 피드 한 행 (`activity_feed`). `(pre)` 스냅샷은 빠져 있다. */
+export type ActivityEntry = {
+  id: string;
+  /** unix seconds */
+  ts: number;
+  /** claude-code · codex · cursor · agent(식별 안 됨) · human · danbi */
+  client: string;
+  actor: "agent" | "human" | "danbi";
+  project?: string;
+  domain?: string;
+  /** log · append · replace_section · upsert_item · create_file · save ·
+   *  quick_capture · capture · compound · undo · restore · revert ·
+   *  migration · init … (`changeOpLabel` 로 표시) */
+  op: string;
+  /** 섹션 헤딩 / 항목 키 / undo 가 되돌린 원래 요약 */
+  target?: string;
+  /** 이 커밋이 문서에 추가한 첫 줄 (≤ 60자) */
+  preview?: string;
+  /** 커밋이 건드린 경로 (`Projects/<p>/<d>`) — `activityRevert` 의 path */
+  files: string[];
+};
+
+export type RevertResult = {
+  /** false = 이후 변경이 있어 적용하지 않음 (force 로 재호출) */
+  applied: boolean;
+  commit?: string;
+  later_commits: number;
+  warning?: string;
 };
 
 export type ExportRecord = {
@@ -749,6 +879,14 @@ export function onVaultChanged(
   return listen<VaultChangedPayload>(VAULT_CHANGED_EVENT, (e) => cb(e.payload));
 }
 
+/** Fired by the backend when a review item is enqueued (`.danbi/` is not
+ *  watched, so the sidebar badge can't rely on `vault:changed`). */
+export const REVIEWS_CHANGED_EVENT = "reviews:changed";
+
+export function onReviewsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen(REVIEWS_CHANGED_EVENT, () => cb());
+}
+
 export type TrashEntry = {
   id: string;
   project: string;
@@ -796,6 +934,9 @@ function uint8ArrayToBase64(bytes: Uint8Array): string {
 }
 
 // --- IPC wrappers ---
+
+/** `writeDoc` 충돌 오류 접두. Rust `commands::DOC_CONFLICT` 와 같다. */
+export const DOC_CONFLICT = "DOC_CONFLICT";
 
 export const ipc = {
   ping: () => invoke<string>("ping"),
@@ -888,6 +1029,9 @@ export const ipc = {
 
   initVault: (vaultPath: string) => invoke<void>("init_vault", { vaultPath }),
   listTree: (vaultPath: string) => invoke<VaultTree>("list_tree", { vaultPath }),
+  /** Rescan one project only. `null` when its folder is gone. */
+  listProjectNode: (vaultPath: string, project: string) =>
+    invoke<ProjectNode | null>("list_project_node", { vaultPath, project }),
   createProject: (
     vaultPath: string,
     name: string,
@@ -958,12 +1102,32 @@ export const ipc = {
   installSkill: (project: string, agent: AgentTarget = "claude") =>
     invoke<string>("install_skill", { project, agent }),
   /** True if THIS project's skill file exists for the given agent. */
+  /** `skillStatus` for many projects in one round-trip. */
+  skillStatusAll: (projects: string[], agent: AgentTarget = "claude") =>
+    invoke<Record<string, boolean>>("skill_status_all", { projects, agent }),
   skillStatus: (project: string, agent: AgentTarget = "claude") =>
     invoke<boolean>("skill_status", { project, agent }),
   /** Write (or refresh) the Danbi MCP block into the selected code
    *  project's `.codex/config.toml`. */
   codexConnect: (project: string, targetDir: string) =>
     invoke<CodexConnectResult>("codex_connect", { project, targetDir }),
+  /** Write Danbi's read + write servers into the code folder's
+   *  `.mcp.json` (claude) or `.cursor/mcp.json` (cursor). Same flow as
+   *  Codex; other servers in the file are preserved. */
+  agentConnect: (project: string, agent: "claude" | "cursor", targetDir: string) =>
+    invoke<AgentConnectResult>("agent_connect", { project, agent, targetDir }),
+  agentConnectionStatus: (project: string) =>
+    invoke<AgentConnectionStatus>("agent_connection_status", { project }),
+  mcpConnectionsList: () => invoke<McpConnection[]>("mcp_connections_list"),
+  /** Install (or refresh) the Claude Code SessionStart hook — plus the
+   *  SessionEnd auto-log hook when `sessionEnd` — into the selected code
+   *  folder's `.claude/settings.local.json`. */
+  claudeHooksInstall: (project: string, targetDir: string, sessionEnd: boolean) =>
+    invoke<ClaudeHooksResult>("claude_hooks_install", {
+      project,
+      targetDir,
+      sessionEnd,
+    }),
   trashList: () => invoke<TrashEntry[]>("trash_list"),
   trashRestore: (id: string) =>
     invoke<TrashEntry>("trash_restore", { id }),
@@ -971,12 +1135,23 @@ export const ipc = {
   trashEmpty: () => invoke<number>("trash_empty"),
   readDoc: (vaultPath: string, project: string, domain: string) =>
     invoke<string>("read_doc", { vaultPath, project, domain }),
+  /** `expectedBase` 를 주면 디스크 내용이 그와 다를 때 쓰지 않고
+   *  `DOC_CONFLICT: …` 오류를 낸다 (에디터 편집 중 에이전트가 같은 문서에
+   *  쓴 경우). */
   writeDoc: (
     vaultPath: string,
     project: string,
     domain: string,
     content: string,
-  ) => invoke<void>("write_doc", { vaultPath, project, domain, content }),
+    expectedBase?: string,
+  ) =>
+    invoke<void>("write_doc", {
+      vaultPath,
+      project,
+      domain,
+      content,
+      expectedBase: expectedBase ?? null,
+    }),
   saveAsset: (
     vaultPath: string,
     project: string,
@@ -1045,6 +1220,18 @@ export const ipc = {
   undoLast: () => invoke<string | null>("undo_last"),
   recentCommits: (limit?: number) =>
     invoke<CommitSummary[]>("recent_commits", { limit: limit ?? 100 }),
+  /** 활동 피드. `before` = 이전 페이지 마지막 행의 ts (커서). */
+  activityFeed: (opts?: { scopeProject?: string; before?: number; limit?: number }) =>
+    invoke<ActivityEntry[]>("activity_feed", {
+      scopeProject: opts?.scopeProject ?? null,
+      before: opts?.before ?? null,
+      limit: opts?.limit ?? 50,
+    }),
+  /** 피드 행 하나가 `path` 에 한 변경만 되돌린다 (문서 단위, 새 커밋).
+   *  이후 커밋이 같은 파일을 또 바꿨으면 applied:false + warning →
+   *  확인 후 force:true 로 재호출. */
+  activityRevert: (commitId: string, path: string, force = false) =>
+    invoke<RevertResult>("activity_revert", { commitId, path, force }),
   buildLinkIndex: () => invoke<LinkIndex>("build_link_index"),
   vaultSuggestions: () => invoke<VaultSuggestion[]>("vault_suggestions"),
 
@@ -1140,7 +1327,8 @@ export const ipc = {
   mcpEnable: (port?: number) =>
     invoke<McpStatus>("mcp_enable", { port: port ?? null }),
   mcpDisable: () => invoke<McpStatus>("mcp_disable"),
-  mcpRotateToken: () => invoke<McpStatus>("mcp_rotate_token"),
+  /** New token + restart + rewrite every registered connection file. */
+  mcpRotateToken: () => invoke<McpRotateResult>("mcp_rotate_token"),
   mcpProjectEndpoint: (project: string) =>
     invoke<McpProjectEndpoint>("mcp_project_endpoint", { project }),
 
@@ -1185,6 +1373,17 @@ export const ipc = {
 
   docChangeHistory: (project: string, domain: string, limit = 20) =>
     invoke<DocChangeEntry[]>("doc_change_history", { project, domain, limit }),
+  /** 커밋 하나가 이 문서에 가한 변경. `base` 생략 = 첫 부모 대비. */
+  docDiff: (project: string, domain: string, commit: string, base?: string) =>
+    invoke<DocDiff>("doc_diff", { project, domain, commit, base: base ?? null }),
+  /** 문서 하나만 `before`(커밋 직전) / `at`(그 시점) 으로 되돌리고 새
+   *  커밋을 남긴다. 변화 없으면 null. vault 전체 reset 아님. */
+  docRestore: (
+    project: string,
+    domain: string,
+    commit: string,
+    mode: "before" | "at",
+  ) => invoke<string | null>("doc_restore", { project, domain, commit, mode }),
 
   danbiLogQuick: (project: string, content: string) =>
     invoke<{ project: string; domain: string; commit: string | null }>(

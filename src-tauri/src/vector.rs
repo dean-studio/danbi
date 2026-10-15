@@ -19,6 +19,7 @@ use crate::vault::PROJECTS_DIRNAME;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 const INDEX_FILE: &str = ".danbi/vectors.json";
 /// Hard cap on chunk size fed into the embedding model. Most providers
@@ -49,6 +50,8 @@ fn index_path(vault: &Path) -> PathBuf {
     vault.join(INDEX_FILE)
 }
 
+/// Reads the index from disk every time. Reindexing wants an owned copy
+/// it can mutate; everything on the search path should use `load_cached`.
 pub fn load(vault: &Path) -> DanbiResult<VectorIndex> {
     let path = index_path(vault);
     if !path.exists() {
@@ -62,12 +65,67 @@ pub fn load(vault: &Path) -> DanbiResult<VectorIndex> {
     Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
 
+/// (path, mtime, size) of vectors.json — what the in-memory copy was
+/// parsed from. A reindex (or a sync tool replacing the file) changes
+/// the mtime/size, so the next `load_cached` re-reads.
+type IndexFileKey = (PathBuf, Option<std::time::SystemTime>, u64);
+
+fn index_file_key(vault: &Path) -> IndexFileKey {
+    let path = index_path(vault);
+    let meta = std::fs::metadata(&path).ok();
+    (
+        path,
+        meta.as_ref().and_then(|m| m.modified().ok()),
+        meta.as_ref().map(|m| m.len()).unwrap_or(0),
+    )
+}
+
+static INDEX_CACHE: Mutex<Option<(IndexFileKey, Arc<VectorIndex>)>> = Mutex::new(None);
+
+/// The index parsed once and shared until vectors.json changes on disk.
+/// Parsing a 23MB file costs ~30ms (release) / hundreds of ms (debug) —
+/// too much to pay on every keystroke-driven search.
+pub fn load_cached(vault: &Path) -> DanbiResult<Arc<VectorIndex>> {
+    let key = index_file_key(vault);
+    if let Ok(guard) = INDEX_CACHE.lock() {
+        if let Some((k, idx)) = guard.as_ref() {
+            if *k == key {
+                return Ok(idx.clone());
+            }
+        }
+    }
+    let idx = Arc::new(load(vault)?);
+    // Re-stat after the read: if the file changed underneath us, cache
+    // under the key we actually parsed so the next call re-reads.
+    let key = if index_file_key(vault) == key { key } else { (key.0, None, 0) };
+    if let Ok(mut guard) = INDEX_CACHE.lock() {
+        *guard = Some((key, idx.clone()));
+    }
+    Ok(idx)
+}
+
+fn invalidate_cache(vault: &Path) {
+    let path = index_path(vault);
+    if let Ok(mut guard) = INDEX_CACHE.lock() {
+        if guard.as_ref().map(|(k, _)| k.0 == path).unwrap_or(false) {
+            *guard = None;
+        }
+    }
+}
+
+/// Compact JSON (pretty was 3× the bytes for a file nobody reads by
+/// hand), written to a temp file and renamed so a crash mid-write can't
+/// leave a truncated index — and so the mtime-keyed caches never see a
+/// half-written file.
 pub fn save(vault: &Path, index: &VectorIndex) -> DanbiResult<()> {
     let path = index_path(vault);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(index)?)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string(index)?)?;
+    std::fs::rename(&tmp, &path)?;
+    invalidate_cache(vault);
     Ok(())
 }
 
@@ -76,7 +134,69 @@ pub fn clear(vault: &Path) -> DanbiResult<()> {
     if path.exists() {
         let _ = std::fs::remove_file(&path);
     }
+    invalidate_cache(vault);
     Ok(())
+}
+
+// ---------- Query embedding LRU ----------
+//
+// The same query gets embedded again and again: every keystroke-debounced
+// app search, every `danbi_context` retry, every agent that re-asks the
+// question it just asked. Keying on provider + model keeps a model switch
+// from serving vectors of the wrong dimension.
+
+const QUERY_CACHE_CAP: usize = 256;
+
+#[derive(Default)]
+struct QueryLru {
+    map: HashMap<String, Vec<f32>>,
+    /// Least recently used at the front.
+    order: std::collections::VecDeque<String>,
+}
+
+impl QueryLru {
+    fn touch(&mut self, key: &str) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key.to_string());
+    }
+
+    fn get(&mut self, key: &str) -> Option<Vec<f32>> {
+        let hit = self.map.get(key).cloned()?;
+        self.touch(key);
+        Some(hit)
+    }
+
+    fn put(&mut self, key: String, emb: Vec<f32>) {
+        if self.map.insert(key.clone(), emb).is_none() {
+            while self.map.len() > QUERY_CACHE_CAP {
+                let Some(evicted) = self.order.pop_front() else { break };
+                self.map.remove(&evicted);
+            }
+        }
+        self.touch(&key);
+    }
+}
+
+static QUERY_CACHE: Mutex<Option<QueryLru>> = Mutex::new(None);
+
+pub fn query_cache_key(provider_kind: &str, model: &str, query: &str) -> String {
+    format!("{provider_kind}\u{1}{model}\u{1}{}", query.trim())
+}
+
+pub fn query_cache_get(key: &str) -> Option<Vec<f32>> {
+    QUERY_CACHE
+        .lock()
+        .ok()?
+        .get_or_insert_with(QueryLru::default)
+        .get(key)
+}
+
+pub fn query_cache_put(key: String, embedding: Vec<f32>) {
+    if let Ok(mut guard) = QUERY_CACHE.lock() {
+        guard.get_or_insert_with(QueryLru::default).put(key, embedding);
+    }
 }
 
 /// Simple stats shown in Settings so the user knows how fresh / big
@@ -87,6 +207,31 @@ pub struct VectorIndexStats {
     pub oldest: Option<i64>,
     pub newest: Option<i64>,
     pub model: Option<String>,
+    /// Entry count per embedding model, most common first.
+    #[serde(default)]
+    pub by_model: Vec<ModelCount>,
+    /// Model the next query / reindex would use, when one is configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub configured_model: Option<String>,
+    /// Entries embedded with some other model — invisible to semantic
+    /// search until a full reindex.
+    pub other_count: usize,
+    pub mixed: bool,
+    /// Ready-made sentence for the Settings panel; None when consistent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
+/// `stats` plus the mixed-model census against the configured model.
+pub fn stats_with_model(index: &VectorIndex, configured: Option<&str>) -> VectorIndexStats {
+    let status = model_status(&model_counts(index), configured);
+    let mut out = stats(index);
+    out.warning = mixed_warning(&status);
+    out.configured_model = status.configured_model;
+    out.by_model = status.by_model;
+    out.other_count = status.other_count;
+    out.mixed = status.mixed;
+    out
 }
 
 pub fn stats(index: &VectorIndex) -> VectorIndexStats {
@@ -109,7 +254,108 @@ pub fn stats(index: &VectorIndex) -> VectorIndexStats {
         oldest: if oldest == i64::MAX { None } else { Some(oldest) },
         newest: if newest == 0 { None } else { Some(newest) },
         model,
+        by_model: Vec::new(),
+        configured_model: None,
+        other_count: 0,
+        mixed: false,
+        warning: None,
     }
+}
+
+// ---------- Mixed-model detection ----------
+//
+// Each entry remembers the model that embedded it. After the user
+// switches embedding models, entries from the old model linger until a
+// full reindex — and they silently drop out of semantic search (different
+// dimension → cosine 0, same dimension → meaningless scores).
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ModelCount {
+    pub model: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VectorModelStatus {
+    /// Model the next query / reindex would use. None when no embedding
+    /// provider is configured.
+    pub configured_model: Option<String>,
+    pub total: usize,
+    /// Entry count per model, most common first.
+    pub by_model: Vec<ModelCount>,
+    /// Entries embedded with a model other than `configured_model` (or,
+    /// with nothing configured, other than the most common one).
+    pub other_count: usize,
+    pub mixed: bool,
+}
+
+pub fn model_counts(index: &VectorIndex) -> HashMap<String, usize> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for e in index.entries.values() {
+        *counts.entry(e.model.clone()).or_default() += 1;
+    }
+    counts
+}
+
+pub fn model_status(
+    counts: &HashMap<String, usize>,
+    configured: Option<&str>,
+) -> VectorModelStatus {
+    let mut by_model: Vec<ModelCount> = counts
+        .iter()
+        .map(|(m, c)| ModelCount { model: m.clone(), count: *c })
+        .collect();
+    by_model.sort_by(|a, b| b.count.cmp(&a.count).then(a.model.cmp(&b.model)));
+    let total: usize = by_model.iter().map(|m| m.count).sum();
+    let reference = configured
+        .map(|m| counts.get(m).copied().unwrap_or(0))
+        .unwrap_or_else(|| by_model.first().map(|m| m.count).unwrap_or(0));
+    let other_count = total - reference;
+    VectorModelStatus {
+        configured_model: configured.map(str::to_string),
+        total,
+        by_model,
+        other_count,
+        mixed: other_count > 0,
+    }
+}
+
+/// One-line warning for MCP output, None when the index is consistent.
+pub fn mixed_warning(status: &VectorModelStatus) -> Option<String> {
+    status.mixed.then(|| {
+        format!(
+            "의미 검색 색인에 다른 모델로 만든 문서 {}개가 섞여 있어요 — 이 문서들은 의미 검색에 안 잡혀요. 단비 설정 → AI 연동에서 전체 재색인이 필요해요.",
+            status.other_count
+        )
+    })
+}
+
+/// Per-model counts, re-read only when vectors.json changes on disk —
+/// the MCP search path asks on every call and the index can be tens of MB.
+pub fn cached_model_counts(vault: &Path) -> HashMap<String, usize> {
+    type Key = (PathBuf, Option<std::time::SystemTime>, u64);
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(Key, HashMap<String, usize>)>>> =
+        std::sync::OnceLock::new();
+    let path = index_path(vault);
+    let meta = std::fs::metadata(&path).ok();
+    let key: Key = (
+        path,
+        meta.as_ref().and_then(|m| m.modified().ok()),
+        meta.as_ref().map(|m| m.len()).unwrap_or(0),
+    );
+    let cache = CACHE.get_or_init(Default::default);
+    if let Ok(guard) = cache.lock() {
+        if let Some((k, counts)) = guard.as_ref() {
+            if *k == key {
+                return counts.clone();
+            }
+        }
+    }
+    let counts = load_cached(vault).map(|i| model_counts(&i)).unwrap_or_default();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((key, counts.clone()));
+    }
+    counts
 }
 
 /// Walks the vault, embeds files whose hash changed, drops entries for
@@ -627,3 +873,152 @@ pub fn query(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn index_with(models: &[(&str, usize)]) -> VectorIndex {
+        let mut index = VectorIndex::default();
+        for (model, n) in models {
+            for i in 0..*n {
+                let id = format!("p/{model}-{i}.md");
+                index.entries.insert(
+                    id.clone(),
+                    VectorEntry {
+                        id,
+                        project: "p".into(),
+                        domain: format!("{model}-{i}.md"),
+                        content_hash: String::new(),
+                        model: model.to_string(),
+                        embedding: vec![1.0],
+                        updated_at: 0,
+                    },
+                );
+            }
+        }
+        index
+    }
+
+    fn temp_vault(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "danbi-vector-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn load_cached_follows_save_clear_and_external_writes() {
+        let v = temp_vault("cache");
+        assert_eq!(load_cached(&v).unwrap().entries.len(), 0);
+
+        save(&v, &index_with(&[("m1", 3)])).unwrap();
+        let a = load_cached(&v).unwrap();
+        assert_eq!(a.entries.len(), 3);
+        assert!(Arc::ptr_eq(&a, &load_cached(&v).unwrap()), "same Arc while unchanged");
+
+        // Another process replacing the file (sync tool, older build) must
+        // be picked up too — key is mtime + size, not just our own save().
+        let mut pretty = index_with(&[("m1", 3), ("m2", 2)]);
+        pretty.entries.values_mut().for_each(|e| e.embedding = vec![0.5; 4]);
+        std::fs::write(index_path(&v), serde_json::to_string_pretty(&pretty).unwrap()).unwrap();
+        let b = load_cached(&v).unwrap();
+        assert_eq!(b.entries.len(), 5, "pretty (legacy) file still parses");
+        assert_eq!(b.entries.values().next().unwrap().embedding.len(), 4);
+
+        clear(&v).unwrap();
+        assert_eq!(load_cached(&v).unwrap().entries.len(), 0);
+        assert!(!index_path(&v).with_extension("json.tmp").exists(), "no temp file left behind");
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn save_is_compact_and_round_trips() {
+        let v = temp_vault("compact");
+        let idx = index_with(&[("m", 2)]);
+        save(&v, &idx).unwrap();
+        let raw = std::fs::read_to_string(index_path(&v)).unwrap();
+        assert!(!raw.contains('\n'), "compact JSON");
+        assert_eq!(load(&v).unwrap().entries.len(), 2);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn query_lru_evicts_least_recently_used() {
+        let mut lru = QueryLru::default();
+        for i in 0..QUERY_CACHE_CAP {
+            lru.put(format!("k{i}"), vec![i as f32]);
+        }
+        assert!(lru.get("k0").is_some(), "touch k0 so k1 is the oldest");
+        lru.put("fresh".into(), vec![9.0]);
+        assert!(lru.get("k1").is_none(), "k1 evicted");
+        assert!(lru.get("k0").is_some());
+        assert!(lru.get("fresh").is_some());
+        assert_eq!(lru.map.len(), QUERY_CACHE_CAP);
+        assert_eq!(lru.order.len(), QUERY_CACHE_CAP);
+        // Re-putting an existing key updates in place, no growth.
+        lru.put("k0".into(), vec![1.0]);
+        assert_eq!(lru.map.len(), QUERY_CACHE_CAP);
+        assert_eq!(lru.get("k0"), Some(vec![1.0]));
+    }
+
+    #[test]
+    fn query_cache_key_separates_provider_model_and_trims() {
+        assert_eq!(query_cache_key("a", "m", " q "), query_cache_key("a", "m", "q"));
+        assert_ne!(query_cache_key("a", "m1", "q"), query_cache_key("a", "m2", "q"));
+        assert_ne!(query_cache_key("a", "m", "q"), query_cache_key("b", "m", "q"));
+    }
+
+    #[test]
+    fn single_model_index_is_not_mixed() {
+        let counts = model_counts(&index_with(&[("m1", 4)]));
+        let s = model_status(&counts, Some("m1"));
+        assert!(!s.mixed);
+        assert_eq!(s.other_count, 0);
+        assert_eq!(s.total, 4);
+        assert!(mixed_warning(&s).is_none());
+    }
+
+    #[test]
+    fn entries_from_another_model_are_counted_against_configured() {
+        let counts = model_counts(&index_with(&[("new", 5), ("old", 3)]));
+        let s = model_status(&counts, Some("new"));
+        assert!(s.mixed);
+        assert_eq!(s.other_count, 3);
+        assert_eq!(s.by_model[0], ModelCount { model: "new".into(), count: 5 });
+        assert!(mixed_warning(&s).unwrap().contains("3개"));
+
+        // Switched model, nothing reindexed yet: everything is "other".
+        let s = model_status(&counts, Some("newest"));
+        assert_eq!(s.other_count, 8);
+        assert!(s.mixed);
+    }
+
+    #[test]
+    fn stats_with_model_carries_the_census() {
+        let s = stats_with_model(&index_with(&[("new", 5), ("old", 3)]), Some("new"));
+        assert_eq!(s.count, 8);
+        assert!(s.mixed);
+        assert_eq!(s.other_count, 3);
+        assert_eq!(s.configured_model.as_deref(), Some("new"));
+        assert!(s.warning.unwrap().contains("3개"));
+        let s = stats_with_model(&index_with(&[("new", 5)]), Some("new"));
+        assert!(!s.mixed && s.warning.is_none());
+    }
+
+    #[test]
+    fn without_configured_model_majority_is_the_reference() {
+        let counts = model_counts(&index_with(&[("a", 2), ("b", 6)]));
+        let s = model_status(&counts, None);
+        assert!(s.mixed);
+        assert_eq!(s.other_count, 2);
+        assert!(!model_status(&HashMap::new(), Some("a")).mixed, "empty index");
+    }
+}
+

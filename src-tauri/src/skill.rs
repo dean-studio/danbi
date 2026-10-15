@@ -29,15 +29,17 @@ MCP endpoint: `{{MCP_URL}}` (이미 등록돼 있으면 무시. 안 등록돼 �
 ## 도구 (모든 도구는 `mcp__danbi__` 접두사로 노출됨)
 
 **읽기** (vault 전체 조회 가능):
-- `danbi_briefing` — 최근 활동·ghost 제안·고아 파일·daily 노트를 한 JSON 으로
+- `danbi_briefing` — 오늘 daily·7일 활동·정리 제안 건수·ghost 제안을 한 JSON 으로 (project 생략 시 "{{PROJECT}}")
 - `danbi_recent` — 최근 수정된 문서 목록
 - `danbi_search` — tantivy 전문 검색 + Gemini 임베딩 RRF (한국어/영어 cross)
-- `danbi_read` — 특정 프로젝트/도메인 파일 전체
+- `danbi_context` — 질문 하나로 관련 문서의 해당 섹션 + 연결 문서 목록을 글자 예산 안에서 한 번에. **search → read 반복 대신 먼저**
+- `danbi_related` — 문서 하나의 링크·백링크·내용상 가까운 문서·같은 주제 묶음
+- `danbi_read` — 특정 프로젝트/도메인 파일. 큰 문서는 `heading` 으로 섹션만, `max_chars`/`offset` 으로 나눠서
 - `danbi_daily` — 오늘 + 1주/1달/1년 전 daily 노트
-- `danbi_list_projects` — vault 전체 프로젝트·도메인 트리
+- `danbi_list_projects` — 프로젝트 목록 (기본 요약형, `project` 를 주면 그 프로젝트의 파일 트리)
 
 **쓰기** (현재 cwd 의 프로젝트로 자동 clamp — 다른 프로젝트로 잘못 쓸 위험 0):
-- `danbi_log` — 오늘 daily 노트에 append. project 파라미터 **생략**.
+- `danbi_log` — 오늘 daily 노트에 append. project 파라미터 **생략**. `_시각 · 호출자_` 줄은 자동(첫 제목 바로 아래), 직전 기록과 같은 본문은 `deduped`. 응답에 `warning` 이 오면 저장은 된 것 — 재시도 금지.
 - `danbi_append` — 임의 도메인 파일에 append (없으면 자동 생성). project 파라미터 **생략**.
 - `danbi_create_folder` — 1~2단계 sub-folder 생성. 카테고리·시기별 누적용.
 - `danbi_create_file` — 폴더+파일+내용을 한 번에 보장. 매일 통계 자동 기록 같은 자동화에 적합.
@@ -58,7 +60,8 @@ MCP endpoint: `{{MCP_URL}}` (이미 등록돼 있으면 무시. 안 등록돼 �
 
 | 사용자 뉘앙스 | 호출 |
 |---|---|
-| "예전에 이거 어떻게 정했지?" | `danbi_search` → `danbi_read` |
+| "예전에 이거 어떻게 정했지?" | `danbi_context` (부족하면 `danbi_read`) |
+| "이 문서랑 관련된 건?" | `danbi_related` |
 | "지난주/어제 뭐 했지?" | `danbi_briefing` activity |
 | "1년 전 오늘" / "비슷한 거 한 적 있나" | `danbi_daily` |
 | "X 관련 기존 노트" | `danbi_search` |

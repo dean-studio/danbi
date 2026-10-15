@@ -129,6 +129,28 @@ fn filter_on_date<'a>(all: &'a [DailyNoteRef], date: &str) -> Vec<DailyNoteRef> 
     all.iter().filter(|n| n.date == date).cloned().collect()
 }
 
+/// The automatic `danbi_log` stamp line: `_14:32 · claude-code_` (or the
+/// heading form `#### 14:32 · client` the first 0.8.8 build wrote). Parsers
+/// skip it so it never counts as an entry or a preview line.
+pub fn is_log_stamp(line: &str) -> bool {
+    let l = line.trim();
+    let inner = if let Some(rest) = l.strip_prefix("#### ") {
+        rest
+    } else if l.len() > 2 && l.starts_with('_') && l.ends_with('_') {
+        &l[1..l.len() - 1]
+    } else {
+        return false;
+    };
+    let b = inner.as_bytes();
+    b.len() >= 5
+        && b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2] == b':'
+        && b[3].is_ascii_digit()
+        && b[4].is_ascii_digit()
+        && (b.len() == 5 || inner[5..].starts_with(" · "))
+}
+
 pub fn snapshot(vault: &Path) -> DanbiResult<DailySnapshot> {
     let all = iter_daily_files(vault)?;
     let today = today_str();

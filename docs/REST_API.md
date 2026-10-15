@@ -48,13 +48,15 @@
 }
 ```
 
+`commit` 이 `null` 이고 `warning` 이 함께 오면 **파일은 저장됐지만** git 커밋만 실패한 것 (다른 git 프로세스가 `index.lock` 을 잡은 경우 등). 다음 쓰기 때 함께 커밋되니 재시도하지 말 것.
+
 **오류**
 
 | 코드 | 의미 |
 | --- | --- |
 | 401 | 토큰 불일치 / 누락 |
 | 400 | `.md` 아님 / `..` 포함 / 빈 path / mode 가 overwrite·append 가 아님 |
-| 404 | 모르는 project |
+| 404 | 모르는 project — 오류 문장에 비슷한 이름과 전체 목록이 붙음 |
 | 422 | 폴더 깊이 초과 등 vault 정책 위반 |
 
 ## 사용 예 (페이퍼클립 prompt)
@@ -87,17 +89,19 @@ curl -fsS -X PUT \
 
 같은 단비 데몬이 다음도 함께 노출:
 
-- `POST /mcp` — JSON-RPC (Claude Code · Cursor 가 쓰는 표준 MCP 인터페이스)
-- `POST /api/call/:tool` — JSON-RPC 없이 단일 도구 호출 (편의용 REST 래퍼)
+- `POST /mcp` · `/mcp/<project-id>` · `/mcp/read` · `/mcp/<project-id>/write` — JSON-RPC (Claude Code · Codex · Cursor 가 쓰는 표준 MCP 인터페이스)
+- `POST /api/call/:tool` · `/api/projects/:project/call/:tool` — JSON-RPC 없이 단일 도구 호출 (편의용 REST 래퍼). 응답은 `{ ok, result, warning? }`
 - `GET  /api/tools` — 사용 가능한 도구 목록 + 스키마
+- `GET  /api/session-brief?project=` — Claude Code SessionStart 훅용 짧은 Markdown 브리핑
 
 PUT REST 는 "그냥 파일 한 통 던져넣기"용. `/api/call` 은 "도구 인자 다 챙겨서 호출하고 결과 받기"용.
 
 ## 구현 메모
 
 - 내부 로직: `vault::create_folder` (폴더 자동 생성) + `vault::write_doc` (overwrite) 또는 read+concat+write (append)
-- 입력 검증: `.md` 강제, `..` 차단, `is_safe_segment` 통과 필요, project allowlist (vault tree 의 실제 프로젝트만 허용)
-- git 자동 커밋: `(pre)` 스냅샷 후 쓰기, 그 후 본 커밋. 사용자가 단비 안에서 undo 가능.
+- 입력 검증: `.md` 강제, `..` 차단, `is_safe_segment` 통과 필요, project 는 `Projects/<이름>` 디렉터리가 실제로 있어야 함
+- 쓰기는 MCP 쓰기 도구·앱의 빠른 메모와 같은 전역 락으로 직렬화
+- git 자동 커밋: `(pre)` 스냅샷 후 쓰기, 그 후 본 커밋. 사용자가 단비 안에서 undo 가능 (그 커밋이 바꾼 파일만 되돌림). `config.json` · `.danbi/` 는 커밋 대상 아님.
 - 동일한 단비 데몬 프로세스에 라우트만 추가 — 별도 서버 띄우지 않음.
 
 ## 보안 주의

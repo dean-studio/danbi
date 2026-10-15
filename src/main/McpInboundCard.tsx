@@ -363,7 +363,7 @@ function ExportMenu() {
             className="fixed inset-0 z-40"
             onClick={() => setOpen(false)}
           />
-          <div className="absolute right-0 z-50 mt-1 w-32 overflow-hidden rounded-md border border-hairline bg-surface-card shadow-lg">
+          <div className="absolute right-0 z-50 mt-1 w-32 overflow-hidden rounded-md border border-hairline-strong bg-surface-card">
             <button
               type="button"
               onClick={() => exportAs("json")}

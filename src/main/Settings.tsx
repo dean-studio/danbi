@@ -460,7 +460,7 @@ function EditorPanel({ cfg }: { cfg: DanbiConfig }) {
       <SectionTitle title="편집" hint="중앙 문서 뷰의 동작 방식을 조정합니다." />
       <Row
         label="자동 저장"
-        hint="포커스가 에디터에서 벗어나면 자동으로 저장합니다. (예정, 아직 비활성)"
+        hint="입력이 멈추고 1.5초 뒤, 그리고 에디터에서 포커스가 벗어날 때 저장합니다. 꺼도 다른 문서로 옮길 땐 항상 저장돼요."
       >
         <Toggle
           value={cfg.editor.autosave}
@@ -786,6 +786,13 @@ function McpPanel() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
+  // 토큰 회전 — 인라인 확인 (webview 의 window.confirm 은 못 믿는다).
+  // 확인창에 단비가 기록한 연결 파일 수를 보여주고, 결과로 갱신/실패
+  // 목록을 보여준다.
+  const [rotateConfirm, setRotateConfirm] = useState<number | null>(null);
+  const [rotateResult, setRotateResult] = useState<
+    import("@/lib/ipc").McpRotateResult | null
+  >(null);
 
   useEffect(() => {
     ipc.mcpStatus().then(setStatus).catch((e) => setErr(String(e)));
@@ -806,11 +813,25 @@ function McpPanel() {
     }
   }
 
+  async function askRotate() {
+    setErr(null);
+    setRotateResult(null);
+    try {
+      const list = await ipc.mcpConnectionsList();
+      setRotateConfirm(list.length);
+    } catch {
+      setRotateConfirm(0);
+    }
+  }
+
   async function rotate() {
     setBusy(true);
     setErr(null);
+    setRotateConfirm(null);
     try {
-      setStatus(await ipc.mcpRotateToken());
+      const res = await ipc.mcpRotateToken();
+      setStatus(res.status);
+      setRotateResult(res);
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -828,149 +849,6 @@ function McpPanel() {
     }
   }
 
-  const snippet = status
-    ? JSON.stringify(
-        {
-          mcpServers: {
-            danbi: {
-              url: status.url,
-              headers: { Authorization: `Bearer ${status.token}` },
-            },
-          },
-        },
-        null,
-        2,
-      )
-    : "";
-
-  const cliCommand = status
-    ? `claude mcp add --transport http danbi "${status.url}" --header "Authorization: Bearer ${status.token}"`
-    : "";
-
-  const claudeMdTemplate = `<!--
-  단비(Danbi) vault 연동 블록. 이 마커 사이는 단비가 관리한다.
-  기존 CLAUDE.md 에 병합하는 규칙:
-  1. 파일에 <!-- danbi:start --> ... <!-- danbi:end --> 마커가 이미 있으면
-     그 사이만 이 블록 전체로 교체한다. 마커 밖의 사용자 콘텐츠는 건드리지 않는다.
-  2. 마커가 없으면 파일 맨 끝에 이 블록 전체를 append 한다.
-  3. 사용자 고유 섹션 (프로젝트 특화 빌드 명령, 팀 컨벤션 등) 은 마커 밖에 두면 유지된다.
--->
-<!-- danbi:start v=2 project=<이 프로젝트 이름> -->
-# <이 프로젝트 이름> — 단비 vault 연동 가이드
-
-이 저장소는 단비(Danbi) MCP 서버의 전용 엔드포인트에 연결돼 있다.
-단비 vault는 이 프로젝트의 **외부 장기 기억**이다 — 결정·디버깅·TODO·학습이
-세션을 넘어 누적된다.
-
-## 핵심 원칙 (이것만 기억하면 됨)
-
-1. **답변 전에 단비부터 물어본다** — 일반론 대신 vault의 맥락으로 답한다.
-2. **중요한 건 즉시 기록한다** — 기술 결정·버그 원인·TODO는 ${"`danbi_log`"}로 바로.
-3. **쓸 때는 연결한다** — 관련 문서를 ${"`[[wiki-link]]`"}로 걸어 그래프에 누적시킨다.
-
-## 도구 목록
-
-**읽기** (vault 전체 조회 가능):
-- \`danbi_briefing\` — 최근 활동·ghost 제안·고아 파일·daily 노트를 한 JSON으로 반환
-- \`danbi_recent\` — 최근 수정된 문서 목록
-- \`danbi_search\` — tantivy 전문 검색 (한국어 n-gram 지원)
-- \`danbi_read\` — 특정 프로젝트/도메인 파일의 전체 내용
-- \`danbi_daily\` — 오늘 + 1주/1달/1년 전 daily 노트
-- \`danbi_list_projects\` — vault 전체 프로젝트·도메인 트리
-
-**쓰기** (전용 엔드포인트라 이 프로젝트로 자동 clamp — 다른 프로젝트로 잘못 쓸 위험 0):
-- \`danbi_log\` — 오늘 daily 노트에 append. project 파라미터 **생략**.
-- \`danbi_append\` — 임의 도메인 파일에 append (없으면 자동 생성). project 파라미터 **생략**.
-
-## Read — 언제 무엇을 읽는가
-
-### 세션 시작 (새 대화 첫 턴)
-
-반드시 이 순서로:
-
-1. \`danbi_briefing\` 호출 → 응답에서 다음 확인:
-   - \`daily.today_notes[0]\` 있으면 오늘 이미 기록된 내용이 있다는 뜻
-   - \`activity.recent_summaries[0..3]\` 로 직전 작업 맥락 파악
-   - \`ghost_suggestions\` 에 pending 있으면 사용자에게 알릴지 판단
-2. \`daily.today_notes\` 또는 어제 노트 있으면 \`danbi_read\` 로 읽고 **한 줄 요약**
-3. 읽은 요약 + 진행 중이던 TODO가 있으면 **그것부터 이어서 제안**
-
-### 질문 응답 중
-
-| 사용자가 이런 뉘앙스로 물으면 | 이 도구를 먼저 |
-|---|---|
-| "예전에 이거 어떻게 정했지?" | \`danbi_search\` → \`danbi_read\` |
-| "지난주/어제 뭐 했지?" | \`danbi_briefing\` activity |
-| "1년 전 오늘" / "비슷한 작업 한 적 있나" | \`danbi_daily\` |
-| "X 관련 기존 노트" | \`danbi_search\` 쿼리 |
-| "다른 프로젝트에선 어떻게?" | \`danbi_list_projects\` → 해당 프로젝트 \`danbi_read\` |
-
-**금지**: 일반론으로 답하기. 검색 안 돌리고 추측하기. "아마도" "일반적으로"로 시작하기.
-
-## Write — 언제 무엇을 기록하는가
-
-${"`danbi_log`"}를 호출하는 **트리거**:
-
-| 트리거 | 기록 예시 |
-|---|---|
-| 기술 결정 확정 | "JWT refresh 7일로 정함. 이유: 모바일 세션 유지 vs 보안 트레이드오프" |
-| 버그 원인 발견 | "CORS 에러는 /api/auth preflight 미설정. next.config.js headers 에 추가" |
-| 세션 종료 전 TODO | "내일: RLS 정책 테이블 4개 더 마이그레이션, 스키마 dump 비교" |
-| 노하우 (되풀이하면 좋은 것) | "Supabase RLS는 service_role 키 쓰면 자동 우회 — 마이그레이션 스크립트에서 유용" |
-| 재발 방지 (또 겪지 말아야 할 것) | "Tauri v2 webview에서 window.prompt 작동 안 함 → 인라인 input 대신" |
-| 아키텍처 전환 | "REST → tRPC 마이그레이션 시작. 이유: 타입 안전성 + codegen 불필요" |
-
-**기록 형식**:
-- 짧은 markdown 섹션. \`###\` 헤더 + 2-4줄 본문.
-- 코드는 핵심만 5줄 이내.
-- 잡담·회고·감상 금지 — "결정 / 원인 / TODO / 노하우 / 재발 방지" 중 하나로 분류.
-
-특정 도메인 파일(예: \`notes/auth.md\`)을 갱신해야 하면 ${"`danbi_append`"}.
-
-### 기록 타이밍
-
-- **즉시**: 위 트리거에 해당하는 순간이 오면 다른 일 끝나기 전에 바로 호출
-- **세션 종료 시**: 대화가 자연스럽게 끝날 때 누락된 트리거가 있으면 몰아서
-- **이중 기록 방지**: 같은 세션에서 동일 내용 중복 호출 금지 (체크 후 추가)
-
-## Link — 언제 [[wiki-link]]를 넣는가
-
-단비는 문서 간 연결이 쌓일수록 vault가 똑똑해진다. 그래프 뷰에서 확정 링크(실선)와 ghost 제안(점선)을 구분 렌더한다.
-
-### 위키링크 문법
-
-- 같은 프로젝트 내: \`[[파일명.md]]\`
-- 다른 프로젝트: \`[[프로젝트명/파일명.md]]\`
-
-### 언제 링크를 삽입하는가
-
-${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 해당되면 본문에 \`[[...]]\` 자연스럽게 포함:
-
-1. 언급하는 개념이 기존 문서에 이미 다뤄졌음 (\`danbi_search\` 결과로 확인)
-2. 같은 프로젝트 내 관련 결정/토픽이 있음
-3. 답변 근거로 \`danbi_read\` 한 문서를 인용함
-
-예시:
-\`\`\`markdown
-### JWT refresh 7일로 확정
-
-세션 만료 UX 개선 위해 기존 1일 → 7일. 보안 이슈는 [[notes/auth-security.md]]
-에 정리된 리스크 매트릭스 기준으로 수용 가능 범위로 판단. 관련 토큰 만료
-처리는 [[notes/token-refresh-flow.md]] 참조.
-\`\`\`
-
-### Ghost 제안 처리
-
-\`danbi_briefing\` 응답의 \`ghost_suggestions\` 는 단비가 제안한 "아직 확정 안 된 링크"다. 작업 중 해당 source 문서를 편집하게 되면, 제안된 target이 정말 관련 있는지 판단하고 ${"`[[target]]`"}을 본문에 삽입. 확정되면 그래프의 점선이 실선으로 바뀐다.
-
-## 안티 패턴
-
-- **❌ \`danbi_log\` 누락**: "이건 단비에 기록하기엔 너무 작은데..." — 작은 결정일수록 나중에 찾기 어렵다. 기록한다.
-- **❌ 일반 지식으로 답**: "일반적으로 JWT는..." — 이 vault가 어떤 결정을 내렸는지가 중요하다. 먼저 검색.
-- **❌ 링크 없이 기록**: 관련 문서가 있는데 \`[[링크]]\` 안 걺 — 그래프가 자라지 않음.
-- **❌ project 파라미터 수동 지정**: 전용 엔드포인트는 프로젝트로 clamp됨. 생략이 맞다.
-<!-- danbi:end -->
-`;
 
   return (
     <>
@@ -1052,8 +930,8 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
                 <Copy size={11} />
               </button>
               <button
-                onClick={rotate}
-                disabled={busy}
+                onClick={askRotate}
+                disabled={busy || rotateConfirm !== null}
                 className="grid h-6 w-6 place-items-center rounded-sm text-stone hover:text-on-dark"
                 title="새 토큰 생성"
               >
@@ -1061,77 +939,72 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
               </button>
             </div>
           </Row>
+          {rotateConfirm !== null && (
+            <div className="mt-2 rounded-md border border-hairline bg-surface-elevated p-3">
+              <div className="text-[13px] font-medium text-on-dark">
+                토큰을 새로 만들까요?
+              </div>
+              <div className="mt-1 text-caption-sm leading-[1.6] text-mute">
+                지금 토큰으로 붙어 있는 에이전트는 끊겨요. 단비가 기록한 연결
+                파일 {rotateConfirm}개(.mcp.json · .cursor/mcp.json ·
+                .codex/config.toml)는 자동으로 갱신되고, 터미널에서 직접{" "}
+                <code>claude mcp add</code> 한 등록은 새 토큰으로 다시
+                등록해야 해요.
+              </div>
+              <div className="mt-2 flex items-center gap-2">
+                <button
+                  onClick={rotate}
+                  disabled={busy}
+                  className="inline-flex h-7 items-center rounded-sm bg-primary px-2.5 text-[12px] font-medium text-on-primary hover:bg-primary-pressed"
+                >
+                  새 토큰 만들기
+                </button>
+                <button
+                  onClick={() => setRotateConfirm(null)}
+                  className="inline-flex h-7 items-center rounded-sm px-2 text-[12px] text-mute hover:text-on-dark"
+                >
+                  취소
+                </button>
+              </div>
+            </div>
+          )}
+          {rotateResult && (
+            <div className="mt-2 rounded-md border border-hairline bg-surface-elevated p-3 text-caption-sm leading-[1.6]">
+              <div className="text-on-dark">
+                새 토큰으로 바꿨어요 · 연결 파일 {rotateResult.updated.length}개
+                갱신
+                {rotateResult.removed.length > 0 &&
+                  ` · 사라진 파일 ${rotateResult.removed.length}개 정리`}
+              </div>
+              {rotateResult.updated.map((p) => (
+                <div key={p} className="truncate font-mono text-[11px] text-mute">
+                  {p}
+                </div>
+              ))}
+              {rotateResult.failed.map((p) => (
+                <div key={p} className="font-mono text-[11px] text-accent-red">
+                  갱신 실패: {p}
+                </div>
+              ))}
+              <div className="mt-1 text-mute">
+                에이전트를 재시작하면 새 토큰으로 붙어요.
+              </div>
+            </div>
+          )}
 
-          <div className="mt-4">
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
-                Claude Code · 한 줄 설치
-              </span>
-              <button
-                onClick={() => copy("cli", cliCommand)}
-                className="inline-flex h-6 items-center gap-1 rounded-sm border border-accent-blue bg-accent-blue-soft px-2 text-[11px] font-medium text-accent-blue"
-              >
-                <Copy size={10} /> 명령 복사
-              </button>
-            </div>
-            <pre className="rounded-md border border-hairline bg-surface-elevated p-3 font-mono text-[11px] leading-[1.6] text-body whitespace-pre-wrap break-all">
-              {cliCommand}
-            </pre>
-            <div className="mt-2 text-caption-sm leading-[1.6] text-mute">
-              복사해서 터미널에 붙여넣고 실행하세요. 그 뒤 Claude Code
-              세션에서 <code>/mcp</code> 로 <code>danbi</code> 서버가 뜨면
-              연결 완료.
-            </div>
-          </div>
-
-          <div className="mt-4">
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
-                JSON 스니펫 (Cursor · Zed · 수동 편집용)
-              </span>
-              <button
-                onClick={() => copy("snippet", snippet)}
-                className="inline-flex h-6 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[11px] text-body hover:text-on-dark"
-              >
-                <Copy size={10} /> 복사
-              </button>
-            </div>
-            <pre className="rounded-md border border-hairline bg-surface-elevated p-3 font-mono text-[11px] leading-[1.6] text-body whitespace-pre-wrap">
-              {snippet}
-            </pre>
-            <div className="mt-2 text-caption-sm leading-[1.6] text-mute">
-              Cursor나 직접 편집하려면 이 JSON을 해당 에이전트의 MCP 설정에
-              붙여넣으세요.
-            </div>
-          </div>
-
-          <div className="mt-4">
-            <div className="mb-1 flex items-center justify-between">
-              <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
-                CLAUDE.md 단비 블록 (마커로 관리 · 재복사 시 교체)
-              </span>
-              <button
-                onClick={() => copy("claudemd", claudeMdTemplate)}
-                className="inline-flex h-6 items-center gap-1 rounded-sm border border-accent-blue bg-accent-blue-soft px-2 text-[11px] font-medium text-accent-blue"
-              >
-                <Copy size={10} /> 블록 복사
-              </button>
-            </div>
-            <pre className="max-h-[200px] overflow-auto rounded-md border border-hairline bg-surface-elevated p-3 font-mono text-[11px] leading-[1.6] text-body whitespace-pre-wrap">
-              {claudeMdTemplate}
-            </pre>
-            <div className="mt-2 text-caption-sm leading-[1.6] text-mute">
-              Claude Code 프로젝트 루트의 <code>CLAUDE.md</code> 에 이 블록을
-              통째로 붙여넣으세요. 블록 양 끝의{" "}
-              <code>&lt;!-- danbi:start --&gt;</code> /{" "}
-              <code>&lt;!-- danbi:end --&gt;</code> 마커는 건드리지 마세요 —
-              다음에 재복사할 때 Claude Code 가 마커 사이만 자동으로 교체해
-              사용자 섹션을 보존합니다.{" "}
-              <span className="text-stone">
-                &lt;이 프로젝트 이름&gt; 두 자리만 실제 이름으로 바꿔서 쓰세요.
-              </span>
-            </div>
-          </div>
+          {/* 연결 명령·JSON·CLAUDE.md 블록은 연결 시트(프로젝트별 1곳)의
+              "고급" 으로 이동. 여기는 서버 on/off · 포트 · 토큰 · 추적만. */}
+          <Row
+            label="에이전트 연결"
+            hint="Claude Code · Codex · Cursor 연결, Skill, 훅, 연결 명령은 연결 시트에서."
+          >
+            <button
+              onClick={() => useApp.getState().openConnectSheet(null)}
+              className="inline-flex h-7 items-center rounded-sm border border-hairline bg-surface-elevated px-2.5 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
+            >
+              연결 관리 열기
+            </button>
+          </Row>
         </>
       )}
 
@@ -1662,12 +1535,8 @@ function timeAgo(ms: number): string {
 function VectorPanel() {
   const cfg = useApp((s) => s.cfg);
   const setCfg = useApp((s) => s.setCfg);
-  const [stats, setStats] = useState<{
-    count: number;
-    oldest: number | null;
-    newest: number | null;
-    model: string | null;
-  } | null>(null);
+  const [stats, setStats] =
+    useState<import("@/lib/ipc").VectorIndexStats | null>(null);
   const [estimate, setEstimate] =
     useState<import("@/lib/ipc").VectorEstimateResponse | null>(null);
   const [estimating, setEstimating] = useState(false);
@@ -2194,6 +2063,17 @@ function VectorPanel() {
               {stats?.model && (
                 <span className="text-caption-sm text-mute">
                   모델: {stats.model}
+                </span>
+              )}
+              {stats?.warning && (
+                <span className="max-w-[320px] text-caption-sm text-on-dark-mute">
+                  {stats.warning}
+                  {stats.by_model.length > 1 && (
+                    <>
+                      {" "}
+                      ({stats.by_model.map((m) => `${m.model} ${m.count}`).join(" · ")})
+                    </>
+                  )}
                 </span>
               )}
             </div>

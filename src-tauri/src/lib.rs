@@ -1,3 +1,4 @@
+mod agent_connect;
 mod aws_profiles;
 mod backup;
 mod bedrock;
@@ -24,6 +25,7 @@ mod journal_view;
 mod links;
 mod mcp;
 mod mcp_inbound;
+mod mcp_presence;
 mod popover;
 mod preview;
 mod tray_badge;
@@ -34,6 +36,7 @@ mod providers;
 mod routing;
 mod search;
 mod secrets;
+mod session_hooks;
 mod shortcuts;
 mod skill;
 mod pricing;
@@ -45,6 +48,8 @@ mod vault;
 mod vcs;
 mod vector;
 mod watcher;
+#[cfg(test)]
+mod perf_bench;
 
 use capture::toggle_capture_window;
 use popover::{hide_popover_window, toggle_popover_window};
@@ -428,12 +433,34 @@ pub fn run() {
                                 // miss the first time but that's a user-
                                 // initiated click.
                                 let _ = dashboard::warm_activity_cache(&vault, 30);
+                                // Same idea for the embedding-model census
+                                // danbi_briefing / search report: parsing a
+                                // multi-MB vectors.json belongs here, not in
+                                // the first MCP call of a session. Cached by
+                                // mtime, so later cycles are a stat.
+                                let _ = vector::cached_model_counts(&vault);
                             }
                         }
                     }
                     sleep(Duration::from_secs(300)).await;
                 }
             });
+
+            // 검색 코퍼스 사전 빌드 — 1.5k 파일 vault 는 첫 빌드에 ~2.5초가
+            // 걸려서 첫 ⌘K 가 멈춘 것처럼 보였다. 이후 검색은 바뀐 파일만
+            // 증분 반영하므로 여기서 한 번만 비용을 낸다. 실패해도 무시.
+            if let Ok(default_vault) = config::default_vault_path() {
+                if let Ok(Some(cfg)) = config::load_config(&default_vault) {
+                    if let Some(vp) = cfg.vault_path.as_ref() {
+                        let vault = std::path::PathBuf::from(vp);
+                        tauri::async_runtime::spawn_blocking(move || {
+                            if let Err(e) = search::warm_corpus(&vault) {
+                                eprintln!("[search] corpus prebuild failed: {e}");
+                            }
+                        });
+                    }
+                }
+            }
 
             // Reset any crash-queue records that were marked Running when
             // the previous process exited. Converts them to Pending so the
@@ -509,6 +536,7 @@ pub fn run() {
             commands::usage_set_tray_options,
             commands::dashboard_danbi_llm,
             commands::build_graph,
+            commands::search_hybrid,
             commands::backup_now,
             commands::backup_validate_path,
             commands::project_context_status,
@@ -532,6 +560,7 @@ pub fn run() {
             commands::vector_search,
             commands::init_vault,
             commands::list_tree,
+            commands::list_project_node,
             commands::create_project,
             commands::rename_project,
             commands::delete_project,
@@ -544,7 +573,12 @@ pub fn run() {
             commands::move_domain,
             commands::install_skill,
             commands::skill_status,
+            commands::skill_status_all,
             commands::codex_connect,
+            commands::agent_connect,
+            commands::agent_connection_status,
+            commands::mcp_connections_list,
+            commands::claude_hooks_install,
             commands::trash_list,
             commands::trash_restore,
             commands::trash_purge,
@@ -560,6 +594,8 @@ pub fn run() {
             commands::apply_plan,
             commands::undo_last,
             commands::recent_commits,
+            commands::activity_feed,
+            commands::activity_revert,
             commands::build_link_index,
             commands::vault_suggestions,
             commands::daily_snapshot,
@@ -613,6 +649,8 @@ pub fn run() {
             commands::goals_unarchive,
             commands::goals_delete,
             commands::doc_change_history,
+            commands::doc_diff,
+            commands::doc_restore,
             commands::danbi_log_quick,
             commands::summarize_weekly,
             commands::project_activity_overview,

@@ -200,7 +200,7 @@ pub fn view(vault: &Path, project: &str) -> DanbiResult<ProjectJournalView> {
 /// Walk a daily-note's markdown and return one JournalEntry per
 /// `### heading` block. Trigger kind is inferred from keywords in the
 /// heading text first, then the first body line as a fallback.
-fn parse_entries(date: &str, body: &str) -> Vec<JournalEntry> {
+pub(crate) fn parse_entries(date: &str, body: &str) -> Vec<JournalEntry> {
     let mut out: Vec<JournalEntry> = Vec::new();
     let mut cur_title: Option<String> = None;
     let mut cur_body: Vec<String> = Vec::new();
@@ -223,6 +223,9 @@ fn parse_entries(date: &str, body: &str) -> Vec<JournalEntry> {
         // Treat both H3 and H4 as entry boundaries — Claude Code
         // sometimes uses one or the other depending on the parent
         // section structure.
+        if crate::daily::is_log_stamp(line) {
+            continue;
+        }
         if line.starts_with("### ") || line.starts_with("#### ") {
             // Flush previous block.
             if let Some(prev) = cur_title.take() {

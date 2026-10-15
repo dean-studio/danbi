@@ -7,6 +7,7 @@ import type {
   PlanPreview,
   ProjectGroup,
   ProjectJournalView,
+  ProjectNode,
   RoutingResult,
   VaultTree,
 } from "@/lib/ipc";
@@ -15,6 +16,11 @@ export type Selection = {
   project: string | null;
   domain: string | null;
 };
+
+/** 메인 영역 화면. "home" 은 selection 에 따라 오늘(홈)/프로젝트 홈/문서로
+ *  갈라지고, 검토함·사용량은 selection 과 무관한 전용 화면. 사이드바
+ *  내비 행과 ⌘⇧R / ⌘⇧U 가 바꾼다. */
+export type MainView = "home" | "review" | "usage";
 
 export type ChatTurn = {
   id: string;
@@ -42,11 +48,26 @@ export type AppStore = {
 
   tree: VaultTree | null;
   setTree: (t: VaultTree) => void;
+  /** 프로젝트 하나만 교체/추가(`node`) 또는 제거(`null`). 워처가 바뀐
+   *  프로젝트를 알려줄 때 vault 전체를 다시 긁지 않기 위한 부분 갱신. */
+  patchTreeProject: (name: string, node: ProjectNode | null) => void;
 
   selection: Selection;
   selectProject: (project: string | null) => void;
   selectDomain: (project: string, domain: string) => void;
   clearSelection: () => void;
+
+  view: MainView;
+  /** 검토함·사용량으로 전환. selection 은 유지(검토함의 프로젝트 범위 칩에
+   *  쓰임). 홈으로 돌아올 땐 selectProject/selectDomain/clearSelection 이
+   *  view 를 "home" 으로 되돌린다. */
+  setView: (v: MainView) => void;
+
+  /** 연결 시트 — 프로젝트 홈 상태 띠·사이드바 푸터·설정·컨텍스트 메뉴
+   *  어디서든 연다. project=null 이면 vault 전역(서버·토큰·고급만). */
+  connectSheet: { open: boolean; project: string | null };
+  openConnectSheet: (project: string | null) => void;
+  closeConnectSheet: () => void;
 
   turns: ChatTurn[];
   addTurn: (t: ChatTurn) => void;
@@ -106,9 +127,12 @@ export type AppStore = {
   /** 사용자가 단비 안에서 노트를 직접 저장한 시점 (ms epoch).
    *  watcher 가 그 직후 발화하는 vault:changed 이벤트는 우리가 만든
    *  것이므로 vault refresh 한 번 건너뛰어도 안전 — 큰 vault 에서는
-   *  이 skip 이 에디터 체감 속도를 크게 좌우한다. */
+   *  이 skip 이 에디터 체감 속도를 크게 좌우한다.
+   *  `path`(vault 상대, `Projects/<p>/<d>`)를 주면 vault 전체가 아니라 그
+   *  파일 이벤트만 건너뛴다 — 같은 창에 들어온 에이전트 쓰기를 버리지 않게. */
   lastSelfSaveAt: number;
-  markSelfSave: () => void;
+  selfSavedPaths: Record<string, number>;
+  markSelfSave: (path?: string) => void;
 
   /** purpose / schema 자동 작성이 끝난 결과를 잠시 보관. 사용자가
    *  알림 / toast 를 클릭해 해당 노트로 이동하면 PurposeSchemaHint 가
@@ -283,16 +307,40 @@ export type BgJob =
 /** Max chat turns kept in memory. Older turns are dropped to bound RAM —
  *  each turn can carry full extracted attachment text + plan/diff payloads. */
 const MAX_TURNS = 100;
+/** 자기 저장 직후 watcher 이벤트를 무시하는 창. */
+export const SELF_SAVE_WINDOW_MS = 1500;
 
 export const useApp = create<AppStore>((set) => ({
   cfg: null,
   setCfg: (cfg) => set({ cfg }),
   tree: null,
   setTree: (t) => set({ tree: t }),
+  patchTreeProject: (name, node) =>
+    set((s) => {
+      if (!s.tree) return {};
+      const rest = s.tree.projects.filter((p) => p.name !== name);
+      if (!node) return { tree: { ...s.tree, projects: rest } };
+      // list_tree 와 같은 정렬 (소문자 이름순) 을 유지한다.
+      const projects = [...rest, node].sort((a, b) =>
+        a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
+      );
+      return { tree: { ...s.tree, projects } };
+    }),
   selection: { project: null, domain: null },
-  selectProject: (project) => set({ selection: { project, domain: null } }),
-  selectDomain: (project, domain) => set({ selection: { project, domain } }),
-  clearSelection: () => set({ selection: { project: null, domain: null } }),
+  selectProject: (project) =>
+    set({ selection: { project, domain: null }, view: "home" }),
+  selectDomain: (project, domain) =>
+    set({ selection: { project, domain }, view: "home" }),
+  clearSelection: () =>
+    set({ selection: { project: null, domain: null }, view: "home" }),
+
+  view: "home",
+  setView: (v) => set({ view: v }),
+
+  connectSheet: { open: false, project: null },
+  openConnectSheet: (project) => set({ connectSheet: { open: true, project } }),
+  closeConnectSheet: () =>
+    set((s) => ({ connectSheet: { ...s.connectSheet, open: false } })),
 
   turns: [],
   // v0.8.0: cap the chat log. Each turn can pin heavy payloads —
@@ -344,7 +392,19 @@ export const useApp = create<AppStore>((set) => ({
   setBgJob: (job) => set({ bgJob: job }),
 
   lastSelfSaveAt: 0,
-  markSelfSave: () => set({ lastSelfSaveAt: Date.now() }),
+  selfSavedPaths: {},
+  markSelfSave: (path) =>
+    path
+      ? set((st) => {
+          const now = Date.now();
+          const next: Record<string, number> = {};
+          for (const [k, t] of Object.entries(st.selfSavedPaths)) {
+            if (now - t < SELF_SAVE_WINDOW_MS) next[k] = t;
+          }
+          next[path] = now;
+          return { selfSavedPaths: next };
+        })
+      : set({ lastSelfSaveAt: Date.now() }),
 
   pendingCompose: null,
   setPendingCompose: (v) => set({ pendingCompose: v }),

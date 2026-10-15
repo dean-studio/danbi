@@ -18,6 +18,7 @@ use crate::error::DanbiError;
 use crate::search;
 use crate::vault;
 use crate::vcs;
+use chrono::Local;
 use axum::{
     extract::{DefaultBodyLimit, Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
@@ -86,6 +87,11 @@ impl McpServer {
             .route("/mcp", post(handle_rpc))
             .route("/mcp/health", post(handle_health).get(handle_health))
             .route("/mcp/:project_id", post(handle_rpc_scoped))
+            // 세션당 도구 수를 줄이는 분리 연결. /mcp/read 는 읽기 도구만
+            // (전역 1개), /mcp/<id>/write 는 그 프로젝트로 clamp 된 쓰기
+            // 도구만 (코드 폴더마다). 기존 /mcp · /mcp/<id> 는 그대로.
+            .route("/mcp/read", post(handle_rpc_read))
+            .route("/mcp/:project_id/write", post(handle_rpc_scoped_write))
             // Plain REST endpoints — same auth (Bearer token) and same
             // dispatcher as the JSON-RPC routes, but no envelope. Made
             // for external callers (Paperclip, cron jobs, shell scripts)
@@ -94,6 +100,13 @@ impl McpServer {
             .route("/api/tools", get(handle_api_tools))
             .route("/api/call/:tool", post(handle_api_call))
             .route("/api/projects/:project/call/:tool", post(handle_api_call_scoped))
+            // Claude Code SessionStart 훅이 부르는 짧은 Markdown 브리핑.
+            .route(
+                "/api/session-brief",
+                get(handle_session_brief).post(handle_session_brief),
+            )
+            // SessionEnd 훅 — 바로 202 를 돌려주고 요약·기록은 백그라운드.
+            .route("/api/session-end", post(handle_session_end))
             // Plain PUT for raw markdown — Obsidian Local REST API style.
             // Lets Paperclip / cron / curl pipe a prebuilt report file in
             // without JSON wrapping (emoji, special punctuation, multi-MB
@@ -204,6 +217,78 @@ async fn handle_health() -> impl IntoResponse {
     (StatusCode::OK, "danbi-mcp")
 }
 
+#[derive(Deserialize, Default)]
+struct SessionBriefQuery {
+    /// Project name or UUID. Missing → vault-wide brief.
+    project: Option<String>,
+    max_chars: Option<usize>,
+}
+
+/// `GET|POST /api/session-brief?project=<name|uuid>&max_chars=N` — plain
+/// Markdown (not JSON) because Claude Code pastes a SessionStart hook's
+/// stdout straight into the session. No LLM call, so it stays fast.
+async fn handle_session_brief(
+    State(state): State<McpState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<SessionBriefQuery>,
+) -> axum::response::Response {
+    if !auth_ok(&headers, &state.token) {
+        return (StatusCode::UNAUTHORIZED, "invalid or missing bearer token").into_response();
+    }
+    let max_chars = query
+        .max_chars
+        .unwrap_or(crate::session_hooks::DEFAULT_BRIEF_CHARS)
+        .clamp(500, 20_000);
+    let result = current_vault_path().and_then(|vault| {
+        let project = match query.project.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(p) => Some(
+                crate::vault::project_by_id(&vault, p)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| p.to_string()),
+            ),
+        };
+        crate::session_hooks::session_brief(&vault, project.as_deref(), max_chars)
+    });
+    match result {
+        Ok(text) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+            text,
+        )
+            .into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, format!("{e}")).into_response(),
+    }
+}
+
+/// `POST /api/session-end?project=<name|uuid>` — body is the SessionEnd
+/// hook's stdin JSON (`session_id`, `transcript_path`, `cwd`, …). Answers
+/// 202 at once so Claude Code can exit; the transcript is read, skipped
+/// or summarised and logged in the background (see `session_hooks`).
+async fn handle_session_end(
+    State(state): State<McpState>,
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<SessionBriefQuery>,
+    body: String,
+) -> (StatusCode, Json<Value>) {
+    if !auth_ok(&headers, &state.token) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "ok": false, "error": "invalid or missing bearer token" })),
+        );
+    }
+    let Some(project) = query.project.filter(|p| !p.trim().is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "project required" })),
+        );
+    };
+    let payload: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    tokio::spawn(crate::session_hooks::run_session_end(project, payload));
+    (StatusCode::ACCEPTED, Json(json!({ "ok": true, "queued": true })))
+}
+
 // ---------- REST handlers ----------
 //
 // Plain JSON in / plain JSON out. Built so external schedulers and shell
@@ -238,7 +323,7 @@ async fn handle_api_call(
     body: Option<Json<Value>>,
 ) -> (StatusCode, Json<Value>) {
     let args = body.map(|j| j.0).unwrap_or(Value::Null);
-    run_api_call(&state, &headers, tool, args, None)
+    run_api_call(&state, &headers, tool, args, None).await
 }
 
 /// `POST /api/projects/:project/call/:tool` — scoped variant.
@@ -252,7 +337,7 @@ async fn handle_api_call_scoped(
     body: Option<Json<Value>>,
 ) -> (StatusCode, Json<Value>) {
     let args = body.map(|j| j.0).unwrap_or(Value::Null);
-    run_api_call(&state, &headers, tool, args, Some(project))
+    run_api_call(&state, &headers, tool, args, Some(project)).await
 }
 
 /// `PUT /v1/vault/{project}/{path...}` — Obsidian Local REST API style.
@@ -316,17 +401,10 @@ async fn handle_v1_vault_put(
     };
     // Verify the project actually exists — the spec calls for 404 on
     // unknown projects rather than silently creating one.
-    let known = match crate::vault::list_tree(&vault_path) {
-        Ok(t) => t.projects.iter().any(|p| p.name == resolved_project),
-        Err(_) => false,
-    };
-    if !known {
+    if let Err(e) = require_project(&vault_path, &resolved_project) {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({
-                "ok": false,
-                "error": format!("unknown project: {resolved_project}")
-            })),
+            Json(json!({ "ok": false, "error": format!("{e}") })),
         );
     }
 
@@ -357,6 +435,9 @@ async fn handle_v1_vault_put(
         }
     }
 
+    // Same lock as the MCP write tools — the append below reads then
+    // writes, and the commit must not race another writer's.
+    let _write_guard = vcs::write_guard();
     // Snapshot before edit so the user has an undo point.
     let _ = vcs::ensure_repo(&vault_path);
     let _ = vcs::snapshot(
@@ -392,11 +473,14 @@ async fn handle_v1_vault_put(
         body.len()
     };
 
-    let commit = vcs::snapshot(
+    let rest_client = vcs::client_token(crate::usage::classify_user_agent(
+        headers.get("user-agent").and_then(|v| v.to_str().ok()),
+    ));
+    let (commit, warning) = commit_or_warn(
         &vault_path,
         &format!("danbi: rest {mode} · {resolved_project}/{domain}"),
-    )
-    .unwrap_or_default();
+        &rest_client,
+    );
 
     // Token-track this write under a synthetic tool name so the
     // dashboard shows v1/vault PUT volume alongside the JSON-RPC
@@ -426,17 +510,18 @@ async fn handle_v1_vault_put(
         );
     }
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "project": resolved_project,
-            "domain": domain,
-            "bytes": final_bytes,
-            "mode": mode,
-            "commit": commit,
-        })),
-    )
+    let mut body = json!({
+        "ok": true,
+        "project": resolved_project,
+        "domain": domain,
+        "bytes": final_bytes,
+        "mode": mode,
+        "commit": commit,
+    });
+    if let Some(w) = warning {
+        body["warning"] = Value::String(w);
+    }
+    (StatusCode::OK, Json(body))
 }
 
 #[derive(Deserialize, Default)]
@@ -445,7 +530,7 @@ struct V1VaultQuery {
     mode: Option<String>,
 }
 
-fn run_api_call(
+async fn run_api_call(
     state: &McpState,
     headers: &HeaderMap,
     tool: String,
@@ -480,15 +565,7 @@ fn run_api_call(
     };
 
     if let Some(proj) = scoped_project.as_ref() {
-        if is_write_tool(&tool) {
-            if let Value::Object(ref mut map) = args {
-                map.insert("project".into(), Value::String(proj.clone()));
-            } else {
-                let mut map = serde_json::Map::new();
-                map.insert("project".into(), Value::String(proj.clone()));
-                args = Value::Object(map);
-            }
-        }
+        clamp_or_default_project(&tool, &mut args, proj);
     }
 
     let inbound_meta = extract_inbound_meta(&tool, &args);
@@ -496,6 +573,7 @@ fn run_api_call(
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    attach_client(&tool, &mut args, user_agent.as_deref());
     let args_for_banner = args.clone();
 
     // danbi_search 는 RRF 하이브리드 fast-path 로. 임베딩 provider 가
@@ -503,15 +581,11 @@ fn run_api_call(
     // dispatch() 직호출 (BM25 only) 보다 자연어 쿼리 정확도가 훨씬 높아서
     // REST 호출자도 같은 품질을 받게.
     let tool_owned = tool.clone();
-    let dispatch_result: Result<String, DanbiError> = if tool == "danbi_search" {
-        // 같은 tokio runtime context 안에서 비동기 호출 — REST handler
-        // 는 이미 axum tokio task 안이라 안전하다.
-        tauri::async_runtime::block_on(search_hybrid_dispatch(args))
-    } else {
-        dispatch(&tool, args)
-    };
+    // REST handler 는 이미 axum tokio task 안이라 block_on 하면
+    // "Cannot start a runtime from within a runtime" panic — await 로.
+    let dispatch_result: Result<Dispatched, DanbiError> = dispatch_any(&tool, args).await;
     match dispatch_result {
-        Ok(text) => {
+        Ok(Dispatched { text, warning }) => {
             let tool = &tool_owned;
             if let Some(meta) = inbound_meta.as_ref() {
                 record_inbound_after_success(tool, meta, &text, user_agent.as_deref());
@@ -528,10 +602,11 @@ fn run_api_call(
             // pass the raw string through.
             let parsed: Value =
                 serde_json::from_str(&text).unwrap_or(Value::String(text));
-            (
-                StatusCode::OK,
-                Json(json!({ "ok": true, "result": parsed })),
-            )
+            let mut body = json!({ "ok": true, "result": parsed });
+            if let Some(w) = warning {
+                body["warning"] = Value::String(w);
+            }
+            (StatusCode::OK, Json(body))
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
@@ -545,7 +620,7 @@ async fn handle_rpc(
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
 ) -> axum::response::Response {
-    run_rpc(&state, &headers, req, None).await
+    run_rpc(&state, &headers, req, None, ToolScope::All).await
 }
 
 async fn handle_rpc_scoped(
@@ -554,7 +629,126 @@ async fn handle_rpc_scoped(
     headers: HeaderMap,
     Json(req): Json<RpcRequest>,
 ) -> axum::response::Response {
-    run_rpc(&state, &headers, req, Some(project_id)).await
+    run_rpc(&state, &headers, req, Some(project_id), ToolScope::All).await
+}
+
+async fn handle_rpc_read(
+    State(state): State<McpState>,
+    headers: HeaderMap,
+    Json(req): Json<RpcRequest>,
+) -> axum::response::Response {
+    run_rpc(&state, &headers, req, None, ToolScope::ReadOnly).await
+}
+
+async fn handle_rpc_scoped_write(
+    State(state): State<McpState>,
+    AxumPath(project_id): AxumPath<String>,
+    headers: HeaderMap,
+    Json(req): Json<RpcRequest>,
+) -> axum::response::Response {
+    run_rpc(&state, &headers, req, Some(project_id), ToolScope::WriteOnly).await
+}
+
+/// Which tools a JSON-RPC endpoint exposes. `All` is what `/mcp` and
+/// `/mcp/<id>` have always served; the split endpoints let a machine
+/// attach one read server globally plus one write server per code folder
+/// instead of N full servers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ToolScope {
+    All,
+    ReadOnly,
+    WriteOnly,
+}
+
+impl ToolScope {
+    fn allows(self, tool: &str) -> bool {
+        match self {
+            ToolScope::All => true,
+            ToolScope::ReadOnly => !is_write_tool(tool),
+            ToolScope::WriteOnly => is_write_tool(tool),
+        }
+    }
+
+    /// Error text for a tool this endpoint doesn't serve — tells the agent
+    /// which endpoint to use instead.
+    fn rejection(self, tool: &str) -> Option<String> {
+        if self.allows(tool) {
+            return None;
+        }
+        Some(match self {
+            ToolScope::ReadOnly => format!(
+                "{tool} 은(는) 쓰기 도구라 읽기 전용 연결(/mcp/read)에서는 쓸 수 없어요. 프로젝트별 쓰기 연결(/mcp/<project-id>/write)의 같은 도구로 호출하세요."
+            ),
+            _ => format!(
+                "{tool} 은(는) 읽기 도구라 이 쓰기 전용 연결(/mcp/<project-id>/write)에는 없어요. 읽기 전용 연결(/mcp/read)의 같은 도구로 호출하세요."
+            ),
+        })
+    }
+}
+
+/// Read tools whose optional `project` defaults to the endpoint's project
+/// on a scoped server. Search stays vault-wide unless asked — cross-project
+/// lookups are the main reason to search from inside one project.
+const SCOPED_DEFAULT_PROJECT_TOOLS: [&str; 3] = ["danbi_briefing", "danbi_recent", "danbi_daily"];
+
+/// Tool catalog for one endpoint. On a project-scoped server the write
+/// tools lose their `project` parameter (the server fills it in — the
+/// schema and the skill used to contradict each other here) and say so in
+/// their description; the read tools that default to the project say that
+/// too.
+fn catalog_for_project(scope: ToolScope, scoped_project: Option<&str>) -> Vec<Value> {
+    tool_catalog()
+        .into_iter()
+        .filter(|t| scope.allows(t.get("name").and_then(|n| n.as_str()).unwrap_or("")))
+        .map(|mut t| {
+            let Some(project) = scoped_project else { return t };
+            let name = t["name"].as_str().unwrap_or("").to_string();
+            if is_write_tool(&name) {
+                if let Some(props) = t["inputSchema"]["properties"].as_object_mut() {
+                    props.remove("project");
+                }
+                if let Some(req) = t["inputSchema"]["required"].as_array_mut() {
+                    req.retain(|r| r != "project");
+                }
+                let desc = t["description"].as_str().unwrap_or("").to_string();
+                t["description"] = json!(format!("→ {project} 에 기록. {desc}"));
+            } else if SCOPED_DEFAULT_PROJECT_TOOLS.contains(&name.as_str()) {
+                if let Some(p) = t["inputSchema"]["properties"]["project"].as_object_mut() {
+                    p.insert("description".into(), json!(format!("생략하면 {project}")));
+                }
+            }
+            t
+        })
+        .collect()
+}
+
+/// `initialize.instructions` — Claude Code and Codex put this string into
+/// the system context, so the agent knows how to use the vault even when
+/// no SKILL.md is installed. Kept to a handful of lines.
+fn server_instructions(scope: ToolScope, scoped_project: Option<&str>) -> String {
+    let mut lines = vec![
+        "단비 vault 는 프로젝트의 외부 장기 기억 — 결정·버그 원인·TODO 가 세션을 넘어 누적됩니다. 일반론 대신 vault 의 맥락으로 답하세요.".to_string(),
+    ];
+    let read = scope != ToolScope::WriteOnly;
+    let write = scope != ToolScope::ReadOnly;
+    if read {
+        lines.push(match scoped_project {
+            Some(p) => format!("새 세션: danbi_briefing 먼저 (project 생략 시 {p}). 질문 전: danbi_context(query) 로 관련 섹션부터, 문서 전체는 danbi_read (heading·max_chars 로 부분 읽기)."),
+            None => "새 세션: danbi_briefing(project) 먼저. 질문 전: danbi_context(query) 로 관련 섹션부터, 문서 전체는 danbi_read (heading·max_chars 로 부분 읽기).".to_string(),
+        });
+    } else {
+        lines.push("읽기 도구(briefing·context·read·search)는 읽기 연결 /mcp/read 에 있습니다.".to_string());
+    }
+    if write {
+        lines.push(match scoped_project {
+            Some(p) => format!("기록: 결정·버그 원인·TODO 는 즉시 danbi_log(content) — 자동으로 {p} 의 오늘 daily 에 `_시각 · 호출자_` 줄과 함께 들어갑니다. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결."),
+            None => "기록: 결정·버그 원인·TODO 는 즉시 danbi_log(project, content) — 오늘 daily 에 `_시각 · 호출자_` 줄과 함께. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결.".to_string(),
+        });
+        lines.push("특정 문서 갱신은 danbi_append(누적) · danbi_replace_section(섹션 교체) · danbi_upsert_item(리스트 항목). 같은 내용을 두 번 보내지 말 것 — 응답에 deduped:true 또는 warning 이 오면 이미 저장된 것이니 재시도 금지.".to_string());
+    } else {
+        lines.push("기록(danbi_log 등)은 프로젝트별 쓰기 연결 /mcp/<project-id>/write 에서 하세요.".to_string());
+    }
+    lines.join("\n")
 }
 
 async fn run_rpc(
@@ -562,6 +756,7 @@ async fn run_rpc(
     headers: &HeaderMap,
     req: RpcRequest,
     scoped_project_id: Option<String>,
+    scope: ToolScope,
 ) -> axum::response::Response {
     if req.jsonrpc != "2.0" {
         return (
@@ -577,6 +772,11 @@ async fn run_rpc(
         )
             .into_response();
     }
+    // 프로젝트 홈의 "연결됨" 표시용 — 읽기 호출까지 포함한 마지막 접속.
+    crate::mcp_presence::note(
+        scoped_project_id.as_deref(),
+        headers.get("user-agent").and_then(|v| v.to_str().ok()),
+    );
 
     // JSON-RPC notifications carry no `id` and MUST NOT receive a response
     // object. MCP Streamable HTTP requires the server to answer 202 Accepted
@@ -624,9 +824,11 @@ async fn run_rpc(
 
     let (status, body) = match req.method.as_str() {
         "initialize" => {
-            let server_name = match scoped_project.as_ref() {
-                Some(p) => format!("{SERVER_NAME} · {p}"),
-                None => SERVER_NAME.to_string(),
+            let server_name = match (scoped_project.as_ref(), scope) {
+                (Some(p), ToolScope::WriteOnly) => format!("{SERVER_NAME} · {p} · write"),
+                (Some(p), _) => format!("{SERVER_NAME} · {p}"),
+                (None, ToolScope::ReadOnly) => format!("{SERVER_NAME} · read"),
+                (None, _) => SERVER_NAME.to_string(),
             };
             (
                 StatusCode::OK,
@@ -638,6 +840,7 @@ async fn run_rpc(
                         "capabilities": {
                             "tools": { "listChanged": false },
                         },
+                        "instructions": server_instructions(scope, scoped_project.as_deref()),
                     }),
                 )),
             )
@@ -648,7 +851,10 @@ async fn run_rpc(
         ),
         "tools/list" => (
             StatusCode::OK,
-            Json(rpc_ok(req.id, json!({ "tools": tool_catalog() }))),
+            Json(rpc_ok(
+                req.id,
+                json!({ "tools": catalog_for_project(scope, scoped_project.as_deref()) }),
+            )),
         ),
         "tools/call" => {
             let name = req
@@ -661,6 +867,19 @@ async fn run_rpc(
                 .get("arguments")
                 .cloned()
                 .unwrap_or(Value::Null);
+            if let Some(msg) = scope.rejection(name) {
+                return (
+                    StatusCode::OK,
+                    Json(rpc_ok(
+                        req.id,
+                        json!({
+                            "content": [ { "type": "text", "text": format!("error: {msg}") } ],
+                            "isError": true,
+                        }),
+                    )),
+                )
+                    .into_response();
+            }
             // Project-scoped URLs only clamp WRITE tools to the owning
             // project — read tools are left free so an agent attached to
             // project A can still cross-reference project B. This preserves
@@ -668,18 +887,7 @@ async fn run_rpc(
             // read the broader vault (e.g. "what's the status of the RAG
             // project?" asked from the i18n project's session).
             if let Some(proj) = scoped_project.as_ref() {
-                if is_write_tool(name) {
-                    if let Value::Object(ref mut map) = args {
-                        map.insert(
-                            "project".into(),
-                            Value::String(proj.clone()),
-                        );
-                    } else {
-                        let mut map = serde_json::Map::new();
-                        map.insert("project".into(), Value::String(proj.clone()));
-                        args = Value::Object(map);
-                    }
-                }
+                clamp_or_default_project(name, &mut args, proj);
             }
             // Capture inbound metadata BEFORE we move `args` into
             // dispatch — write tools need their content for token
@@ -690,21 +898,18 @@ async fn run_rpc(
                 .get("user-agent")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
+            attach_client(name, &mut args, user_agent.as_deref());
             // Snapshot args before dispatch consumes them — banner
             // injection later needs the project hint from the args.
             let args_for_banner = args.clone();
 
-            // danbi_search 만 RRF 하이브리드 fast-path 로 분기. 임베딩
+            // danbi_search·danbi_context 는 RRF 하이브리드 경로로. 임베딩
             // provider 가 cfg 에 있으면 BM25 + 벡터 결과를 RRF 로 병합해서
             // 외부 AI 의 자연어 쿼리도 정확히 잡아낸다. 임베딩 없으면
             // 기존 BM25 만으로 동작.
-            let result: Result<String, DanbiError> = if name == "danbi_search" {
-                search_hybrid_dispatch(args).await
-            } else {
-                dispatch(name, args)
-            };
+            let result: Result<Dispatched, DanbiError> = dispatch_any(name, args).await;
             match result {
-                Ok(text) => {
+                Ok(Dispatched { text, warning }) => {
                     // Token-track *only* on success — failed writes
                     // never reach disk, so they shouldn't inflate
                     // saved-content metrics.
@@ -722,12 +927,16 @@ async fn run_rpc(
                         &args_for_banner,
                         scoped_project.as_deref(),
                     );
+                    let mut content = vec![json!({ "type": "text", "text": text })];
+                    if let Some(w) = warning {
+                        content.push(json!({ "type": "text", "text": format!("warning: {w}") }));
+                    }
                     (
                     StatusCode::OK,
                     Json(rpc_ok(
                         req.id,
                         json!({
-                            "content": [ { "type": "text", "text": text } ],
+                            "content": content,
                             "isError": false,
                         }),
                     )),
@@ -763,10 +972,14 @@ fn tool_catalog() -> Vec<Value> {
     vec![
         json!({
             "name": "danbi_list_projects",
-            "description": "단비 vault의 모든 프로젝트와 그 안의 도메인 파일 목록을 반환합니다.",
+            "description": "vault 의 프로젝트 목록. 기본은 프로젝트마다 한 줄(이름·파일 수·최근 수정·최상위 파일·폴더별 개수)이고, project 를 주면 그 프로젝트의 파일 트리 전체를 돌려줍니다.",
             "inputSchema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "project": { "type": "string", "description": "이 프로젝트의 파일 트리만 자세히" },
+                    "include_daily": { "type": "boolean", "default": false, "description": "project 지정 시 daily/ 노트도 포함" },
+                    "titles": { "type": "boolean", "default": false, "description": "project 지정 시 파일마다 첫 제목(title)·kind 도 읽어 포함 (느림)" }
+                },
                 "additionalProperties": false
             }
         }),
@@ -777,20 +990,53 @@ fn tool_catalog() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "검색어 (키워드 또는 자연어 질문)" },
-                    "limit": { "type": "integer", "default": 8 }
+                    "limit": { "type": "integer", "default": 8 },
+                    "project": { "type": "string", "description": "이 프로젝트 안에서만. 생략하면 vault 전체" },
+                    "mode": { "type": "string", "enum": ["hybrid", "keyword", "semantic"], "default": "hybrid", "description": "hybrid=키워드+벡터 RRF 병합(기본), keyword=BM25만(정확한 용어·파일명 찾기, 임베딩 호출 없음), semantic=벡터만(풀어 쓴 질문). 임베딩이 1.5초 안에 안 오면 키워드 결과만 주고 semantic 필드에 timeout 으로 표시" }
                 },
                 "required": ["query"],
                 "additionalProperties": false
             }
         }),
         json!({
-            "name": "danbi_read",
-            "description": "특정 프로젝트/도메인 파일의 전체 markdown 내용을 반환합니다.",
+            "name": "danbi_context",
+            "description": "질문 하나로 답에 필요한 맥락을 한 번에 가져옵니다. 하이브리드 검색 상위 문서에서 질문과 관련된 섹션만 글자 예산 안에서 잘라 주고, 그 문서들에 [[위키링크]]로 연결된 문서 목록도 같이 줍니다. search → read 를 여러 번 반복하는 대신 먼저 이걸 부르세요. 전체 본문이 필요하면 그다음 danbi_read.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "질문 또는 키워드" },
+                    "limit": { "type": "integer", "default": 4, "description": "가져올 문서 수 (1~10)" },
+                    "max_chars": { "type": "integer", "default": 8000, "description": "본문 발췌 총 글자 예산 (1000~40000)" }
+                },
+                "required": ["query"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_related",
+            "description": "문서 하나와 연결된 모든 것을 돌려줍니다: 이 문서가 거는 [[링크]], 이 문서를 거는 백링크(다른 프로젝트 포함), 링크는 없지만 내용상 가까운 문서(soft·ghost, 점수순), 같은 주제 묶음(community) 문서. 읽은 문서에서 맥락을 넓힐 때 쓰세요.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": { "type": "string" },
-                    "domain": { "type": "string", "description": ".md로 끝나는 파일명" }
+                    "domain": { "type": "string", "description": ".md로 끝나는 파일명 (하위 폴더면 notes/x.md 형태)" },
+                    "limit": { "type": "integer", "default": 10, "description": "related 최대 개수" }
+                },
+                "required": ["project", "domain"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_read",
+            "description": "특정 프로젝트/도메인 파일의 markdown 본문. 첫 줄은 메타 주석(bytes·chars·modified·links_in). 큰 문서는 heading 으로 섹션만, 또는 max_chars/offset 으로 나눠 읽으세요 — 잘리면 메타 주석에 다음 offset 이 적혀 있습니다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "domain": { "type": "string", "description": ".md로 끝나는 파일명 (하위 폴더면 notes/x.md 형태)" },
+                    "heading": { "type": "string", "description": "이 markdown 헤딩의 섹션만 (예: \"## 결정\" 또는 \"결정\")" },
+                    "max_chars": { "type": "integer", "description": "본문 최대 글자 수 (기본 전체, 최소 200)" },
+                    "offset": { "type": "integer", "default": 0, "description": "본문 시작 글자 위치 — 이어 읽기용" }
                 },
                 "required": ["project", "domain"],
                 "additionalProperties": false
@@ -798,12 +1044,13 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "danbi_log",
-            "description": "지정한 프로젝트의 오늘 daily/YYYY-MM-DD.md 파일에 새 문단을 append합니다. LLM 없이 빠르게 실행됩니다.",
+            "description": "지정한 프로젝트의 오늘 daily/YYYY-MM-DD.md 파일에 새 문단을 append합니다. 시각·호출자 머리말이 자동으로 붙고, 같은 날 같은 본문을 다시 보내면 쓰지 않고 deduped:true 를 돌려줍니다. 응답의 commit 이 null 이고 warning 이 있으면 파일은 저장된 것이니 재시도하지 마세요.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": { "type": "string" },
-                    "content": { "type": "string", "description": "추가할 markdown" }
+                    "content": { "type": "string", "description": "추가할 markdown. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결" },
+                    "stamp": { "type": "boolean", "default": true, "description": "false 면 자동 시각·호출자 줄(`_HH:MM · client_`)을 붙이지 않음" }
                 },
                 "required": ["project", "content"],
                 "additionalProperties": false
@@ -904,21 +1151,25 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "danbi_recent",
-            "description": "최근 수정된 도메인 파일 목록 (기본 10개).",
+            "description": "최근 수정된 문서 목록 (기본 10개, 하위 폴더 포함). daily 노트는 기본 제외.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "limit": { "type": "integer", "default": 10 }
+                    "limit": { "type": "integer", "default": 10 },
+                    "project": { "type": "string", "description": "이 프로젝트만. 생략하면 vault 전체" },
+                    "exclude_daily": { "type": "boolean", "default": true, "description": "false 면 daily/ 노트도 포함" }
                 },
                 "additionalProperties": false
             }
         }),
         json!({
             "name": "danbi_briefing",
-            "description": "단비 vault의 현재 상태 요약. 세션 시작 시 한 번 호출해서 최근 활동·제안·고아 파일을 한눈에 파악하세요. ghost 제안·healing 경고·7일 활동·오늘의 daily 노트가 한 JSON으로 돌아옵니다.",
+            "description": "세션 시작용 상태 요약 한 JSON: 오늘 daily 노트, 7일 활동(기록 수·최근 요약), 정리 제안 건수와 상위 10건, 미확정 링크 제안. project 를 주면 그 프로젝트만 (훨씬 짧음).",
             "inputSchema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "project": { "type": "string", "description": "이 프로젝트만. 생략하면 vault 전체" }
+                },
                 "additionalProperties": false
             }
         }),
@@ -927,7 +1178,9 @@ fn tool_catalog() -> Vec<Value> {
             "description": "오늘 daily 노트 + 회상(1주·1개월·1년 전 같은 날짜 노트)을 반환합니다. '그때 비슷한 걸 뭐 적었지?' 류 질문에 쓰세요.",
             "inputSchema": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "project": { "type": "string", "description": "이 프로젝트만. 생략하면 vault 전체" }
+                },
                 "additionalProperties": false
             }
         }),
@@ -972,7 +1225,9 @@ fn identify_projects_for_banner(
     // For search/recent results, the top hit's project is a strong
     // signal — the user is clearly working in that area right now.
     if matches!(name, "danbi_search" | "danbi_recent") {
-        if let Some(arr) = parsed_result.and_then(|v| v.as_array()) {
+        // `danbi_search` is an object with a `hits` array; `danbi_recent` a bare array.
+        let arr = parsed_result.and_then(|v| v.as_array().or_else(|| v.get("hits").and_then(|h| h.as_array())));
+        if let Some(arr) = arr {
             if let Some(first) = arr.first() {
                 if let Some(p) = first.get("project").and_then(|v| v.as_str()) {
                     push(p);
@@ -1047,37 +1302,216 @@ fn inject_active_goals_into_text(
 /// 있으면 BM25 + 벡터 검색을 RRF 로 병합해서 외부 AI 의 자연어 쿼리도
 /// 정확히 잡아낸다. rate-limit / network 실패 시 BM25 결과로 자동
 /// fallback — Claude Code 가 절대 빈 결과를 받지 않게.
-async fn search_hybrid_dispatch(args: Value) -> Result<String, DanbiError> {
+async fn search_hybrid_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
     let vault_path = current_vault_path()?;
-    let query = args
-        .get("query")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| DanbiError::Config("query required".into()))?
-        .to_string();
+    let query = string_arg(&args, "query")?;
     let limit = args
         .get("limit")
         .and_then(|v| v.as_u64())
         .unwrap_or(8) as usize;
+    let project = opt_string_arg(&args, "project");
+    if let Some(p) = project.as_deref() {
+        require_project(&vault_path, p)?;
+    }
+    let mode = search::SearchMode::parse(args.get("mode").and_then(|v| v.as_str()))?;
 
-    // cfg 의 embed provider 로 query 를 임베딩한다. 키 없거나 호출 실패
-    // 면 None — `full_search_hybrid` 가 BM25 only 로 graceful fallback.
-    let embedding: Option<Vec<f32>> = match crate::config::load_config(&vault_path)? {
-        Some(c) => crate::commands::embed_query_for_search(&c, &query).await,
-        None => None,
-    };
-
-    let hits =
-        search::full_search_hybrid(&vault_path, &query, limit, embedding.as_deref())?;
-    Ok(serde_json::to_string_pretty(&hits)?)
+    let q = query_embedding(&vault_path, &query, mode).await?;
+    // A project filter is applied after fusion, so ask for more.
+    let depth = if project.is_some() { limit.saturating_mul(4) } else { limit };
+    let mut hits =
+        search::full_search_mode(&vault_path, &query, depth, q.embedding.as_deref(), mode)?;
+    if let Some(p) = project.as_deref() {
+        hits.retain(|h| h.project == p);
+        hits.truncate(limit);
+    }
+    // 배열 → 객체: 벡터 arm 이 돌았는지(used/cached/off/timeout/error) 와
+    // 혼재 경고를 같이 줘야 에이전트가 "키워드 결과만" 임을 알고 재시도를
+    // 판단한다.
+    let mut out = json!({ "hits": hits, "mode": mode, "semantic": q.semantic });
+    if let Some(note) = q.note {
+        out["note"] = json!(note);
+    }
+    if let Some(w) = semantic_arm_warning(&vault_path, q.embedding.is_some()) {
+        out["warning"] = json!(w);
+    }
+    Ok(Dispatched {
+        text: serde_json::to_string_pretty(&out)?,
+        warning: None,
+    })
 }
 
-fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
+/// A tool result plus an optional warning that travels outside the
+/// result body (second MCP content block / top-level REST field) for
+/// tools whose result shape can't carry one. `danbi_search` now returns
+/// an object and puts the notice in its own `warning` key instead.
+struct Dispatched {
+    text: String,
+    warning: Option<String>,
+}
+
+/// When the semantic arm ran against a mixed index, say how many docs it
+/// could not see (bug #6: cosine over mismatched dimensions is a silent 0).
+fn semantic_arm_warning(vault_path: &std::path::Path, used_embedding: bool) -> Option<String> {
+    if !used_embedding {
+        return None;
+    }
+    let counts = crate::vector::cached_model_counts(vault_path);
+    if counts.is_empty() {
+        return None;
+    }
+    let configured = config::load_config(vault_path)
+        .ok()
+        .flatten()
+        .and_then(|cfg| configured_embed_model(&cfg));
+    let status = crate::vector::model_status(&counts, configured.as_deref());
+    status.mixed.then(|| {
+        format!(
+            "의미 검색 결과에서 문서 {}개가 빠졌어요 (다른 임베딩 모델로 색인됨 — 키워드 검색에는 잡힘). 단비 설정 → AI 연동에서 전체 재색인이 필요해요.",
+            status.other_count
+        )
+    })
+}
+
+/// Routes the tools that need async work (query embedding) and falls
+/// through to the sync `dispatch` for everything else. Both the JSON-RPC
+/// and REST paths call this so they can't drift apart.
+async fn dispatch_any(name: &str, args: Value) -> Result<Dispatched, DanbiError> {
+    match name {
+        "danbi_search" => search_hybrid_dispatch(args).await,
+        "danbi_context" => context_dispatch(args).await,
+        _ => {
+            // Writes take the vault lock and stage the whole tree; keep that
+            // off the async workers so reads, health and the session-brief
+            // hook don't queue behind a burst of agent writes.
+            let name = name.to_string();
+            tokio::task::spawn_blocking(move || dispatch(&name, args))
+                .await
+                .map_err(|e| DanbiError::Other(format!("dispatch join: {e}")))?
+                .map(|text| Dispatched { text, warning: None })
+        }
+    }
+}
+
+/// cfg 의 embed provider 로 query 를 임베딩한다. 키 없거나 호출 실패·
+/// 1.5초 타임아웃이면 `embedding: None` + 사유 — `full_search_mode` 가
+/// BM25 only 로 graceful fallback.
+async fn query_embedding(
+    vault_path: &std::path::Path,
+    query: &str,
+    mode: search::SearchMode,
+) -> Result<crate::commands::QueryEmbedding, DanbiError> {
+    Ok(match crate::config::load_config(vault_path)? {
+        Some(c) => crate::commands::embed_query(&c, query, mode).await,
+        None => crate::commands::QueryEmbedding { embedding: None, semantic: "off", note: None },
+    })
+}
+
+const CONTEXT_MAX_LINKED: usize = 10;
+
+/// `danbi_context`: hybrid search → per-hit focused excerpt within a char
+/// budget → wiki-link neighbours of the hits. One call replaces the usual
+/// search → read → read chain.
+async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
     let vault_path = current_vault_path()?;
+    let query = string_arg(&args, "query")?;
+    let limit = args
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(4)
+        .clamp(1, 10) as usize;
+    let budget = args
+        .get("max_chars")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8000)
+        .clamp(1000, 40000) as usize;
+
+    let q = query_embedding(&vault_path, &query, search::SearchMode::Hybrid).await?;
+    let hits =
+        search::full_search_hybrid(&vault_path, &query, limit, q.embedding.as_deref())?;
+
+    let per_doc = budget / hits.len().max(1);
+    let mut used = 0usize;
+    let mut docs = Vec::with_capacity(hits.len());
+    for hit in &hits {
+        let md = vault::read_doc(&vault_path, &hit.project, &hit.domain)?;
+        let (excerpt, complete) = search::focused_excerpt(&md, &query, per_doc);
+        used += excerpt.chars().count();
+        docs.push(json!({
+            "project": hit.project,
+            "domain": hit.domain,
+            "matched": hit.matched,
+            "relevance": hit.relevance,
+            "total_chars": md.chars().count(),
+            "complete": complete,
+            "excerpt": excerpt,
+        }));
+    }
+
+    let hit_keys: std::collections::HashSet<String> = hits
+        .iter()
+        .map(|h| format!("{}/{}", h.project, h.domain))
+        .collect();
+    let index = crate::links::build_index_cached(&vault_path)?;
+    let existing = crate::graph::existing_doc_ids_cached(&vault_path)?;
+    let mut seen = hit_keys.clone();
+    let mut linked = Vec::new();
+    'outer: for key in hits.iter().map(|h| format!("{}/{}", h.project, h.domain)) {
+        let out = index.outgoing.get(&key).into_iter().flatten();
+        let inc = index.incoming.get(&key).into_iter().flatten();
+        for (dir, l) in out.map(|l| ("links_to", l)).chain(inc.map(|l| ("linked_from", l))) {
+            let k = format!("{}/{}", l.project, l.domain);
+            if !existing.contains(&k) || !seen.insert(k) {
+                continue;
+            }
+            linked.push(json!({
+                "project": l.project,
+                "domain": l.domain,
+                "via": key,
+                "direction": dir,
+            }));
+            if linked.len() >= CONTEXT_MAX_LINKED {
+                break 'outer;
+            }
+        }
+    }
+
+    let mut out = json!({
+        "query": query,
+        "used_chars": used,
+        "docs": docs,
+        "linked": linked,
+        "hint": "전체 본문은 danbi_read, 한 문서의 주변 연결은 danbi_related",
+    });
+    // Object result → the warning fits inside it.
+    if let Some(w) = semantic_arm_warning(&vault_path, q.embedding.is_some()) {
+        out["warning"] = Value::String(w);
+    }
+    Ok(Dispatched {
+        text: serde_json::to_string_pretty(&out)?,
+        warning: None,
+    })
+}
+
+pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
+    let vault_path = current_vault_path()?;
+    dispatch_in(&vault_path, name, args)
+}
+
+/// `dispatch` against an explicit vault — what the tests drive.
+fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<String, DanbiError> {
+    let vault_path = vault_path.to_path_buf();
+    // One writer at a time across MCP, REST and the popover: the read →
+    // edit → write → commit sequence below must not interleave.
+    let _write_guard = is_write_tool(name).then(vcs::write_guard);
+    let client = client_of(&args);
 
     match name {
         "danbi_list_projects" => {
-            let tree = vault::list_tree(&vault_path)?;
-            Ok(serde_json::to_string_pretty(&tree)?)
+            let project = opt_string_arg(&args, "project");
+            let include_daily = bool_arg(&args, "include_daily", false);
+            let titles = bool_arg(&args, "titles", false);
+            let out = list_projects(&vault_path, project.as_deref(), include_daily, titles)?;
+            Ok(rows_json(&out))
         }
         "danbi_search" => {
             let query = args
@@ -1095,52 +1529,88 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
         "danbi_read" => {
             let project = string_arg(&args, "project")?;
             let domain = string_arg(&args, "domain")?;
-            Ok(vault::read_doc(&vault_path, &project, &domain)?)
+            let heading = opt_string_arg(&args, "heading");
+            let max_chars = args
+                .get("max_chars")
+                .and_then(|v| v.as_u64())
+                .map(|n| (n as usize).max(200));
+            let offset = args.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            read_doc_tool(&vault_path, &project, &domain, heading.as_deref(), max_chars, offset)
+        }
+        "danbi_related" => {
+            let project = string_arg(&args, "project")?;
+            let mut domain = string_arg(&args, "domain")?;
+            if !domain.to_lowercase().ends_with(".md") {
+                domain.push_str(".md");
+            }
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10)
+                .clamp(1, 50) as usize;
+            let out = crate::graph::related(&vault_path, &project, &domain, limit)?;
+            Ok(serde_json::to_string_pretty(&out)?)
         }
         "danbi_log" => {
             let project = string_arg(&args, "project")?;
             let content = string_arg(&args, "content")?;
-            // Make sure project exists; refuse silent side effects.
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
+            require_project(&vault_path, &project)?;
+            let body = content.trim();
+            if body.is_empty() {
+                return Err(DanbiError::Config(
+                    "content 가 비어 있어요. 기록할 markdown 을 주세요 (예: \"### 결정\\n- JWT refresh 7일\").".into(),
+                ));
             }
             let domain = daily::ensure_today_note(&vault_path, &project)?;
             let current = vault::read_doc(&vault_path, &project, &domain)?;
-            let op = EditOp::Append {
-                content: content.clone(),
+            // Same body twice on the same day (an agent retrying, two
+            // agents told the same thing) → acknowledge, don't duplicate.
+            if log_is_duplicate(&current, body) {
+                return Ok(json!({
+                    "project": project,
+                    "domain": domain,
+                    "deduped": true,
+                    "commit": Value::Null,
+                    "bytes": current.len(),
+                })
+                .to_string());
+            }
+            let stamp = args.get("stamp").and_then(|v| v.as_bool()).unwrap_or(true);
+            let stamp_client = args.get("_client").and_then(|v| v.as_str());
+            let entry = if stamp {
+                stamp_entry(body, &log_stamp(Local::now().format("%H:%M").to_string(), stamp_client))
+            } else {
+                body.to_string()
             };
+            let op = EditOp::Append { content: entry };
             edit_ops::validate(&op)?;
             let next = edit_ops::apply(&current, &op)?;
 
             vcs::ensure_repo(&vault_path)?;
             let _ = vcs::snapshot(&vault_path, &format!("danbi: mcp log · {project}/{domain} (pre)"));
             vault::write_doc(&vault_path, &project, &domain, &next)?;
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp log · {project}/{domain}"),
-            )?;
-            Ok(json!({
-                "project": project,
-                "domain": domain,
-                "commit": commit,
-                "bytes": next.len(),
-            })
-            .to_string())
+            &client,
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain,
+                    "stamped": stamp,
+                    "bytes": next.len(),
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_append" => {
             let project = string_arg(&args, "project")?;
             let domain = string_arg(&args, "domain")?;
             let content = string_arg(&args, "content")?;
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
-            let domain_norm = if domain.to_lowercase().ends_with(".md") {
-                domain.clone()
-            } else {
-                format!("{domain}.md")
-            };
+            require_project(&vault_path, &project)?;
+            let domain_norm = normalize_md(&domain);
             let current =
                 vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
             let op = EditOp::Append { content };
@@ -1155,32 +1625,28 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             // Create-on-demand so /mcp writers can target new files.
             let _ = vault::create_domain(&vault_path, &project, &domain_norm);
             vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp append · {project}/{domain_norm}"),
-            )?;
-            Ok(json!({
-                "project": project,
-                "domain": domain_norm,
-                "commit": commit,
-                "bytes": next.len(),
-            })
-            .to_string())
+            &client,
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain_norm,
+                    "bytes": next.len(),
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_replace_section" => {
             let project = string_arg(&args, "project")?;
             let domain = string_arg(&args, "domain")?;
             let heading = string_arg(&args, "heading")?;
             let new_body = string_arg(&args, "new_body")?;
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
-            let domain_norm = if domain.to_lowercase().ends_with(".md") {
-                domain.clone()
-            } else {
-                format!("{domain}.md")
-            };
+            require_project(&vault_path, &project)?;
+            let domain_norm = normalize_md(&domain);
             let current =
                 vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
             let op = EditOp::ReplaceSection {
@@ -1199,20 +1665,23 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             );
             let _ = vault::create_domain(&vault_path, &project, &domain_norm);
             vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!(
                     "danbi: mcp replace_section · {project}/{domain_norm} · {heading}"
                 ),
-            )?;
-            Ok(json!({
-                "project": project,
-                "domain": domain_norm,
-                "heading": heading,
-                "commit": commit,
-                "bytes": next.len(),
-            })
-            .to_string())
+            &client,
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain_norm,
+                    "heading": heading,
+                    "bytes": next.len(),
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_upsert_item" => {
             let project = string_arg(&args, "project")?;
@@ -1220,15 +1689,8 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             let heading = string_arg(&args, "heading")?;
             let key = string_arg(&args, "key")?;
             let item = string_arg(&args, "item")?;
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
-            let domain_norm = if domain.to_lowercase().ends_with(".md") {
-                domain.clone()
-            } else {
-                format!("{domain}.md")
-            };
+            require_project(&vault_path, &project)?;
+            let domain_norm = normalize_md(&domain);
             let current =
                 vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
             // Detect whether the key already lives in the section so we can
@@ -1252,22 +1714,25 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             );
             let _ = vault::create_domain(&vault_path, &project, &domain_norm);
             vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!(
                     "danbi: mcp upsert_item · {project}/{domain_norm} · {mode} · {key}"
                 ),
-            )?;
-            Ok(json!({
-                "project": project,
-                "domain": domain_norm,
-                "heading": heading,
-                "key": key,
-                "mode": mode,
-                "commit": commit,
-                "bytes": next.len(),
-            })
-            .to_string())
+            &client,
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain_norm,
+                    "heading": heading,
+                    "key": key,
+                    "mode": mode,
+                    "bytes": next.len(),
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_create_file" => {
             // Convenience for "make sure this folder + file exist, here's
@@ -1281,15 +1746,8 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
-            let domain_norm = if domain.to_lowercase().ends_with(".md") {
-                domain.clone()
-            } else {
-                format!("{domain}.md")
-            };
+            require_project(&vault_path, &project)?;
+            let domain_norm = normalize_md(&domain);
 
             vcs::ensure_repo(&vault_path)?;
             let _ = vcs::snapshot(
@@ -1332,29 +1790,29 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
                 vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
             }
 
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp create_file · {project}/{domain_norm}"),
-            )?;
+            &client,
+            );
             let final_bytes = vault::read_doc(&vault_path, &project, &domain_norm)
                 .unwrap_or_default()
                 .len();
-            Ok(json!({
-                "project": project,
-                "domain": domain_norm,
-                "commit": commit,
-                "bytes": final_bytes,
-                "already_existed": already_existed,
-            })
-            .to_string())
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain_norm,
+                    "bytes": final_bytes,
+                    "already_existed": already_existed,
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_create_folder" => {
             let project = string_arg(&args, "project")?;
             let folder = string_arg(&args, "folder")?;
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
+            require_project(&vault_path, &project)?;
             vcs::ensure_repo(&vault_path)?;
             let _ = vcs::snapshot(
                 &vault_path,
@@ -1370,26 +1828,37 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             if !placeholder_path.exists() {
                 let _ = std::fs::write(&placeholder_path, b"");
             }
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp create_folder · {project}/{folder}"),
-            )?;
-            Ok(json!({
-                "project": project,
-                "folder": folder,
-                "commit": commit,
-            })
-            .to_string())
+            &client,
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "folder": folder,
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_recent" => {
             let limit = args
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(10) as usize;
-            let tree = vault::list_tree(&vault_path)?;
+            let project = opt_string_arg(&args, "project");
+            let exclude_daily = bool_arg(&args, "exclude_daily", true);
+            let tree = vault::list_tree_with(&vault_path, false)?;
             let mut all: Vec<(String, String, u128)> = Vec::new();
             for p in &tree.projects {
-                for d in &p.domains {
+                if project.as_deref().map(|want| want != p.name).unwrap_or(false) {
+                    continue;
+                }
+                for d in flatten_domains(p) {
+                    if exclude_daily && is_daily_domain(&d.name) {
+                        continue;
+                    }
                     all.push((
                         p.name.clone(),
                         d.name.clone(),
@@ -1406,11 +1875,28 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             Ok(serde_json::to_string_pretty(&trimmed)?)
         }
         "danbi_briefing" => {
-            let snap = dashboard::snapshot(&vault_path)?;
-            Ok(serde_json::to_string_pretty(&snap)?)
+            let project = opt_string_arg(&args, "project");
+            if let Some(p) = project.as_deref() {
+                require_project(&vault_path, p)?;
+            }
+            let mut snap = dashboard::briefing(&vault_path, project.as_deref())?;
+            snap.vector_warning = vector_mixed_warning(&vault_path);
+            Ok(rows_json(&serde_json::to_value(&snap)?))
         }
         "danbi_daily" => {
-            let snap = daily::snapshot(&vault_path)?;
+            let project = opt_string_arg(&args, "project");
+            let mut snap = daily::snapshot(&vault_path)?;
+            if let Some(p) = project.as_deref() {
+                require_project(&vault_path, p)?;
+                for list in [
+                    &mut snap.today_notes,
+                    &mut snap.one_week_ago,
+                    &mut snap.one_month_ago,
+                    &mut snap.one_year_ago,
+                ] {
+                    list.retain(|n| n.project == p);
+                }
+            }
             Ok(serde_json::to_string_pretty(&snap)?)
         }
         other => Err(DanbiError::Config(format!("unknown tool: {other}"))),
@@ -1420,17 +1906,18 @@ fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
 /// Write tools mutate vault state and must stay clamped to the scoped
 /// project. Read tools return information only and are safe to cross
 /// project boundaries.
-fn is_write_tool(name: &str) -> bool {
-    matches!(
-        name,
-        "danbi_log"
-            | "danbi_append"
-            | "danbi_create_folder"
-            | "danbi_create_file"
-            | "danbi_replace_section"
-            | "danbi_upsert_item"
-    )
+pub(crate) fn is_write_tool(name: &str) -> bool {
+    WRITE_TOOLS.contains(&name)
 }
+
+pub(crate) const WRITE_TOOLS: [&str; 6] = [
+    "danbi_log",
+    "danbi_append",
+    "danbi_create_folder",
+    "danbi_create_file",
+    "danbi_replace_section",
+    "danbi_upsert_item",
+];
 
 /// Snapshot of a write-tool invocation that we'll need *after* dispatch
 /// has consumed `args`. We pull these out before dispatch so the post-
@@ -1531,14 +2018,496 @@ fn record_inbound_after_success(
     );
 }
 
+// ---------- Read helpers ----------
+
+/// JSON for list-shaped tool output: objects stay indented so the agent
+/// can see the structure, but every array of objects is written one
+/// compact row per line. Pretty-printing 30 project rows costs ~3× the
+/// characters for no extra information.
+fn rows_json(v: &Value) -> String {
+    fn render(v: &Value, indent: usize, out: &mut String) {
+        let pad = " ".repeat(indent);
+        match v {
+            Value::Object(map) if !map.is_empty() => {
+                out.push_str("{\n");
+                let n = map.len();
+                for (i, (k, val)) in map.iter().enumerate() {
+                    out.push_str(&pad);
+                    out.push_str("  ");
+                    out.push_str(&Value::String(k.clone()).to_string());
+                    out.push_str(": ");
+                    render(val, indent + 2, out);
+                    out.push_str(if i + 1 < n { ",\n" } else { "\n" });
+                }
+                out.push_str(&pad);
+                out.push('}');
+            }
+            Value::Array(arr) if arr.iter().any(|x| x.is_object()) => {
+                out.push_str("[\n");
+                let n = arr.len();
+                for (i, row) in arr.iter().enumerate() {
+                    out.push_str(&pad);
+                    out.push_str("  ");
+                    out.push_str(&row.to_string());
+                    out.push_str(if i + 1 < n { ",\n" } else { "\n" });
+                }
+                out.push_str(&pad);
+                out.push(']');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+    let mut out = String::new();
+    render(v, 0, &mut out);
+    out
+}
+
+/// On a project-scoped endpoint: write tools are always clamped to the
+/// project (whatever the caller sent), the session-oriented read tools
+/// get it as a default when `project` is absent.
+fn clamp_or_default_project(tool: &str, args: &mut Value, project: &str) {
+    let clamp = is_write_tool(tool);
+    let default = SCOPED_DEFAULT_PROJECT_TOOLS.contains(&tool);
+    if !clamp && !default {
+        return;
+    }
+    if !args.is_object() {
+        *args = Value::Object(serde_json::Map::new());
+    }
+    let map = args.as_object_mut().expect("object");
+    if clamp || !map.get("project").and_then(|v| v.as_str()).is_some_and(|s| !s.trim().is_empty()) {
+        map.insert("project".into(), Value::String(project.to_string()));
+    }
+}
+
+fn opt_string_arg(args: &Value, key: &str) -> Option<String> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn bool_arg(args: &Value, key: &str, default: bool) -> bool {
+    args.get(key).and_then(|v| v.as_bool()).unwrap_or(default)
+}
+
+fn is_daily_domain(domain: &str) -> bool {
+    domain.starts_with(&format!("{}/", daily::DAILY_DIRNAME))
+}
+
+/// Every markdown file of a project, top-level and nested subfolders.
+fn flatten_domains(p: &vault::ProjectNode) -> Vec<&vault::DomainNode> {
+    fn walk<'a>(subs: &'a [vault::SubfolderNode], out: &mut Vec<&'a vault::DomainNode>) {
+        for s in subs {
+            out.extend(s.domains.iter());
+            walk(&s.subfolders, out);
+        }
+    }
+    let mut out: Vec<&vault::DomainNode> = p.domains.iter().collect();
+    walk(&p.subfolders, &mut out);
+    out
+}
+
+/// `danbi_list_projects`. Default: one short row per project (name, file
+/// count, last change, top-level file names, per-folder counts). With
+/// `project`: that project's full file tree, daily notes only on
+/// `include_daily`, heading sniff only on `titles`.
+fn list_projects(
+    vault_path: &std::path::Path,
+    project: Option<&str>,
+    include_daily: bool,
+    titles: bool,
+) -> Result<Value, DanbiError> {
+    let tree = vault::list_tree_with(vault_path, titles && project.is_some())?;
+    let Some(want) = project else {
+        let rows: Vec<Value> = tree
+            .projects
+            .iter()
+            .map(|p| {
+                let docs = flatten_domains(p);
+                let mut folders = serde_json::Map::new();
+                fn count(subs: &[vault::SubfolderNode], out: &mut serde_json::Map<String, Value>) {
+                    for s in subs {
+                        let n: usize = s.domains.len();
+                        if n > 0 || !s.subfolders.is_empty() {
+                            out.insert(s.name.clone(), json!(n));
+                        }
+                        count(&s.subfolders, out);
+                    }
+                }
+                count(&p.subfolders, &mut folders);
+                json!({
+                    "name": p.name,
+                    "files": docs.len(),
+                    "last_modified_ms": docs.iter().filter_map(|d| d.modified_ms).max(),
+                    "top_level": p.domains.iter().map(|d| d.name.clone()).collect::<Vec<_>>(),
+                    "folders": folders,
+                })
+            })
+            .collect();
+        return Ok(json!({
+            "projects": rows,
+            "hint": "한 프로젝트의 파일 전체는 danbi_list_projects(project=\"이름\", include_daily?, titles?)",
+        }));
+    };
+    let node = tree
+        .projects
+        .iter()
+        .find(|p| p.name == want)
+        .ok_or_else(|| unknown_project_error(vault_path, want))?;
+    let mut node = node.clone();
+    if !include_daily {
+        node.subfolders.retain(|s| !is_daily_domain(&format!("{}/", s.name)));
+    }
+    let files = flatten_domains(&node).len();
+    let daily_count = flatten_domains(node_ref(&tree, want)).iter().filter(|d| is_daily_domain(&d.name)).count();
+    let mut out = serde_json::to_value(&node)?;
+    if let Value::Object(ref mut map) = out {
+        map.insert("files".into(), json!(files));
+        map.insert("daily_notes".into(), json!(daily_count));
+        if !include_daily && daily_count > 0 {
+            map.insert("hint".into(), json!("daily 노트는 include_daily=true 로, 오늘·회상은 danbi_daily(project)"));
+        }
+    }
+    Ok(out)
+}
+
+fn node_ref<'a>(tree: &'a vault::VaultTree, name: &str) -> &'a vault::ProjectNode {
+    tree.projects.iter().find(|p| p.name == name).expect("checked above")
+}
+
+/// One-line warning when the vector index mixes embedding models, None
+/// when it is consistent or there is no index at all.
+fn vector_mixed_warning(vault_path: &std::path::Path) -> Option<String> {
+    let counts = crate::vector::cached_model_counts(vault_path);
+    if counts.is_empty() {
+        return None;
+    }
+    let configured = config::load_config(vault_path)
+        .ok()
+        .flatten()
+        .and_then(|cfg| configured_embed_model(&cfg));
+    let status = crate::vector::model_status(&counts, configured.as_deref());
+    crate::vector::mixed_warning(&status)
+}
+
+/// The embedding model a query would use right now, None when no embed
+/// provider/model is configured.
+pub(crate) fn configured_embed_model(cfg: &DanbiConfig) -> Option<String> {
+    let provider = crate::commands::resolve_embed_provider(cfg).ok()?;
+    let model = crate::commands::resolve_embed_model(cfg, provider.as_ref(), None);
+    (!model.trim().is_empty()).then_some(model)
+}
+
+/// `danbi_read`: metadata comment + (a section of) the document, cut to a
+/// character window. Missing files are an error with name suggestions
+/// rather than an empty string the agent would mistake for an empty doc.
+fn read_doc_tool(
+    vault_path: &std::path::Path,
+    project: &str,
+    domain: &str,
+    heading: Option<&str>,
+    max_chars: Option<usize>,
+    offset: usize,
+) -> Result<String, DanbiError> {
+    require_project(vault_path, project)?;
+    let domain_norm = normalize_md(domain);
+    let Some((md, meta)) = vault::read_doc_opt(vault_path, project, &domain_norm)? else {
+        return Err(doc_not_found_error(vault_path, project, &domain_norm));
+    };
+
+    // Section cut first, then the char window applies to the section.
+    let (body, section_note) = match heading {
+        None => (md.as_str(), String::new()),
+        Some(h) => {
+            let lines: Vec<&str> = md.lines().collect();
+            match edit_ops::locate_section(&lines, h) {
+                Some((start, end)) => {
+                    let section = line_span(&md, start, end);
+                    (section, format!(" · section \"{}\"", h.trim()))
+                }
+                None => {
+                    let headings: Vec<String> = lines
+                        .iter()
+                        .filter(|l| l.starts_with('#'))
+                        .map(|l| l.trim().to_string())
+                        .take(20)
+                        .collect();
+                    return Err(DanbiError::Config(format!(
+                        "heading not found: {h}. 이 문서의 헤딩: {}",
+                        if headings.is_empty() { "(없음)".to_string() } else { headings.join(" | ") }
+                    )));
+                }
+            }
+        }
+    };
+
+    let total = body.chars().count();
+    let start = offset.min(total);
+    let take = max_chars.unwrap_or(usize::MAX);
+    let window: String = body.chars().skip(start).take(take).collect();
+    let end = start + window.chars().count();
+    let range_note = if start > 0 || end < total {
+        let more = if end < total {
+            format!(", 이어 읽기: offset={end}")
+        } else {
+            String::new()
+        };
+        format!(" · chars {start}..{end} of {total}{more}")
+    } else {
+        String::new()
+    };
+
+    let modified = meta
+        .modified()
+        .ok()
+        .map(|t| chrono::DateTime::<Local>::from(t).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "?".into());
+    let links_in = crate::links::build_index_cached(vault_path)
+        .map(|idx| {
+            idx.incoming
+                .get(&format!("{project}/{domain_norm}"))
+                .map(|v| v.len())
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    Ok(format!(
+        "<!-- danbi: {project}/{domain_norm} · {} bytes · {} chars · modified {modified} · links_in {links_in}{section_note}{range_note} -->\n{window}",
+        meta.len(),
+        md.chars().count(),
+    ))
+}
+
+/// Text of lines `[start, end)` of `md`, newlines preserved.
+fn line_span(md: &str, start: usize, end: usize) -> &str {
+    let mut offsets = Vec::new();
+    let mut pos = 0usize;
+    for line in md.split_inclusive('\n') {
+        offsets.push(pos);
+        pos += line.len();
+    }
+    offsets.push(pos);
+    let a = offsets.get(start).copied().unwrap_or(md.len());
+    let b = offsets.get(end).copied().unwrap_or(md.len());
+    &md[a..b]
+}
+
+fn doc_not_found_error(vault_path: &std::path::Path, project: &str, domain: &str) -> DanbiError {
+    let names: Vec<String> = vault::list_tree_with(vault_path, false)
+        .ok()
+        .and_then(|t| t.projects.into_iter().find(|p| p.name == project))
+        .map(|p| flatten_domains(&p).iter().map(|d| d.name.clone()).collect())
+        .unwrap_or_default();
+    let similar = closest_names(domain, &names, 3);
+    let mut msg = format!("not found: {project}/{domain}.");
+    if !similar.is_empty() {
+        msg.push_str(&format!(" 혹시 {}?", similar.join(" / ")));
+    }
+    msg.push_str(&format!(
+        " 파일 목록은 danbi_list_projects(project=\"{project}\"), 새로 만들려면 danbi_create_file."
+    ));
+    DanbiError::Config(msg)
+}
+
+// ---------- Write helpers ----------
+
+/// Write tools stamp the calling client on their commit (and `danbi_log`
+/// on the entry itself); the name is derived from the User-Agent here and
+/// passed down as a private arg so the sync dispatcher stays header-free.
+fn attach_client(tool: &str, args: &mut Value, user_agent: Option<&str>) {
+    if !is_write_tool(tool) {
+        return;
+    }
+    if let Value::Object(map) = args {
+        let client = crate::usage::classify_user_agent(user_agent);
+        map.insert("_client".into(), Value::String(client.to_string()));
+    }
+}
+
+/// Origin token for the commit: the UA bucket the caller attached, or
+/// `agent` when the request came without one (direct `dispatch` callers
+/// pass their own, e.g. `danbi` for the session-end summary).
+fn client_of(args: &Value) -> String {
+    vcs::client_token(args.get("_client").and_then(|v| v.as_str()).unwrap_or(""))
+}
+
+fn normalize_md(domain: &str) -> String {
+    if domain.to_lowercase().ends_with(".md") {
+        domain.to_string()
+    } else {
+        format!("{domain}.md")
+    }
+}
+
+/// Existence check by directory, not `list_tree` (which opens every
+/// markdown file). Unknown names come back with the closest matches and
+/// the full list so the agent can fix a typo without another round trip.
+fn require_project(vault: &std::path::Path, project: &str) -> Result<(), DanbiError> {
+    if vault::project_exists(vault, project) {
+        return Ok(());
+    }
+    Err(unknown_project_error(vault, project))
+}
+
+fn unknown_project_error(vault: &std::path::Path, project: &str) -> DanbiError {
+    let names = vault::project_names(vault).unwrap_or_default();
+    let similar = closest_names(project, &names, 3);
+    let mut msg = format!("unknown project: {project}.");
+    if !similar.is_empty() {
+        msg.push_str(&format!(" 혹시 {}?", similar.join(" / ")));
+    }
+    if names.is_empty() {
+        msg.push_str(" 등록된 프로젝트가 없어요 — 단비 앱에서 먼저 만드세요.");
+    } else {
+        msg.push_str(&format!(" 등록된 프로젝트: {}", names.join(", ")));
+    }
+    DanbiError::Config(msg)
+}
+
+/// Up to `max` candidates ranked by edit distance (case-insensitive),
+/// substring matches first. Only names within a reasonable distance of
+/// the query are returned.
+fn closest_names(query: &str, names: &[String], max: usize) -> Vec<String> {
+    let q = query.to_lowercase();
+    let mut scored: Vec<(usize, &String)> = names
+        .iter()
+        .filter_map(|n| {
+            let lc = n.to_lowercase();
+            if lc.contains(&q) || q.contains(&lc) {
+                return Some((0, n));
+            }
+            let d = edit_distance(&q, &lc);
+            let allowed = (q.chars().count().max(lc.chars().count()) / 2).max(2);
+            (d <= allowed).then_some((d, n))
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
+    scored.into_iter().take(max).map(|(_, n)| n.clone()).collect()
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Post-edit commit. The file is already on disk by now, so a git failure
+/// (index.lock held by another process, odd permissions) is reported as a
+/// warning on the successful response — never as an error that would make
+/// the agent retry and duplicate the write.
+fn commit_or_warn(
+    vault: &std::path::Path,
+    msg: &str,
+    client: &str,
+) -> (Option<String>, Option<String>) {
+    match vcs::snapshot_as(vault, msg, client) {
+        Ok(c) => (c, None),
+        Err(e) => (
+            None,
+            Some(format!(
+                "파일은 저장됐지만 git 커밋에 실패했어요 ({e}). 재시도하지 마세요 — 다음 쓰기 때 함께 커밋돼요."
+            )),
+        ),
+    }
+}
+
+fn write_result(mut body: Value, commit: Option<String>, warning: Option<String>) -> String {
+    if let Value::Object(ref mut map) = body {
+        map.insert("commit".into(), commit.map(Value::String).unwrap_or(Value::Null));
+        if let Some(w) = warning {
+            map.insert("warning".into(), Value::String(w));
+        }
+    }
+    body.to_string()
+}
+
+/// `_HH:MM · <client>_` line for a `danbi_log` entry, so a daily note
+/// several agents wrote stays readable for a human. A plain line, not a
+/// heading: a heading would split every entry in two for the Auto-Journal
+/// parser and fall inside the previous `###` section.
+fn log_stamp(hhmm: String, client: Option<&str>) -> String {
+    match client.filter(|c| !c.is_empty() && *c != "unknown") {
+        Some(c) => format!("_{hhmm} · {}_", c.replace('_', "-")),
+        None => format!("_{hhmm}_"),
+    }
+}
+
+/// Puts the stamp right under the entry's first heading (so it belongs to
+/// that entry), or on top when the entry has no heading.
+fn stamp_entry(body: &str, stamp: &str) -> String {
+    match body.split_once('\n') {
+        Some((first, rest)) if first.trim_start().starts_with('#') => {
+            format!("{first}\n{stamp}\n{rest}")
+        }
+        None if body.trim_start().starts_with('#') => format!("{body}\n{stamp}"),
+        _ => format!("{stamp}\n{body}"),
+    }
+}
+
+/// Minimum body length for dedupe — anything shorter ("ok", "done") is
+/// too generic to treat a repeat as a retry.
+const LOG_DEDUPE_MIN_CHARS: usize = 8;
+
+/// A retry, not a new record: the note's last entry is exactly this body
+/// (stamp lines ignored). A repeated line further up — a heartbeat logged
+/// twice a day, a sentence quoted from an earlier entry — is kept.
+fn log_is_duplicate(current: &str, body: &str) -> bool {
+    let strip = |s: &str| -> String {
+        s.lines()
+            .filter(|l| !daily::is_log_stamp(l))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    };
+    let body = strip(body);
+    if body.chars().count() < LOG_DEDUPE_MIN_CHARS {
+        return false;
+    }
+    let current = strip(current);
+    match current.strip_suffix(body.as_str()) {
+        Some(before) => before.is_empty() || before.ends_with('\n'),
+        None => false,
+    }
+}
+
 fn string_arg(args: &Value, key: &str) -> Result<String, DanbiError> {
     args.get(key)
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| DanbiError::Config(format!("{key} required")))
+        .ok_or_else(|| {
+            let example = match key {
+                "project" => "\"보니\" (목록: danbi_list_projects)",
+                "domain" => "\"notes/auth.md\"",
+                "query" => "\"refresh token 만료 처리\"",
+                "content" => "\"### 결정\\n- JWT refresh 7일\"",
+                "heading" => "\"## 결정\"",
+                "new_body" => "\"- 항목 1\\n- 항목 2\"",
+                "key" => "\"abc\" ([#abc] 마커) 또는 항목 첫 줄 텍스트",
+                "item" => "\"- [#abc] 알림톡 발송 — 완료\"",
+                "folder" => "\"notes\" 또는 \"stats/2026-05\"",
+                _ => "",
+            };
+            if example.is_empty() {
+                DanbiError::Config(format!("{key} required"))
+            } else {
+                DanbiError::Config(format!("{key} required (예: {example})"))
+            }
+        })
 }
 
-fn current_vault_path() -> Result<PathBuf, DanbiError> {
+pub(crate) fn current_vault_path() -> Result<PathBuf, DanbiError> {
     let vault = config::default_vault_path()?;
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("vault not configured".into()))?;
@@ -1566,5 +2535,645 @@ pub fn ensure_token(cfg: &DanbiConfig) -> String {
         generate_token()
     } else {
         cfg.mcp.token.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(scope: ToolScope) -> Vec<String> {
+        catalog_for_project(scope, None)
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn read_scope_lists_only_read_tools() {
+        let read = names(ToolScope::ReadOnly);
+        assert!(read.iter().all(|n| !is_write_tool(n)));
+        for n in ["danbi_search", "danbi_context", "danbi_read", "danbi_related"] {
+            assert!(read.iter().any(|r| r == n), "{n} missing");
+        }
+    }
+
+    #[test]
+    fn write_scope_lists_exactly_the_write_tools() {
+        let mut write = names(ToolScope::WriteOnly);
+        let mut expected: Vec<String> = WRITE_TOOLS.iter().map(|s| s.to_string()).collect();
+        write.sort();
+        expected.sort();
+        assert_eq!(write, expected);
+    }
+
+    #[test]
+    fn all_scope_is_unchanged_and_partitions_into_read_plus_write() {
+        assert_eq!(names(ToolScope::All).len(), tool_catalog().len());
+        assert_eq!(
+            names(ToolScope::ReadOnly).len() + names(ToolScope::WriteOnly).len(),
+            tool_catalog().len()
+        );
+        assert!(ToolScope::All.rejection("danbi_log").is_none());
+        assert!(ToolScope::All.rejection("danbi_search").is_none());
+    }
+
+    #[test]
+    fn rejections_point_to_the_other_endpoint() {
+        let r = ToolScope::ReadOnly.rejection("danbi_log").unwrap();
+        assert!(r.contains("/write"));
+        assert!(ToolScope::ReadOnly.rejection("danbi_search").is_none());
+        let w = ToolScope::WriteOnly.rejection("danbi_search").unwrap();
+        assert!(w.contains("/mcp/read"));
+        assert!(ToolScope::WriteOnly.rejection("danbi_append").is_none());
+    }
+
+    async fn call(scope: ToolScope, body: Value) -> Value {
+        let state = McpState { token: Arc::new("t".into()) };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer t".parse().unwrap());
+        let req: RpcRequest = serde_json::from_value(body).unwrap();
+        let resp = run_rpc(&state, &headers, req, None, scope).await;
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn read_endpoint_filters_list_and_rejects_writes_before_dispatch() {
+        let list = call(
+            ToolScope::ReadOnly,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+        )
+        .await;
+        let tools = list["result"]["tools"].as_array().unwrap();
+        assert!(!tools.is_empty());
+        assert!(tools.iter().all(|t| !is_write_tool(t["name"].as_str().unwrap())));
+
+        let rejected = call(
+            ToolScope::ReadOnly,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                    "params": { "name": "danbi_log", "arguments": { "project": "p", "content": "x" } } }),
+        )
+        .await;
+        assert_eq!(rejected["result"]["isError"], true);
+        let text = rejected["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("/mcp/<project-id>/write"), "{text}");
+
+        let init = call(
+            ToolScope::ReadOnly,
+            json!({ "jsonrpc": "2.0", "id": 3, "method": "initialize" }),
+        )
+        .await;
+        assert_eq!(init["result"]["serverInfo"]["name"], "danbi · read");
+        assert!(init["result"]["instructions"].as_str().unwrap().contains("danbi_context"));
+    }
+
+    // ---------- write path ----------
+
+    fn temp_vault(label: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "danbi-mcp-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(path.join("Projects/보니/notes")).unwrap();
+        std::fs::create_dir_all(path.join("Projects/상식이")).unwrap();
+        vault::init_vault(&path).unwrap();
+        path
+    }
+
+    fn log(vault: &std::path::Path, project: &str, content: &str) -> Value {
+        let out = dispatch_in(
+            vault,
+            "danbi_log",
+            json!({ "project": project, "content": content, "_client": "claude_code" }),
+        )
+        .unwrap();
+        serde_json::from_str(&out).unwrap()
+    }
+
+    fn today_note(vault: &std::path::Path, project: &str) -> String {
+        let domain = format!("daily/{}.md", chrono::Local::now().format("%Y-%m-%d"));
+        vault::read_doc(vault, project, &domain).unwrap()
+    }
+
+    #[test]
+    fn log_stamps_client_and_time_and_dedupes_same_body() {
+        let vault = temp_vault("log");
+        let first = log(&vault, "보니", "### 결정\n- JWT refresh 7일");
+        assert_eq!(first["stamped"], true);
+        assert!(first["commit"].is_string(), "{first}");
+        assert!(first.get("warning").is_none());
+        let note = today_note(&vault, "보니");
+        assert!(note.contains("### 결정\n_"), "{note}");
+        assert!(note.contains(" · claude-code_\n- JWT refresh 7일"), "{note}");
+        assert!(!note.contains("#### "), "stamp is not a heading: {note}");
+
+        let again = log(&vault, "보니", "  ### 결정\n- JWT refresh 7일\n");
+        assert_eq!(again["deduped"], true);
+        assert!(again["commit"].is_null());
+        assert_eq!(today_note(&vault, "보니"), note, "no second entry");
+
+        // Short bodies are never deduped (too generic to be a retry).
+        log(&vault, "보니", "ok");
+        log(&vault, "보니", "ok");
+        assert_eq!(today_note(&vault, "보니").matches("\nok\n").count(), 2);
+
+        // stamp:false writes the body verbatim.
+        let out = dispatch_in(
+            &vault,
+            "danbi_log",
+            json!({ "project": "상식이", "content": "plain body here", "stamp": false }),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stamped"], false);
+        let note = today_note(&vault, "상식이");
+        assert!(note.ends_with("\nplain body here\n"), "{note}");
+        assert!(!note.contains(" · claude-code_"));
+    }
+
+    #[test]
+    fn log_dedupe_only_catches_an_immediate_identical_retry() {
+        let vault = temp_vault("dedupe");
+        log(&vault, "보니", "- JWT refresh 7일로 정함. 이유: 모바일");
+        // A sentence from the previous entry is a new record, not a retry.
+        assert!(log(&vault, "보니", "JWT refresh 7일로 정함").get("deduped").is_none());
+        log(&vault, "보니", "### 하트비트\n- 정상 동작");
+        log(&vault, "보니", "### 다른 기록\n- 중간에 들어온 것");
+        // Same heartbeat later in the day, with entries in between → kept.
+        assert!(log(&vault, "보니", "### 하트비트\n- 정상 동작").get("deduped").is_none());
+        assert_eq!(today_note(&vault, "보니").matches("### 하트비트").count(), 2);
+    }
+
+    #[test]
+    fn stamped_entries_parse_as_one_journal_entry_each() {
+        let vault = temp_vault("stamp-journal");
+        log(&vault, "보니", "### 결정: JWT 7일\n- 근거");
+        log(&vault, "보니", "### 버그 원인\n- CORS preflight");
+        let note = today_note(&vault, "보니");
+        let entries = crate::journal_view::parse_entries("2026-10-15", &note);
+        assert_eq!(entries.len(), 2, "{note}");
+        assert!(!entries[0].preview.contains("claude-code"), "{:?}", entries[0].preview);
+    }
+
+    #[test]
+    fn write_tools_tag_the_commit_with_the_client() {
+        let vault = temp_vault("token");
+        log(&vault, "보니", "tagged entry body");
+        let head = vcs::recent_commits(&vault, 1).unwrap().remove(0);
+        assert!(head.summary.ends_with(" [claude-code]"), "{}", head.summary);
+        dispatch_in(&vault, "danbi_append", json!({ "project": "보니", "domain": "x.md", "content": "no ua" })).unwrap();
+        let head = vcs::recent_commits(&vault, 1).unwrap().remove(0);
+        assert_eq!(head.summary, "danbi: mcp append · 보니/x.md [agent]");
+        let mut args = json!({ "project": "보니", "content": "c" });
+        attach_client("danbi_append", &mut args, Some("codex/1.0"));
+        assert_eq!(args["_client"], "codex");
+        let mut args = json!({ "query": "q" });
+        attach_client("danbi_search", &mut args, Some("codex/1.0"));
+        assert!(args.get("_client").is_none());
+    }
+
+    #[test]
+    fn log_stamp_formats() {
+        assert_eq!(log_stamp("14:32".into(), Some("claude_code")), "_14:32 · claude-code_");
+        assert_eq!(log_stamp("14:32".into(), Some("unknown")), "_14:32_");
+        assert_eq!(log_stamp("14:32".into(), None), "_14:32_");
+        assert_eq!(stamp_entry("### a\nb", "_s_"), "### a\n_s_\nb");
+        assert_eq!(stamp_entry("### a", "_s_"), "### a\n_s_");
+        assert_eq!(stamp_entry("plain", "_s_"), "_s_\nplain");
+        assert!(crate::daily::is_log_stamp("_14:32 · claude-code_"));
+        assert!(crate::daily::is_log_stamp("#### 14:32 · codex"));
+        assert!(crate::daily::is_log_stamp("_14:32_"));
+        assert!(!crate::daily::is_log_stamp("_강조한 문장_"));
+        assert!(!crate::daily::is_log_stamp("#### 결정"));
+    }
+
+    #[test]
+    fn unknown_project_lists_similar_and_all_names() {
+        let vault = temp_vault("unknown");
+        let err = dispatch_in(&vault, "danbi_log", json!({ "project": "보니앨범", "content": "x" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown project: 보니앨범"), "{err}");
+        assert!(err.contains("혹시 보니?"), "{err}");
+        assert!(err.contains("등록된 프로젝트: 보니, 상식이"), "{err}");
+        // A file was not created for the unknown project.
+        assert!(!vault.join("Projects/보니앨범").exists());
+
+        assert_eq!(closest_names("bony", &["Bonny".into(), "Zed".into()], 3), vec!["Bonny"]);
+        assert!(closest_names("zzzzzz", &["Bonny".into()], 3).is_empty());
+    }
+
+    #[test]
+    fn commit_failure_is_a_warning_not_an_error() {
+        let vault = temp_vault("lock");
+        log(&vault, "보니", "first entry to init repo");
+        // Simulate another git process holding the index.
+        std::fs::write(vault.join(".git/index.lock"), b"").unwrap();
+        let v = log(&vault, "보니", "second entry while locked");
+        assert!(v["commit"].is_null(), "{v}");
+        assert!(v["warning"].as_str().unwrap().contains("커밋"), "{v}");
+        assert!(today_note(&vault, "보니").contains("second entry while locked"), "saved anyway");
+        std::fs::remove_file(vault.join(".git/index.lock")).unwrap();
+        // The next successful write commits the earlier one along.
+        let v = log(&vault, "보니", "third entry after unlock");
+        assert!(v["commit"].is_string());
+    }
+
+    #[test]
+    fn concurrent_logs_never_lose_an_entry() {
+        let vault = temp_vault("race");
+        let handles: Vec<_> = (0..6)
+            .map(|i| {
+                let vault = vault.clone();
+                std::thread::spawn(move || {
+                    for j in 0..5 {
+                        log(&vault, "보니", &format!("entry from writer {i} round {j}"));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let note = today_note(&vault, "보니");
+        for i in 0..6 {
+            for j in 0..5 {
+                assert!(note.contains(&format!("entry from writer {i} round {j}")), "{i}/{j}");
+            }
+        }
+    }
+
+    #[test]
+    fn append_creates_file_and_returns_commit() {
+        let vault = temp_vault("append");
+        let out = dispatch_in(
+            &vault,
+            "danbi_append",
+            json!({ "project": "보니", "domain": "notes/auth", "content": "- refresh 7d" }),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["domain"], "notes/auth.md");
+        assert!(v["commit"].is_string());
+        assert_eq!(vault::read_doc(&vault, "보니", "notes/auth.md").unwrap(), "- refresh 7d\n");
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+
+    fn temp_vault(label: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "danbi-mcp-read-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(&path).unwrap();
+        vault::init_vault(&path).unwrap();
+        path
+    }
+
+    fn write(vault: &std::path::Path, project: &str, domain: &str, body: &str) {
+        let p = vault.join("Projects").join(project).join(domain);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// 30 projects × (4 top-level + 20 daily + 6 notes) files, every doc an
+    /// orphan — the shape that blew the old outputs past 250k chars.
+    fn big_vault() -> std::path::PathBuf {
+        let vault = temp_vault("big");
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        for i in 0..30 {
+            let p = format!("proj{i:02}");
+            for f in ["purpose.md", "schema.md", "SKILL.md", "ui.md"] {
+                write(&vault, &p, f, &format!("# {f}\n\n{}", "본문 ".repeat(40)));
+            }
+            for d in 0..20 {
+                write(&vault, &p, &format!("daily/2026-09-{:02}.md", d + 1), "# day\n\n## 결정\n- x\n");
+            }
+            write(&vault, &p, &format!("daily/{today}.md"), "# today\n\n## 오늘\n- 작업\n");
+            for n in 0..6 {
+                write(&vault, &p, &format!("notes/topic-{n}.md"), &format!("# topic {n}\n\n{}", "내용 ".repeat(60)));
+            }
+        }
+        vault
+    }
+
+    #[test]
+    fn list_projects_default_is_short_and_detail_is_opt_in() {
+        let vault = big_vault();
+        let out = dispatch_in(&vault, "danbi_list_projects", json!({})).unwrap();
+        assert!(out.chars().count() < 5_000, "{} chars", out.chars().count());
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let rows = v["projects"].as_array().unwrap();
+        assert_eq!(rows.len(), 30);
+        assert_eq!(rows[0]["files"], 31);
+        assert_eq!(rows[0]["folders"]["daily"], 21);
+        assert_eq!(rows[0]["folders"]["notes"], 6);
+        assert!(rows[0].get("domains").is_none(), "no per-file rows by default");
+
+        let out = dispatch_in(&vault, "danbi_list_projects", json!({ "project": "proj03" })).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["name"], "proj03");
+        assert_eq!(v["daily_notes"], 21);
+        assert_eq!(v["files"], 10, "daily excluded by default");
+        assert!(v["subfolders"].as_array().unwrap().iter().all(|s| s["name"] != "daily"));
+        assert!(v["domains"][0].get("title").is_none(), "titles only on request");
+
+        let out = dispatch_in(
+            &vault,
+            "danbi_list_projects",
+            json!({ "project": "proj03", "include_daily": true, "titles": true }),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["files"], 31);
+        assert_eq!(v["domains"][0]["title"], "purpose.md");
+
+        let err = dispatch_in(&vault, "danbi_list_projects", json!({ "project": "proj3" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("혹시 proj03"), "{err}");
+    }
+
+    #[test]
+    fn briefing_is_a_few_kilobytes_and_scopes_to_a_project() {
+        let vault = big_vault();
+        vcs::ensure_repo(&vault).unwrap();
+        for i in 0..40 {
+            write(&vault, "proj01", "ui.md", &format!("# ui {i}\n"));
+            vcs::snapshot(&vault, &format!("danbi: mcp append · proj01/ui.md (pre)")).unwrap();
+            write(&vault, "proj01", "ui.md", &format!("# ui {i} done\n"));
+            vcs::snapshot(&vault, &format!("danbi: mcp append · proj01/ui.md")).unwrap();
+        }
+        let out = dispatch_in(&vault, "danbi_briefing", json!({})).unwrap();
+        // Worst case: every one of the 30 projects has a note today.
+        assert!(out.chars().count() < 5_500, "{} chars", out.chars().count());
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["daily"]["today_notes"].as_array().unwrap().len(), 30);
+        // 30 × 6 notes + ui.md are orphans; scaffolding never is.
+        assert_eq!(v["healing"]["orphans"], 30 * 6);
+        assert_eq!(v["healing"]["top"].as_array().unwrap().len(), dashboard::BRIEFING_TOP);
+        assert_eq!(v["activity"]["commit_count"], 40 + 1, "(pre) excluded, init included");
+        assert_eq!(v["activity"]["recent_summaries"].as_array().unwrap().len(), dashboard::BRIEFING_SUMMARIES);
+        assert!(v.get("vector_warning").is_none());
+
+        let out = dispatch_in(&vault, "danbi_briefing", json!({ "project": "proj05" })).unwrap();
+        assert!(out.chars().count() < 2_000, "{} chars", out.chars().count());
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["project"], "proj05");
+        assert_eq!(v["daily"]["today_notes"].as_array().unwrap().len(), 1);
+        assert_eq!(v["healing"]["orphans"], 6);
+        assert_eq!(v["activity"]["commit_count"], 0);
+
+        assert!(dispatch_in(&vault, "danbi_briefing", json!({ "project": "nope" })).is_err());
+    }
+
+    #[test]
+    fn recent_walks_subfolders_and_hides_daily_by_default() {
+        let vault = temp_vault("recent");
+        write(&vault, "a", "ui.md", "x");
+        write(&vault, "a", "notes/n.md", "x");
+        write(&vault, "a", "daily/2026-10-01.md", "x");
+        write(&vault, "b", "plan.md", "x");
+        let v: Value = serde_json::from_str(&dispatch_in(&vault, "danbi_recent", json!({})).unwrap()).unwrap();
+        let names: Vec<String> = v.as_array().unwrap().iter().map(|h| format!("{}/{}", h["project"].as_str().unwrap(), h["domain"].as_str().unwrap())).collect();
+        assert!(names.contains(&"a/notes/n.md".to_string()));
+        assert!(!names.iter().any(|n| n.contains("daily/")));
+        let v: Value = serde_json::from_str(
+            &dispatch_in(&vault, "danbi_recent", json!({ "project": "a", "exclude_daily": false })).unwrap(),
+        )
+        .unwrap();
+        let names: Vec<String> = v.as_array().unwrap().iter().map(|h| h["domain"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"daily/2026-10-01.md".to_string()));
+    }
+
+    #[test]
+    fn read_returns_meta_sections_and_windows() {
+        let vault = temp_vault("read");
+        let md = "# Auth\n\n## 결정\n- refresh 7d\n- access 1h\n\n## 미정\n- rotation\n";
+        write(&vault, "a", "notes/auth.md", md);
+        write(&vault, "a", "ui.md", "see [[notes/auth.md]]\n");
+
+        let out = dispatch_in(&vault, "danbi_read", json!({ "project": "a", "domain": "notes/auth" })).unwrap();
+        let (head, body) = out.split_once('\n').unwrap();
+        assert!(head.starts_with("<!-- danbi: a/notes/auth.md · "), "{head}");
+        assert!(head.contains(&format!("{} bytes", md.len())));
+        assert!(head.contains("links_in 1"), "{head}");
+        assert!(!head.contains("chars 0.."), "no range note when whole doc");
+        assert_eq!(body, md);
+
+        let out = dispatch_in(&vault, "danbi_read", json!({ "project": "a", "domain": "notes/auth.md", "heading": "결정" })).unwrap();
+        let (head, body) = out.split_once('\n').unwrap();
+        assert!(head.contains("section \"결정\""));
+        assert_eq!(body, "## 결정\n- refresh 7d\n- access 1h\n\n");
+
+        let out = dispatch_in(&vault, "danbi_read", json!({ "project": "a", "domain": "notes/auth.md", "max_chars": 200, "offset": 2 })).unwrap();
+        let (head, body) = out.split_once('\n').unwrap();
+        // max_chars floors at 200, which here covers the rest of the doc.
+        assert!(head.contains(&format!("chars 2..{} of {}", md.chars().count(), md.chars().count())), "{head}");
+        assert_eq!(body, &md[2..]);
+
+        let err = dispatch_in(&vault, "danbi_read", json!({ "project": "a", "domain": "notes/auth.md", "heading": "없음" })).unwrap_err().to_string();
+        assert!(err.contains("heading not found") && err.contains("## 결정"), "{err}");
+
+        let err = dispatch_in(&vault, "danbi_read", json!({ "project": "a", "domain": "notes/auth-flow.md" })).unwrap_err().to_string();
+        assert!(err.contains("not found: a/notes/auth-flow.md"), "{err}");
+        assert!(err.contains("혹시 notes/auth.md"), "{err}");
+        assert!(err.contains("danbi_list_projects(project=\"a\")"));
+
+        let err = dispatch_in(&vault, "danbi_read", json!({ "project": "a" })).unwrap_err().to_string();
+        assert!(err.contains("domain required (예:"), "{err}");
+    }
+
+    #[test]
+    fn rows_json_keeps_structure_but_flattens_rows() {
+        let v = json!({ "a": [ { "x": 1 }, { "y": [1, 2] } ], "b": { "c": [1, 2], "d": "s" }, "e": [] });
+        let out = rows_json(&v);
+        assert_eq!(
+            out,
+            "{\n  \"a\": [\n    {\"x\":1},\n    {\"y\":[1,2]}\n  ],\n  \"b\": {\n    \"c\": [1,2],\n    \"d\": \"s\"\n  },\n  \"e\": []\n}"
+        );
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), v);
+    }
+
+    #[test]
+    fn line_span_covers_ranges() {
+        let md = "a\nb\nc";
+        assert_eq!(line_span(md, 0, 1), "a\n");
+        assert_eq!(line_span(md, 1, 3), "b\nc");
+        assert_eq!(line_span(md, 2, 9), "c");
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    fn by_name(cat: &[Value], name: &str) -> Value {
+        cat.iter().find(|t| t["name"] == name).unwrap().clone()
+    }
+
+    #[test]
+    fn scoped_catalog_drops_project_from_write_tools_only() {
+        let cat = catalog_for_project(ToolScope::All, Some("보니"));
+        let log = by_name(&cat, "danbi_log");
+        assert!(log["inputSchema"]["properties"].get("project").is_none());
+        assert_eq!(log["inputSchema"]["required"], json!(["content"]));
+        assert!(log["description"].as_str().unwrap().starts_with("→ 보니 에 기록."));
+        let upsert = by_name(&cat, "danbi_upsert_item");
+        assert_eq!(upsert["inputSchema"]["required"], json!(["domain", "heading", "key", "item"]));
+
+        // Read tools keep `project`; the session ones say it defaults.
+        let read = by_name(&cat, "danbi_read");
+        assert_eq!(read["inputSchema"]["required"], json!(["project", "domain"]));
+        let brief = by_name(&cat, "danbi_briefing");
+        assert_eq!(brief["inputSchema"]["properties"]["project"]["description"], "생략하면 보니");
+        let search = by_name(&cat, "danbi_search");
+        assert!(search["inputSchema"]["properties"]["project"]["description"].as_str().unwrap().contains("vault 전체"));
+
+        // Unscoped catalog is untouched.
+        let cat = catalog_for_project(ToolScope::All, None);
+        assert_eq!(by_name(&cat, "danbi_log")["inputSchema"]["required"], json!(["project", "content"]));
+    }
+
+    #[test]
+    fn write_only_scoped_catalog_is_exactly_the_write_tools_without_project() {
+        let cat = catalog_for_project(ToolScope::WriteOnly, Some("보니"));
+        assert_eq!(cat.len(), WRITE_TOOLS.len());
+        for t in &cat {
+            assert!(t["inputSchema"]["properties"].get("project").is_none(), "{}", t["name"]);
+        }
+        let cat = catalog_for_project(ToolScope::ReadOnly, None);
+        assert!(cat.iter().all(|t| !is_write_tool(t["name"].as_str().unwrap())));
+        assert_eq!(cat.len() + WRITE_TOOLS.len(), tool_catalog().len());
+    }
+
+    #[test]
+    fn clamp_overrides_writes_and_defaults_session_reads() {
+        let mut args = json!({ "project": "다른곳", "content": "x" });
+        clamp_or_default_project("danbi_log", &mut args, "보니");
+        assert_eq!(args["project"], "보니");
+
+        let mut args = json!({});
+        clamp_or_default_project("danbi_briefing", &mut args, "보니");
+        assert_eq!(args["project"], "보니");
+        let mut args = json!({ "project": "상식이" });
+        clamp_or_default_project("danbi_daily", &mut args, "보니");
+        assert_eq!(args["project"], "상식이", "explicit read scope wins");
+
+        let mut args = json!({ "query": "q" });
+        clamp_or_default_project("danbi_search", &mut args, "보니");
+        assert!(args.get("project").is_none(), "search stays vault-wide");
+        let mut args = Value::Null;
+        clamp_or_default_project("danbi_append", &mut args, "보니");
+        assert_eq!(args["project"], "보니");
+    }
+
+    #[test]
+    fn instructions_fit_the_scope() {
+        let all = server_instructions(ToolScope::All, Some("보니"));
+        assert!(all.lines().count() <= 5, "{all}");
+        assert!(all.contains("danbi_briefing 먼저 (project 생략 시 보니)"));
+        assert!(all.contains("danbi_log(content)"));
+        let read = server_instructions(ToolScope::ReadOnly, None);
+        assert!(read.contains("/mcp/<project-id>/write"));
+        assert!(!read.contains("danbi_log(project"));
+        let write = server_instructions(ToolScope::WriteOnly, Some("보니"));
+        assert!(write.contains("/mcp/read"));
+        assert!(write.contains("보니 의 오늘 daily"));
+    }
+}
+
+/// Measurements against the user's real vault — run by hand:
+/// `cargo test --lib real_vault_sizes -- --ignored --nocapture`.
+/// Not strictly read-only: `list_tree` runs `ensure_repo`, which on an
+/// old vault performs the one-time `.danbi/`·`config.json` untrack commit.
+#[cfg(test)]
+mod real_vault {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn real_vault_sizes() {
+        let home = std::env::var("HOME").unwrap();
+        let vault = std::path::PathBuf::from(home).join("Danbi_Vault");
+        if !vault.exists() {
+            return;
+        }
+        let t = std::time::Instant::now();
+        let tree = vault::list_tree(&vault).unwrap();
+        let tree_t = t.elapsed();
+        let old_list = serde_json::to_string_pretty(&tree).unwrap();
+        println!("list_tree: {:?}, old list_projects json: {} chars", tree_t, old_list.chars().count());
+        let t = std::time::Instant::now();
+        let snap = dashboard::snapshot(&vault).unwrap();
+        let snap_t = t.elapsed();
+        let old_brief = serde_json::to_string_pretty(&snap).unwrap();
+        println!("dashboard::snapshot: {:?}, old briefing json: {} chars (healing {}, ghost {}, commits {})",
+            snap_t, old_brief.chars().count(), snap.healing.len(), snap.ghost_suggestions.len(), snap.activity.commit_count);
+        let t = std::time::Instant::now();
+        let _ = crate::healing::scan(&vault).unwrap();
+        println!("healing::scan: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let _ = crate::links::build_index(&vault).unwrap();
+        println!("links::build_index: {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let _ = vault::list_tree_with(&vault, false).unwrap();
+        println!("list_tree_with(false): {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let brief = crate::session_hooks::session_brief(&vault, Some("단비"), 2500).unwrap();
+        println!("session_brief(단비): {:?}, {} chars", t.elapsed(), brief.chars().count());
+        let t = std::time::Instant::now();
+        let feed = vcs::activity_feed(&vault, None, None, 50).unwrap();
+        println!("activity_feed(50): {:?}, {} rows, {} chars", t.elapsed(), feed.len(), serde_json::to_string(&feed).unwrap().chars().count());
+        let t = std::time::Instant::now();
+        let feed = vcs::activity_feed(&vault, Some("단비"), None, 50).unwrap();
+        println!("activity_feed(단비,50): {:?}, {} rows", t.elapsed(), feed.len());
+        for r in feed.iter().take(3) {
+            println!("  {} {} {} {:?}/{:?} {} {:?}", r.ts, r.actor, r.client, r.project, r.domain, r.op, r.preview);
+        }
+        let t = std::time::Instant::now();
+        let w = vector_mixed_warning(&vault);
+        println!("vector_mixed_warning (cold): {:?} → {:?}", t.elapsed(), w);
+        let t = std::time::Instant::now();
+        let _ = vector_mixed_warning(&vault);
+        println!("vector_mixed_warning (warm): {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let _ = dashboard::briefing(&vault, None).unwrap();
+        println!("dashboard::briefing(None): {:?}", t.elapsed());
+        for name in ["danbi_list_projects", "danbi_briefing", "danbi_recent", "danbi_daily"] {
+            let t = std::time::Instant::now();
+            let out = dispatch_in(&vault, name, json!({})).unwrap();
+            println!("{name}: {:?}, {} chars", t.elapsed(), out.chars().count());
+        }
+        let t = std::time::Instant::now();
+        let out = dispatch_in(&vault, "danbi_briefing", json!({ "project": "단비" })).unwrap_or_default();
+        println!("danbi_briefing(단비): {:?}, {} chars", t.elapsed(), out.chars().count());
+        if std::env::var("DANBI_DUMP").is_ok() {
+            let out = dispatch_in(&vault, "danbi_briefing", json!({})).unwrap_or_default();
+            let v: Value = serde_json::from_str(&out).unwrap();
+            for (k, val) in v.as_object().unwrap() {
+                println!("  briefing.{k}: {} chars", val.to_string().chars().count());
+            }
+            let out = dispatch_in(&vault, "danbi_list_projects", json!({})).unwrap_or_default();
+            println!("{}", &out[..out.len().min(1500)]);
+        }
+        let t = std::time::Instant::now();
+        let out = dispatch_in(&vault, "danbi_list_projects", json!({ "project": "단비" })).unwrap_or_default();
+        println!("danbi_list_projects(단비): {:?}, {} chars", t.elapsed(), out.chars().count());
     }
 }

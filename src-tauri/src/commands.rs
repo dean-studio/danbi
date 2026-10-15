@@ -355,6 +355,21 @@ pub async fn list_tree(vault_path: String) -> DanbiResult<VaultTree> {
         .map_err(|e| DanbiError::Other(format!("join: {e}")))?
 }
 
+/// Per-project rescan for the watcher-driven sidebar refresh — the
+/// frontend swaps just this node into its tree instead of re-listing
+/// the whole vault. `None` means the project folder no longer exists.
+#[tauri::command]
+pub async fn list_project_node(
+    vault_path: String,
+    project: String,
+) -> DanbiResult<Option<vault::ProjectNode>> {
+    tokio::task::spawn_blocking(move || {
+        vault::list_project_node(&PathBuf::from(vault_path), &project)
+    })
+    .await
+    .map_err(|e| DanbiError::Other(format!("join: {e}")))?
+}
+
 #[tauri::command]
 pub async fn create_project(
     vault_path: String,
@@ -567,14 +582,66 @@ pub fn read_doc(
     vault::read_doc(&PathBuf::from(vault_path), &project, &domain)
 }
 
+/// Editor save. Until now this wrote the file and left the commit to the
+/// next writer's `(pre)` snapshot, so a human edit never had a row of its
+/// own; the activity feed needs one. Same lock as every other writer; an
+/// unchanged document makes no commit (autosave fires often).
+/// Autosaves of the same doc within this window share one commit.
+const SAVE_COALESCE_SECS: i64 = 300;
+
+/// Error prefix the editor matches to show its conflict banner.
+pub const DOC_CONFLICT: &str = "DOC_CONFLICT";
+
+/// Editor save. Runs off the main thread: it may wait on the vault write
+/// lock while an agent commits, and autosave calls it every few seconds.
 #[tauri::command]
-pub fn write_doc(
+pub async fn write_doc(
     vault_path: String,
     project: String,
     domain: String,
     content: String,
+    expected_base: Option<String>,
 ) -> DanbiResult<()> {
-    vault::write_doc(&PathBuf::from(vault_path), &project, &domain, &content)
+    tokio::task::spawn_blocking(move || {
+        write_doc_blocking(vault_path, project, domain, content, expected_base)
+    })
+    .await
+    .map_err(|e| DanbiError::Other(format!("write_doc join: {e}")))?
+}
+
+pub fn write_doc_blocking(
+    vault_path: String,
+    project: String,
+    domain: String,
+    content: String,
+    expected_base: Option<String>,
+) -> DanbiResult<()> {
+    let vault = PathBuf::from(vault_path);
+    let _write_guard = vcs::write_guard();
+    // The editor passes the text it last loaded/saved. If the file moved on
+    // since (an agent appended while the user was typing), refuse instead of
+    // silently overwriting — the editor shows a conflict banner.
+    if let Some(base) = expected_base {
+        if vault::read_doc(&vault, &project, &domain)? != base {
+            return Err(DanbiError::Other(format!(
+                "{DOC_CONFLICT}: {project}/{domain} changed on disk since it was loaded"
+            )));
+        }
+    }
+    vault::write_doc(&vault, &project, &domain, &content)?;
+    // Commit failure must not surface as a failed save — the file is on
+    // disk; the next successful snapshot carries it.
+    if let Err(e) = vcs::ensure_repo(&vault).and_then(|_| {
+        vcs::snapshot_coalesce(
+            &vault,
+            &format!("danbi: save · {project}/{domain}"),
+            vcs::CLIENT_HUMAN,
+            SAVE_COALESCE_SECS,
+        )
+    }) {
+        eprintln!("[vcs] save commit deferred for {project}/{domain}: {e}");
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -749,22 +816,101 @@ pub fn resolve_embed_model(
 /// resolves to empty, or the embed call fails (rate-limit, network, etc.) —
 /// callers can then fall back to BM25-only search transparently.
 pub async fn embed_query_for_search(cfg: &DanbiConfig, query: &str) -> Option<Vec<f32>> {
-    let provider = resolve_embed_provider(cfg).ok()?;
+    embed_query(cfg, query, crate::search::SearchMode::Hybrid)
+        .await
+        .embedding
+}
+
+/// A search embeds its query at most this long; past it the vector arm is
+/// skipped so a slow provider can't hold the keyword results hostage.
+pub const QUERY_EMBED_TIMEOUT_MS: u64 = 1500;
+
+/// Outcome of embedding a search query. `semantic` tells the caller (and
+/// the user) why the vector arm did or didn't run:
+/// `used` · `cached` · `off` (no provider / keyword mode) · `timeout` · `error`.
+#[derive(Debug, Clone, Serialize)]
+pub struct QueryEmbedding {
+    pub embedding: Option<Vec<f32>>,
+    pub semantic: &'static str,
+    /// Korean one-liner for the fallback cases, for the result panel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl QueryEmbedding {
+    fn off() -> Self {
+        QueryEmbedding { embedding: None, semantic: "off", note: None }
+    }
+}
+
+/// `embed_query_for_search` with a mode and a status: keyword mode never
+/// calls the provider; otherwise the query LRU (`vector::query_cache_*`)
+/// is checked first and the provider call is capped at
+/// `QUERY_EMBED_TIMEOUT_MS`.
+pub async fn embed_query(
+    cfg: &DanbiConfig,
+    query: &str,
+    mode: crate::search::SearchMode,
+) -> QueryEmbedding {
+    if !mode.wants_embedding() {
+        return QueryEmbedding::off();
+    }
+    let Ok(provider) = resolve_embed_provider(cfg) else {
+        return QueryEmbedding::off();
+    };
     let model = resolve_embed_model(cfg, provider.as_ref(), None);
     if model.is_empty() {
-        return None;
+        return QueryEmbedding::off();
     }
-    let res = crate::usage::with_role(
-        "embed",
-        provider.embed(&model, &[query.to_string()]),
-    )
-    .await
-    .ok()?;
-    res.into_iter().next()
+    embed_query_with(provider.as_ref(), &model, query, QUERY_EMBED_TIMEOUT_MS).await
+}
+
+/// Provider-level core of `embed_query`: LRU first, then one `embed`
+/// call bounded by `timeout_ms`. Split out so the timeout/fallback path
+/// can be tested with a stub provider.
+pub(crate) async fn embed_query_with(
+    provider: &dyn Provider,
+    model: &str,
+    query: &str,
+    timeout_ms: u64,
+) -> QueryEmbedding {
+    let key = crate::vector::query_cache_key(provider.kind(), model, query);
+    if let Some(hit) = crate::vector::query_cache_get(&key) {
+        return QueryEmbedding { embedding: Some(hit), semantic: "cached", note: None };
+    }
+    let inputs = [query.to_string()];
+    let call = crate::usage::with_role("embed", provider.embed(model, &inputs));
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), call).await {
+        Ok(Ok(vectors)) => match vectors.into_iter().next() {
+            Some(emb) => {
+                crate::vector::query_cache_put(key, emb.clone());
+                QueryEmbedding { embedding: Some(emb), semantic: "used", note: None }
+            }
+            None => QueryEmbedding {
+                embedding: None,
+                semantic: "error",
+                note: Some("임베딩 응답이 비어 있어 키워드 검색 결과만 보여드려요.".into()),
+            },
+        },
+        Ok(Err(e)) => QueryEmbedding {
+            embedding: None,
+            semantic: "error",
+            note: Some(format!("임베딩 호출 실패({e}) — 키워드 검색 결과만 보여드려요.")),
+        },
+        Err(_) => QueryEmbedding {
+            embedding: None,
+            semantic: "timeout",
+            note: Some(format!(
+                "임베딩이 {:.1}초 안에 안 와서 키워드 검색 결과만 보여드려요.",
+                timeout_ms as f64 / 1000.0
+            )),
+        },
+    }
 }
 
 #[tauri::command]
 pub async fn route_message(
+    app: AppHandle,
     message: String,
     ctx: RoutingContext,
     attachments: Option<Vec<Attachment>>,
@@ -814,6 +960,9 @@ pub async fn route_message(
                     route.summary.clone()
                 ),
             );
+            // 사이드바 리뷰 배지는 폴링 대신 이 이벤트로 갱신된다.
+            use tauri::Emitter;
+            let _ = app.emit(crate::reviews::REVIEWS_CHANGED_EVENT, ());
         }
     }
 
@@ -945,6 +1094,7 @@ pub fn apply_plan(
     vcs::ensure_repo(&vault_path)?;
     edit_ops::validate(&op)?;
 
+    let _write_guard = vcs::write_guard();
     let before = vault::read_doc(&vault_path, &project, &domain)?;
     let after = edit_ops::apply(&before, &op)?;
 
@@ -968,7 +1118,7 @@ pub fn apply_plan(
         "danbi: {} · {}/{} · {}",
         op_label, project, domain, summary
     );
-    let commit_after = vcs::snapshot(&vault_path, &commit_msg)?;
+    let commit_after = vcs::snapshot_as(&vault_path, &commit_msg, vcs::CLIENT_HUMAN)?;
 
     // log.md — human-readable timeline
     let log_entry = format!(
@@ -1134,8 +1284,25 @@ pub fn mcp_project_endpoint(project: String) -> DanbiResult<McpProjectEndpoint> 
     })
 }
 
+#[derive(Serialize)]
+pub struct McpRotateResult {
+    pub status: McpStatus,
+    /// Connection files (`.mcp.json`, `.cursor/mcp.json`, `.codex/config.toml`)
+    /// rewritten with the new token.
+    pub updated: Vec<String>,
+    /// Files that could not be rewritten (path — error). The old token is
+    /// already gone, so the user has to reconnect those by hand.
+    pub failed: Vec<String>,
+    /// Registry entries dropped because the file no longer exists.
+    pub removed: Vec<String>,
+}
+
+/// Generate a new bearer token, restart the server with it and push it
+/// into every connection file Danbi wrote (see `agent_connect`). The
+/// frontend asks for confirmation first — anything registered by hand
+/// (`claude mcp add`) silently stops working until the user updates it.
 #[tauri::command]
-pub fn mcp_rotate_token(app: AppHandle) -> DanbiResult<McpStatus> {
+pub fn mcp_rotate_token(app: AppHandle) -> DanbiResult<McpRotateResult> {
     let vault = default_vault_path()?;
     let mut cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
@@ -1147,7 +1314,28 @@ pub fn mcp_rotate_token(app: AppHandle) -> DanbiResult<McpStatus> {
     if cfg.mcp.enabled {
         server.start(cfg.mcp.port, cfg.mcp.token.clone());
     }
-    mcp_status(app)
+    let report = match dirs::home_dir() {
+        Some(home) => crate::agent_connect::rotate_all(&home, &cfg.mcp.token),
+        None => Default::default(),
+    };
+    Ok(McpRotateResult {
+        status: mcp_status(app)?,
+        updated: report.updated,
+        failed: report.failed,
+        removed: report.removed,
+    })
+}
+
+/// How many connection files Danbi has written — shown in the rotation
+/// confirmation so the user knows what will be refreshed automatically.
+#[tauri::command]
+pub fn mcp_connections_list() -> Vec<crate::agent_connect::Connection> {
+    match dirs::home_dir() {
+        Some(home) => crate::agent_connect::load_registry(
+            &crate::agent_connect::registry_path(&home),
+        ),
+        None => Vec::new(),
+    }
 }
 
 #[tauri::command]
@@ -1191,7 +1379,7 @@ pub async fn build_link_index() -> DanbiResult<crate::links::LinkIndex> {
             Some(p) => PathBuf::from(p),
             None => return Ok(crate::links::LinkIndex::default()),
         };
-        crate::links::build_index(&vault_path)
+        crate::links::build_index_cached(&vault_path).map(|idx| (*idx).clone())
     })
     .await
     .map_err(|e| DanbiError::Other(format!("join: {e}")))?
@@ -1206,6 +1394,53 @@ pub fn recent_commits(limit: Option<usize>) -> DanbiResult<Vec<crate::vcs::Commi
         None => return Ok(Vec::new()),
     };
     vcs::recent_commits(&vault_path, limit.unwrap_or(100))
+}
+
+/// Activity feed rows (newest first). `before` is the `ts` cursor from the
+/// last row of the previous page; `scope_project` narrows to commits that
+/// touched that project.
+#[tauri::command]
+pub fn activity_feed(
+    scope_project: Option<String>,
+    before: Option<i64>,
+    limit: Option<usize>,
+) -> DanbiResult<Vec<crate::vcs::ActivityEntry>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?;
+    let vault_path = match cfg.and_then(|c| c.vault_path) {
+        Some(p) => PathBuf::from(p),
+        None => return Ok(Vec::new()),
+    };
+    let scope = scope_project.filter(|p| !p.trim().is_empty());
+    vcs::activity_feed(&vault_path, scope.as_deref(), before, limit.unwrap_or(50))
+}
+
+/// Undo what one feed row did to one file (`path` = a `files` entry of
+/// the row). Later changes to the same file are reported as a warning;
+/// `force` applies the revert regardless.
+#[tauri::command]
+pub fn activity_revert(
+    commit_id: String,
+    path: String,
+    force: Option<bool>,
+) -> DanbiResult<crate::vcs::RevertResult> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let result = vcs::revert_doc_change(&vault_path, &commit_id, &path, force.unwrap_or(false))?;
+    if result.applied {
+        let _ = journal::append_log(
+            &vault_path,
+            &format!(
+                "**revert** `{}` · {} → `{}`",
+                &commit_id.chars().take(7).collect::<String>(),
+                path,
+                result.commit.as_deref().unwrap_or("—")
+            ),
+        );
+    }
+    Ok(result)
 }
 
 /// How many commits each project has received since the user last looked
@@ -1692,18 +1927,24 @@ pub async fn quick_capture(
     edit_ops::validate(&op)?;
 
     vcs::ensure_repo(&vault_path)?;
-    let before = vault::read_doc(&vault_path, &proj, &dom)?;
-    let after = edit_ops::apply(&before, &op)?;
-
-    let commit_before = vcs::snapshot(
-        &vault_path,
-        &format!("danbi: quick-capture pre · {}/{}", proj, dom),
-    )?;
-    vault::write_doc(&vault_path, &proj, &dom, &after)?;
-    let commit_after = vcs::snapshot(
-        &vault_path,
-        &format!("danbi: quick-capture · {}/{} · {}", proj, dom, plan.summary),
-    )?;
+    // LLM 응답을 받은 뒤 다시 읽어 적용하고, read → write → commit 은
+    // 다른 쓰기 경로와 같은 락 안에서 (await 없음).
+    let (commit_before, commit_after) = {
+        let _write_guard = vcs::write_guard();
+        let before = vault::read_doc(&vault_path, &proj, &dom)?;
+        let after = edit_ops::apply(&before, &op)?;
+        let commit_before = vcs::snapshot(
+            &vault_path,
+            &format!("danbi: quick-capture pre · {}/{}", proj, dom),
+        )?;
+        vault::write_doc(&vault_path, &proj, &dom, &after)?;
+        let commit_after = vcs::snapshot_as(
+            &vault_path,
+            &format!("danbi: quick-capture · {}/{} · {}", proj, dom, plan.summary),
+            vcs::CLIENT_HUMAN,
+        )?;
+        (commit_before, commit_after)
+    };
 
     let _ = journal::append_log(
         &vault_path,
@@ -1764,28 +2005,45 @@ async fn capture_append_no_llm(
     cfg: &config::DanbiConfig,
 ) -> DanbiResult<QuickCaptureResult> {
     vcs::ensure_repo(vault_path)?;
-    // 파일이 없으면 자동 생성 후 append 한다 — daily 노트는 일자별로
-    // 매번 새로 만들어지는 게 정상 동작.
-    let before = match vault::read_doc(vault_path, project, domain) {
-        Ok(s) => s,
-        Err(_) => {
-            vault::write_doc(vault_path, project, domain, "")?;
-            String::new()
-        }
-    };
     let op = EditOp::Append {
         content: message.to_string(),
     };
-    let after = edit_ops::apply(&before, &op)?;
-    let commit_before = vcs::snapshot(
-        vault_path,
-        &format!("danbi: capture pre · {}/{}", project, domain),
-    )?;
-    vault::write_doc(vault_path, project, domain, &after)?;
-    let commit_after = vcs::snapshot(
-        vault_path,
-        &format!("danbi: capture · {}/{}", project, domain),
-    )?;
+    // read → append → write → commit 을 MCP·REST·팝오버와 같은 락 안에서.
+    // 에이전트가 같은 daily 노트에 동시에 쓰면 한쪽이 사라지던 경로.
+    let (commit_before, commit_after) = {
+        let _write_guard = vcs::write_guard();
+        // 파일이 없으면 자동 생성 후 append 한다 — daily 노트는 일자별로
+        // 매번 새로 만들어지는 게 정상 동작.
+        let before = match vault::read_doc(vault_path, project, domain) {
+            Ok(s) => s,
+            Err(_) => {
+                vault::write_doc(vault_path, project, domain, "")?;
+                String::new()
+            }
+        };
+        let after = edit_ops::apply(&before, &op)?;
+        let commit_before = vcs::snapshot(
+            vault_path,
+            &format!("danbi: capture pre · {}/{}", project, domain),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("[vcs] capture pre-snapshot skipped: {e}");
+            None
+        });
+        vault::write_doc(vault_path, project, domain, &after)?;
+        // 파일은 이미 저장됐다 — 커밋 실패를 오류로 돌려주면 재시도가
+        // 같은 메모를 두 번 붙인다. 다음 스냅샷이 이 변경을 담는다.
+        let commit_after = vcs::snapshot_as(
+            vault_path,
+            &format!("danbi: capture · {}/{}", project, domain),
+            vcs::CLIENT_HUMAN,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("[vcs] capture commit deferred for {project}/{domain}: {e}");
+            None
+        });
+        (commit_before, commit_after)
+    };
 
     // summary: 메시지의 첫 줄만 잘라서 알림에 쓴다.
     let summary = message
@@ -1870,23 +2128,54 @@ pub fn search_local(query: String, limit: Option<usize>) -> DanbiResult<Vec<crat
 pub async fn search_full(
     query: String,
     limit: Option<usize>,
+    mode: Option<String>,
 ) -> DanbiResult<Vec<crate::search::SearchHit>> {
+    search_hybrid(query, limit, mode).await.map(|r| r.hits)
+}
+
+/// `search_full` plus the semantic-arm status, so the UI can say "키워드
+/// 결과만" when the embedding timed out instead of silently degrading.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchOutcome {
+    pub hits: Vec<crate::search::SearchHit>,
+    pub mode: crate::search::SearchMode,
+    /// `used` · `cached` · `off` · `timeout` · `error` — see `QueryEmbedding`.
+    pub semantic: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[tauri::command]
+pub async fn search_hybrid(
+    query: String,
+    limit: Option<usize>,
+    mode: Option<String>,
+) -> DanbiResult<SearchOutcome> {
+    let mode = crate::search::SearchMode::parse(mode.as_deref())?;
+    let empty = |mode| SearchOutcome { hits: Vec::new(), mode, semantic: "off", note: None };
     let vault = default_vault_path()?;
     let cfg = config::load_config(&vault)?;
     let cfg = match cfg {
         Some(c) => c,
-        None => return Ok(Vec::new()),
+        None => return Ok(empty(mode)),
     };
     let vault_path = match cfg.vault_path.clone() {
         Some(p) => PathBuf::from(p),
-        None => return Ok(Vec::new()),
+        None => return Ok(empty(mode)),
     };
     let lim = limit.unwrap_or(10);
 
     // 사용자가 임베딩 provider 를 설정해뒀으면 RRF 하이브리드 검색,
-    // 아니면 BM25 만 사용.
-    let embedding = embed_query_for_search(&cfg, &query).await;
-    crate::search::full_search_hybrid(&vault_path, &query, lim, embedding.as_deref())
+    // 아니면 (또는 keyword 모드·타임아웃이면) BM25 만 사용.
+    let q = embed_query(&cfg, &query, mode).await;
+    let hits = tokio::task::spawn_blocking(move || {
+        crate::search::full_search_mode(&vault_path, &query, lim, q.embedding.as_deref(), mode)
+            .map(|hits| (hits, q.semantic, q.note))
+    })
+    .await
+    .map_err(|e| DanbiError::Other(format!("join: {e}")))??;
+    let (hits, semantic, note) = hits;
+    Ok(SearchOutcome { hits, mode, semantic, note })
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1971,6 +2260,7 @@ pub fn compound_apply(
     let vault_path = require_vault(&cfg)?;
 
     vcs::ensure_repo(&vault_path)?;
+    let _write_guard = vcs::write_guard();
 
     // Target may be a new file — ensure project exists, then decide whether we're
     // creating or overwriting.
@@ -1988,9 +2278,10 @@ pub fn compound_apply(
 
     vault::write_doc(&vault_path, &project, &domain, &draft)?;
 
-    let commit_after = vcs::snapshot(
+    let commit_after = vcs::snapshot_as(
         &vault_path,
         &format!("danbi: compound · {}/{} · {}", project, domain, summary),
+        vcs::CLIENT_DANBI,
     )?;
 
     let _ = journal::append_log(
@@ -2098,7 +2389,7 @@ pub fn resize_capture(app: AppHandle, height: f64) -> DanbiResult<()> {
 /// AI 연동 (cfg.embed_provider) 이 켜져있을 때, 자동화 (요약·purpose 작성·
 /// ghost 제안) 에 쓸 LLM 모델 id 를 결정. cfg.automation_model 이 명시돼
 /// 있으면 그것을 우선, 없으면 provider 별 가벼운 디폴트.
-fn resolve_summarize_model(cfg: &DanbiConfig) -> Option<(String, &'static str)> {
+pub(crate) fn resolve_summarize_model(cfg: &DanbiConfig) -> Option<(String, &'static str)> {
     let kind = cfg.embed_provider.as_ref()?.kind_str();
     let kind_static: &'static str = match kind {
         "google" => "google",
@@ -2259,10 +2550,6 @@ pub async fn summarize_weekly(
     let _ = crate::vault::create_domain(&vault_path, &project, &domain);
 
     crate::vcs::ensure_repo(&vault_path)?;
-    let _ = crate::vcs::snapshot(
-        &vault_path,
-        &format!("danbi: weekly summary · {project}/{domain} (pre)"),
-    );
     let header = format!(
         "# 주간 회고 — {} W{:02}\n\n_{}_\n\n",
         iso.year(),
@@ -2270,11 +2557,19 @@ pub async fn summarize_weekly(
         kind,
     );
     let final_body = format!("{header}{summary_md}\n");
-    crate::vault::write_doc(&vault_path, &project, &domain, &final_body)?;
-    let commit = crate::vcs::snapshot(
-        &vault_path,
-        &format!("danbi: weekly summary · {project}/{domain}"),
-    )?;
+    let commit = {
+        let _write_guard = crate::vcs::write_guard();
+        let _ = crate::vcs::snapshot(
+            &vault_path,
+            &format!("danbi: weekly summary · {project}/{domain} (pre)"),
+        );
+        crate::vault::write_doc(&vault_path, &project, &domain, &final_body)?;
+        crate::vcs::snapshot_as(
+            &vault_path,
+            &format!("danbi: weekly summary · {project}/{domain}"),
+            crate::vcs::CLIENT_DANBI,
+        )?
+    };
 
     Ok(serde_json::json!({
         "project": project,
@@ -3094,14 +3389,18 @@ pub fn ghost_accept(project: String, id: String) -> DanbiResult<GhostStore> {
     let vault_path = require_vault(&cfg)?;
 
     vcs::ensure_repo(&vault_path)?;
+    // accept 는 소스 문서를 읽고 링크를 붙여 다시 쓴다 — 에이전트 쓰기와
+    // 같은 락 안에서.
+    let _write_guard = vcs::write_guard();
     let commit_before = vcs::snapshot(
         &vault_path,
         &format!("danbi: pre-ghost-accept · {project}"),
     )?;
     let store = ghost_links::accept(&vault_path, &project, &id)?;
-    let commit_after = vcs::snapshot(
+    let commit_after = vcs::snapshot_as(
         &vault_path,
         &format!("danbi: ghost-accept · {project} · {id}"),
+        vcs::CLIENT_HUMAN,
     )?;
     let _ = journal::append_log(
         &vault_path,
@@ -3458,8 +3757,11 @@ pub fn vector_stats() -> DanbiResult<crate::vector::VectorIndexStats> {
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
-    let idx = crate::vector::load(&vault_path)?;
-    Ok(crate::vector::stats(&idx))
+    let idx = crate::vector::load_cached(&vault_path)?;
+    // Compare against the model a reindex would use so Settings can warn
+    // about entries left behind by a model switch.
+    let configured = crate::mcp::configured_embed_model(&cfg);
+    Ok(crate::vector::stats_with_model(&idx, configured.as_deref()))
 }
 
 /// Emit a `vector:reindex_progress` Tauri event for every step pushed by
@@ -3568,7 +3870,7 @@ pub async fn vector_search(
     let embeddings =
         crate::usage::with_role("embed", provider.embed(&model, &[query])).await?;
     let q = embeddings.into_iter().next().unwrap_or_default();
-    let idx = crate::vector::load(&vault_path)?;
+    let idx = crate::vector::load_cached(&vault_path)?;
     Ok(crate::vector::query(&idx, &q, limit.unwrap_or(10)))
 }
 
@@ -3583,6 +3885,7 @@ pub fn reviews_list() -> DanbiResult<crate::reviews::ReviewStore> {
 
 #[tauri::command]
 pub fn reviews_resolve(
+    app: AppHandle,
     id: String,
     status: String,
 ) -> DanbiResult<crate::reviews::ReviewStore> {
@@ -3600,7 +3903,11 @@ pub fn reviews_resolve(
             )))
         }
     };
-    crate::reviews::resolve(&vault_path, &id, next)
+    let store = crate::reviews::resolve(&vault_path, &id, next)?;
+    // Sidebar badge and review lists listen for this instead of polling.
+    use tauri::Emitter;
+    let _ = app.emit(crate::reviews::REVIEWS_CHANGED_EVENT, ());
+    Ok(store)
 }
 
 #[tauri::command]
@@ -3638,7 +3945,7 @@ pub fn build_graph(project: Option<String>) -> DanbiResult<crate::graph::GraphDa
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
-    crate::graph::build_graph(&vault_path, project.as_deref())
+    crate::graph::build_graph_cached(&vault_path, project.as_deref()).map(|g| (*g).clone())
 }
 
 #[tauri::command]
@@ -3701,7 +4008,7 @@ pub fn undo_last() -> DanbiResult<Option<String>> {
 /// `~/.claude/skills/<dir>/` lookup wants ASCII-safe names; Korean and
 /// other non-ASCII project names get hashed to a stable suffix so the
 /// directory is always reproducible from the project name.
-fn skill_dir_for(project: &str) -> String {
+pub(crate) fn skill_dir_for(project: &str) -> String {
     let safe: String = project
         .chars()
         .map(|c| {
@@ -3836,10 +4143,34 @@ pub fn skill_status(project: String, agent: Option<String>) -> DanbiResult<bool>
         Some(p) => p,
         None => return Ok(false),
     };
-    let dir = skill_dir_for(&project);
-    Ok(agent_skill_dirs(&home, agent.as_deref())
+    Ok(skill_installed_in(&agent_skill_dirs(&home, agent.as_deref()), &project))
+}
+
+/// `skill_status` for many projects in one IPC round-trip — the home
+/// screen used to call it once per project, serially.
+#[tauri::command]
+pub fn skill_status_all(
+    projects: Vec<String>,
+    agent: Option<String>,
+) -> DanbiResult<std::collections::HashMap<String, bool>> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(projects.into_iter().map(|p| (p, false)).collect());
+    };
+    let roots = agent_skill_dirs(&home, agent.as_deref());
+    Ok(projects
+        .into_iter()
+        .map(|p| {
+            let installed = skill_installed_in(&roots, &p);
+            (p, installed)
+        })
+        .collect())
+}
+
+fn skill_installed_in(roots: &[std::path::PathBuf], project: &str) -> bool {
+    let dir = skill_dir_for(project);
+    roots
         .iter()
-        .any(|root| root.join(&dir).join("SKILL.md").exists()))
+        .any(|root| root.join(&dir).join("SKILL.md").exists())
 }
 
 #[derive(Serialize)]
@@ -3912,6 +4243,22 @@ pub fn codex_connect(
     let (merged, replaced) = merge_codex_block(&existing, &server_name, &url, &token);
     std::fs::write(&config_path, &merged)
         .map_err(|e| DanbiError::Other(format!("write config.toml: {e}")))?;
+    // 토큰 회전이 이 파일도 갱신할 수 있게 레지스트리에 기록.
+    if let Some(home) = dirs::home_dir() {
+        crate::agent_connect::register(
+            &home,
+            crate::agent_connect::Connection {
+                agent: "codex".into(),
+                project: project.clone(),
+                path: config_path.to_string_lossy().to_string(),
+                servers: vec![crate::agent_connect::ServerEntry {
+                    name: server_name.clone(),
+                    url: url.clone(),
+                }],
+                connected_at: crate::agent_connect::now_secs(),
+            },
+        )?;
+    }
 
     // Migrate every Danbi-managed legacy global entry away. Leaving even one
     // in ~/.codex/config.toml would keep exposing it in every workspace.
@@ -3922,6 +4269,182 @@ pub fn codex_connect(
         server_name,
         global_removed,
         action: if replaced { "updated" } else { "added" }.to_string(),
+    })
+}
+
+#[derive(Serialize)]
+pub struct AgentConnectResult {
+    pub agent: String,
+    pub path: String,
+    pub server_names: Vec<String>,
+    /// "added" when none of our servers existed in the file, "updated"
+    /// when at least one was replaced in place.
+    pub action: String,
+    /// Registrations found in `~/.claude*.json` (`claude mcp add`) that
+    /// point at this Danbi server for the same folder (local) or every
+    /// folder (user). Reported only — Danbi never edits those files.
+    pub legacy: Vec<crate::agent_connect::LegacyEntry>,
+}
+
+/// Write Danbi's MCP servers into a code folder for Claude Code
+/// (`<repo>/.mcp.json`) or Cursor (`<repo>/.cursor/mcp.json`). Same
+/// flow as Codex: pick a folder, merge into the existing file (other
+/// servers/keys preserved, ours replaced in place), keep the token out
+/// of Git via `.git/info/exclude`, and record the file in
+/// `~/.danbi/connections.json` so a token rotation refreshes it.
+#[tauri::command]
+pub fn agent_connect(
+    app: AppHandle,
+    project: String,
+    agent: String,
+    target_dir: String,
+) -> DanbiResult<AgentConnectResult> {
+    use crate::agent_connect::{self as ac, Agent};
+    let kind = match Agent::parse(&agent) {
+        Some(Agent::Claude) => Agent::Claude,
+        Some(Agent::Cursor) => Agent::Cursor,
+        _ => {
+            return Err(DanbiError::Other(format!(
+                "agent_connect 는 claude · cursor 만 지원해요 (받은 값: {agent}). Codex 는 codex_connect."
+            )))
+        }
+    };
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    if !cfg.mcp.enabled {
+        return Err(DanbiError::Other(
+            "MCP 서버가 꺼져 있어요. 설정 → MCP 에서 먼저 켜주세요.".into(),
+        ));
+    }
+    let server = app.state::<crate::mcp::McpServer>();
+    if server.info().is_none() {
+        return Err(DanbiError::Other(
+            "MCP 서버가 실행 중이 아니에요. 설정 → MCP 에서 켜주세요.".into(),
+        ));
+    }
+    let vault_path = require_vault(&cfg)?;
+    let id = vault::ensure_project_id(&vault_path, &project)?;
+    let servers = ac::split_servers(&project, &id, cfg.mcp.port);
+
+    let target = std::path::PathBuf::from(&target_dir);
+    if !target.is_absolute() || !target.is_dir() {
+        return Err(DanbiError::Other(
+            "코드 폴더가 존재하는 절대 경로여야 합니다.".into(),
+        ));
+    }
+    let target = std::fs::canonicalize(&target)
+        .map_err(|e| DanbiError::Other(format!("resolve code folder: {e}")))?;
+    let config_path = target.join(kind.config_rel_path());
+    exclude_local_file_from_git(
+        &target,
+        &config_path,
+        &format!("{} 설정", kind.label()),
+        "MCP 토큰을 기록하지 않았습니다",
+        &format!("# Danbi {} MCP credentials (machine-local)", kind.label()),
+    )?;
+    let existing = match std::fs::read_to_string(&config_path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(DanbiError::Other(format!("read {}: {e}", kind.config_rel_path()))),
+    };
+    let (merged, replaced) = ac::merge_mcp_json(&existing, kind, &servers, &cfg.mcp.token)?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| DanbiError::Other(format!("create {}: {e}", parent.display())))?;
+    }
+    std::fs::write(&config_path, merged)
+        .map_err(|e| DanbiError::Other(format!("write {}: {e}", kind.config_rel_path())))?;
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| DanbiError::Other("home directory not found".into()))?;
+    ac::register(
+        &home,
+        ac::Connection {
+            agent: kind.as_str().to_string(),
+            project: project.clone(),
+            path: config_path.to_string_lossy().to_string(),
+            servers: servers.clone(),
+            connected_at: ac::now_secs(),
+        },
+    )?;
+    let legacy = if kind == Agent::Claude {
+        ac::detect_claude_legacy_in_home(&home, &target, cfg.mcp.port)
+    } else {
+        Vec::new()
+    };
+
+    Ok(AgentConnectResult {
+        agent: kind.as_str().to_string(),
+        path: config_path.to_string_lossy().to_string(),
+        server_names: servers.into_iter().map(|s| s.name).collect(),
+        action: if replaced { "updated" } else { "added" }.to_string(),
+        legacy,
+    })
+}
+
+#[derive(Serialize)]
+pub struct ConnectionFileStatus {
+    pub agent: String,
+    pub path: String,
+    /// false when the folder/file was deleted since we wrote it.
+    pub exists: bool,
+}
+
+#[derive(Serialize)]
+pub struct AgentConnectionStatus {
+    pub server_running: bool,
+    pub port: u16,
+    /// Connection files Danbi wrote for this project.
+    pub connections: Vec<ConnectionFileStatus>,
+    /// Last authenticated MCP call on this project's endpoints since the
+    /// app started (reads included). Unix ms.
+    pub last_call_at: Option<i64>,
+    pub last_call_client: Option<String>,
+    /// Last persisted inbound write (usage log) — survives restarts.
+    pub last_write_at: Option<i64>,
+    pub last_write_client: Option<String>,
+}
+
+/// "연결됨" is decided here, not when a command is copied to the
+/// clipboard: the server must be up, and we show when an agent last
+/// actually called in.
+#[tauri::command]
+pub fn agent_connection_status(app: AppHandle, project: String) -> DanbiResult<AgentConnectionStatus> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let server = app.state::<crate::mcp::McpServer>();
+    let project_id = vault::ensure_project_id(&vault_path, &project).ok();
+
+    let connections = dirs::home_dir()
+        .map(|home| {
+            crate::agent_connect::load_registry(&crate::agent_connect::registry_path(&home))
+                .into_iter()
+                .filter(|c| c.project == project)
+                .map(|c| ConnectionFileStatus {
+                    exists: std::path::Path::new(&c.path).exists(),
+                    agent: c.agent,
+                    path: c.path,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let presence = project_id
+        .as_deref()
+        .and_then(crate::mcp_presence::last_for);
+    let last_write = crate::mcp_inbound::last_write_for_project(&project);
+
+    Ok(AgentConnectionStatus {
+        server_running: server.info().is_some(),
+        port: cfg.mcp.port,
+        connections,
+        last_call_at: presence.as_ref().map(|p| p.ts_ms),
+        last_call_client: presence.map(|p| p.client),
+        last_write_at: last_write.as_ref().map(|w| w.0),
+        last_write_client: last_write.and_then(|w| w.1),
     })
 }
 
@@ -3965,8 +4488,27 @@ fn exclude_codex_config_from_git(
     target: &std::path::Path,
     config_path: &std::path::Path,
 ) -> DanbiResult<()> {
+    exclude_local_file_from_git(
+        target,
+        config_path,
+        "Codex 설정",
+        "MCP 토큰을 기록하지 않았습니다",
+        "# Danbi project-local MCP credentials",
+    )
+}
+
+/// Keeps a Danbi-written, machine-local file out of Git: refuses when the
+/// file is already tracked, otherwise adds it to `.git/info/exclude` (works
+/// for nested folders and worktrees). No-op outside a Git repository.
+fn exclude_local_file_from_git(
+    target: &std::path::Path,
+    config_path: &std::path::Path,
+    label: &str,
+    refused: &str,
+    comment: &str,
+) -> DanbiResult<()> {
     let config_suffix = config_path.strip_prefix(target).map_err(|_| {
-        DanbiError::Other("Codex 설정 경로가 선택한 폴더 밖에 있습니다.".into())
+        DanbiError::Other(format!("{label} 경로가 선택한 폴더 밖에 있습니다."))
     })?;
     let canonical_target = std::fs::canonicalize(target)
         .map_err(|e| DanbiError::Other(format!("resolve Git project folder: {e}")))?;
@@ -3980,7 +4522,7 @@ fn exclude_codex_config_from_git(
     let canonical_workdir = std::fs::canonicalize(workdir)
         .map_err(|e| DanbiError::Other(format!("resolve Git worktree: {e}")))?;
     let relative = canonical_config.strip_prefix(&canonical_workdir).map_err(|_| {
-        DanbiError::Other("선택한 폴더의 Codex 설정 경로를 Git 저장소 안에서 확인할 수 없습니다.".into())
+        DanbiError::Other(format!("선택한 폴더의 {label} 경로를 Git 저장소 안에서 확인할 수 없습니다."))
     })?;
     let relative_git = relative.to_string_lossy().replace('\\', "/");
     let index = repo
@@ -3991,7 +4533,7 @@ fn exclude_codex_config_from_git(
         .is_some()
     {
         return Err(DanbiError::Other(format!(
-            "{} 파일이 Git에서 이미 추적 중이라 MCP 토큰을 기록하지 않았습니다. 먼저 추적을 해제한 뒤 다시 연결하세요.",
+            "{} 파일이 Git에서 이미 추적 중이라 {refused} (토큰이 저장소에 커밋될 수 있어요). 추적을 해제하지 말고, 연결 시트 [고급]의 로컬 등록 명령(Claude Code: `claude mcp add -s local …`, 저장소 밖에 저장)이나 Cursor 전역 설정(~/.cursor/mcp.json)을 쓰세요.",
             config_path.display()
         )));
     }
@@ -4013,7 +4555,9 @@ fn exclude_codex_config_from_git(
     if !next.is_empty() && !next.ends_with('\n') {
         next.push('\n');
     }
-    next.push_str("\n# Danbi project-local MCP credentials\n");
+    next.push('\n');
+    next.push_str(comment);
+    next.push('\n');
     next.push_str(&rule);
     next.push('\n');
     std::fs::write(&exclude_path, next)
@@ -4030,7 +4574,7 @@ fn exclude_codex_config_from_git(
 /// group's header lines and everything under them up to the next
 /// unrelated table header, plus a preceding `# danbi:mcp <name>` marker
 /// line if we wrote one before. Everything else is left byte-identical.
-fn merge_codex_block(
+pub(crate) fn merge_codex_block(
     existing: &str,
     server_name: &str,
     url: &str,
@@ -4120,6 +4664,105 @@ fn remove_codex_block(existing: &str, server_name: &str) -> (String, bool) {
         body.push('\n');
     }
     (body, replaced)
+}
+
+// ---------- Claude Code session hooks --------------------------------------
+
+#[derive(Serialize)]
+pub struct ClaudeHooksResult {
+    /// The `.claude/settings.local.json` that was written.
+    pub path: String,
+    /// The helper script every hook command runs.
+    pub helper_path: String,
+    /// "added" on first install, "updated" when Danbi hooks were replaced.
+    pub action: String,
+    /// Whether the SessionEnd auto-log hook is now installed.
+    pub session_end: bool,
+}
+
+/// Install (or refresh) Danbi's Claude Code hooks for one code folder:
+/// SessionStart (brief) always, SessionEnd (auto log) when `session_end`
+/// is on — turning it off on a re-install removes it. The hooks live in `<folder>/.claude/settings.local.json` (local,
+/// never committed) and runs `~/.danbi/bin/danbi-hook`, which reads the
+/// port and token from Danbi's config at run time — no token is written
+/// into the folder.
+#[tauri::command]
+pub fn claude_hooks_install(
+    project: String,
+    target_dir: String,
+    session_end: bool,
+) -> DanbiResult<ClaudeHooksResult> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let project_id = vault::ensure_project_id(&vault_path, &project)?;
+
+    let target = std::path::PathBuf::from(&target_dir);
+    if !target.is_absolute() || !target.is_dir() {
+        return Err(DanbiError::Other(
+            "코드 폴더가 존재하는 절대 경로여야 합니다.".into(),
+        ));
+    }
+    let target = std::fs::canonicalize(&target)
+        .map_err(|e| DanbiError::Other(format!("resolve code folder: {e}")))?;
+    let claude_dir = target.join(".claude");
+    let settings_path = claude_dir.join("settings.local.json");
+    exclude_local_file_from_git(
+        &target,
+        &settings_path,
+        "Claude Code 설정",
+        "훅을 기록하지 않았습니다",
+        "# Danbi Claude Code hooks (machine-local)",
+    )?;
+
+    let home = dirs::home_dir()
+        .ok_or_else(|| DanbiError::Other("home directory not found".into()))?;
+    let helper = write_hook_helper(&home)?;
+
+    let existing = match std::fs::read_to_string(&settings_path) {
+        Ok(body) => body,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(DanbiError::Other(format!("read settings.local.json: {e}"))),
+    };
+    let start_cmd = crate::session_hooks::hook_command(&helper, "session-start", &project_id);
+    let end_cmd = session_end
+        .then(|| crate::session_hooks::hook_command(&helper, "session-end", &project_id));
+    let (merged, replaced) = crate::session_hooks::merge_hook_settings(
+        &existing,
+        Some(&start_cmd),
+        end_cmd.as_deref(),
+    )?;
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| DanbiError::Other(format!("create .claude: {e}")))?;
+    std::fs::write(&settings_path, merged)
+        .map_err(|e| DanbiError::Other(format!("write settings.local.json: {e}")))?;
+
+    Ok(ClaudeHooksResult {
+        path: settings_path.to_string_lossy().to_string(),
+        helper_path: helper.to_string_lossy().to_string(),
+        action: if replaced { "updated" } else { "added" }.to_string(),
+        session_end,
+    })
+}
+
+/// (Re)writes `~/.danbi/bin/danbi-hook` with mode 755. Always rewritten so
+/// an app update can fix the helper in place.
+fn write_hook_helper(home: &std::path::Path) -> DanbiResult<std::path::PathBuf> {
+    let bin = home.join(".danbi").join("bin");
+    std::fs::create_dir_all(&bin)
+        .map_err(|e| DanbiError::Other(format!("create ~/.danbi/bin: {e}")))?;
+    let helper = bin.join(crate::session_hooks::HOOK_HELPER_NAME);
+    let config_path = config::config_path(&default_vault_path()?);
+    std::fs::write(&helper, crate::session_hooks::helper_script(&config_path))
+        .map_err(|e| DanbiError::Other(format!("write danbi-hook: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| DanbiError::Other(format!("chmod danbi-hook: {e}")))?;
+    }
+    Ok(helper)
 }
 
 // ---------- Goals ----------------------------------------------------------
@@ -4219,11 +4862,13 @@ pub fn danbi_log_quick(
     if trimmed.is_empty() {
         return Err(DanbiError::Other("content is empty".into()));
     }
-    let tree = crate::vault::list_tree(&vault_path)?;
-    if !tree.projects.iter().any(|p| p.name == project) {
+    if !crate::vault::project_exists(&vault_path, &project) {
         return Err(DanbiError::Config(format!("unknown project: {project}")));
     }
 
+    // Shares the MCP/REST write lock — the popover and an agent can hit
+    // the same daily note in the same second.
+    let _write_guard = crate::vcs::write_guard();
     let domain = crate::daily::ensure_today_note(&vault_path, &project)?;
     let current = crate::vault::read_doc(&vault_path, &project, &domain)?;
     let op = crate::edit_ops::EditOp::Append {
@@ -4238,14 +4883,21 @@ pub fn danbi_log_quick(
         &format!("danbi: popover quick · {project}/{domain} (pre)"),
     );
     crate::vault::write_doc(&vault_path, &project, &domain, &next)?;
-    let commit = crate::vcs::snapshot(
+    // Saved already — a commit failure is a warning, not a reason to
+    // make the user re-send the memo.
+    let (commit, warning) = match crate::vcs::snapshot_as(
         &vault_path,
         &format!("danbi: popover quick · {project}/{domain}"),
-    )?;
+        crate::vcs::CLIENT_HUMAN,
+    ) {
+        Ok(c) => (c, None),
+        Err(e) => (None, Some(format!("저장됐지만 git 커밋 실패: {e}"))),
+    };
     Ok(serde_json::json!({
         "project": project,
         "domain": domain,
         "commit": commit,
+        "warning": warning,
     }))
 }
 
@@ -4263,6 +4915,39 @@ pub fn doc_change_history(
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
     crate::vcs::doc_history(&vault_path, &project, &domain, limit.unwrap_or(40))
+}
+
+/// 인스펙터 [diff] — 커밋 하나가 이 문서에 가한 변경 (base 생략 시 첫
+/// 부모 대비).
+#[tauri::command]
+pub fn doc_diff(
+    project: String,
+    domain: String,
+    commit: String,
+    base: Option<String>,
+) -> DanbiResult<crate::vcs::DocDiff> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::vcs::doc_diff(&vault_path, &project, &domain, &commit, base.as_deref())
+}
+
+/// 인스펙터·피드 [이 변경 되돌리기] / [이 버전으로] — 문서 하나만
+/// `before`(커밋 직전) 또는 `at`(그 시점) 으로. 새 커밋 id 반환, 변화
+/// 없으면 None. vault 전체 reset 은 하지 않는다.
+#[tauri::command]
+pub fn doc_restore(
+    project: String,
+    domain: String,
+    commit: String,
+    mode: String,
+) -> DanbiResult<Option<String>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::vcs::doc_restore(&vault_path, &project, &domain, &commit, &mode)
 }
 
 #[cfg(test)]
@@ -4434,5 +5119,81 @@ mod skill_dir_tests {
             vec![home.join(".claude/skills")]
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
+mod embed_query_tests {
+    use super::*;
+    use async_trait::async_trait;
+
+    /// Embeds after `delay_ms`, or fails when `fail` is set.
+    struct StubEmbed {
+        delay_ms: u64,
+        fail: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Provider for StubEmbed {
+        fn kind(&self) -> &'static str {
+            "stub"
+        }
+        async fn converse_text(&self, _: &str, _: Option<&str>, _: &str, _: i32, _: f32) -> DanbiResult<String> {
+            unreachable!()
+        }
+        async fn list_models(&self) -> DanbiResult<Vec<crate::providers::ModelInfo>> {
+            Ok(Vec::new())
+        }
+        async fn test_connection(&self, _: Option<&str>) -> DanbiResult<crate::providers::TestResult> {
+            unreachable!()
+        }
+        async fn embed(&self, model_id: &str, inputs: &[String]) -> DanbiResult<Vec<Vec<f32>>> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+            if self.fail {
+                return Err(DanbiError::Other("429".into()));
+            }
+            Ok(inputs.iter().map(|q| vec![q.len() as f32, model_id.len() as f32]).collect())
+        }
+    }
+
+    fn stub(delay_ms: u64, fail: bool) -> StubEmbed {
+        StubEmbed { delay_ms, fail, calls: std::sync::atomic::AtomicUsize::new(0) }
+    }
+
+    #[tokio::test]
+    async fn slow_embedding_times_out_and_reports_keyword_fallback() {
+        let p = stub(300, false);
+        let out = embed_query_with(&p, "m", "느린 질문 timeout-case", 30).await;
+        assert!(out.embedding.is_none());
+        assert_eq!(out.semantic, "timeout");
+        assert!(out.note.unwrap().contains("키워드"));
+    }
+
+    #[tokio::test]
+    async fn provider_error_reports_error_not_timeout() {
+        let p = stub(0, true);
+        let out = embed_query_with(&p, "m", "실패 질문 error-case", 500).await;
+        assert!(out.embedding.is_none());
+        assert_eq!(out.semantic, "error");
+        assert!(out.note.unwrap().contains("429"));
+    }
+
+    #[tokio::test]
+    async fn repeated_query_is_served_from_lru_without_a_second_call() {
+        let p = stub(0, false);
+        let first = embed_query_with(&p, "model-a", "  캐시 질문 lru-case ", 500).await;
+        assert_eq!(first.semantic, "used");
+        let second = embed_query_with(&p, "model-a", "캐시 질문 lru-case", 500).await;
+        assert_eq!(second.semantic, "cached", "trimmed query shares the key");
+        assert_eq!(first.embedding, second.embedding);
+        assert_eq!(p.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Another model must not reuse the vector (dimensions differ).
+        let other = embed_query_with(&p, "model-b", "캐시 질문 lru-case", 500).await;
+        assert_eq!(other.semantic, "used");
+        assert_ne!(other.embedding, first.embedding);
+        assert_eq!(p.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 }

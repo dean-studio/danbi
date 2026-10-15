@@ -42,7 +42,7 @@ export function ContextMenu({
   return (
     <div
       style={{ left: x, top: y }}
-      className="fixed z-50 min-w-44 rounded-md border border-hairline bg-surface py-1 shadow-lg shadow-black/40"
+      className="fixed z-50 min-w-44 rounded-md border border-hairline-strong bg-surface-card py-1"
       onMouseDown={(e) => e.stopPropagation()}
     >
       {items.map((it, i) => {

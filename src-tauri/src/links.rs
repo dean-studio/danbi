@@ -2,7 +2,8 @@ use crate::error::DanbiResult;
 use crate::vault::PROJECTS_DIRNAME;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct WikiLink {
@@ -90,6 +91,13 @@ pub fn build_index(vault: &Path) -> DanbiResult<LinkIndex> {
     if !projects_root.exists() {
         return Ok(index);
     }
+    // `[[notes/x.md]]` parses as project "notes"; when no such project
+    // exists it is really a sub-folder doc of the linking project.
+    let project_names: std::collections::HashSet<String> = std::fs::read_dir(&projects_root)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+        .collect();
     for entry in std::fs::read_dir(&projects_root)? {
         let entry = entry?;
         let p = entry.path();
@@ -121,7 +129,19 @@ pub fn build_index(vault: &Path) -> DanbiResult<LinkIndex> {
             let Ok(md) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let outgoing = extract_links(&md, &project);
+            let outgoing: Vec<WikiLink> = extract_links(&md, &project)
+                .into_iter()
+                .map(|l| {
+                    if project_names.contains(&l.project) {
+                        l
+                    } else {
+                        WikiLink {
+                            domain: format!("{}/{}", l.project, l.domain),
+                            project: project.clone(),
+                        }
+                    }
+                })
+                .collect();
             let src = key(&project, &fname);
             for target in &outgoing {
                 index
@@ -168,3 +188,93 @@ fn walk_md_for_links(
     }
     Ok(())
 }
+
+/// `build_index` result shared until any `.md` in the vault changes
+/// (`search::fingerprint_vault`). `danbi_context`, `danbi_related`, the
+/// graph and the sidebar's link index all ask for the same thing within
+/// seconds of each other.
+static CACHE: Mutex<Option<(PathBuf, String, Arc<LinkIndex>)>> = Mutex::new(None);
+
+pub fn build_index_cached(vault: &Path) -> DanbiResult<Arc<LinkIndex>> {
+    let fp = crate::search::fingerprint_vault(vault)?;
+    build_index_cached_with(vault, &fp)
+}
+
+/// Same as `build_index_cached` with a fingerprint the caller already
+/// computed, so one request doesn't stat the vault three times.
+pub(crate) fn build_index_cached_with(vault: &Path, fingerprint: &str) -> DanbiResult<Arc<LinkIndex>> {
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((v, fp, idx)) = guard.as_ref() {
+            if v == vault && fp == fingerprint {
+                return Ok(idx.clone());
+            }
+        }
+    }
+    // Build outside the lock — a slow walk must not stall other readers
+    // that still have a valid entry.
+    let idx = Arc::new(build_index(vault)?);
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((vault.to_path_buf(), fingerprint.to_string(), idx.clone()));
+    }
+    Ok(idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_vault(label: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "danbi-links-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(root.join(PROJECTS_DIRNAME)).unwrap();
+        root
+    }
+
+    fn write(vault: &Path, rel: &str, body: &str) {
+        let path = vault.join(PROJECTS_DIRNAME).join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn cached_index_refreshes_when_a_file_changes() {
+        let v = temp_vault("cache");
+        write(&v, "A/a.md", "[[b.md]]");
+        write(&v, "A/b.md", "");
+        let first = build_index_cached(&v).unwrap();
+        assert_eq!(first.outgoing["A/a.md"].len(), 1);
+        assert!(Arc::ptr_eq(&first, &build_index_cached(&v).unwrap()));
+
+        write(&v, "A/b.md", "[[a.md]] back-link");
+        let second = build_index_cached(&v).unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.incoming["A/a.md"].len(), 1);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn subfolder_link_resolves_to_linking_project() {
+        let v = temp_vault("subfolder");
+        write(&v, "A/index.md", "[[notes/x.md]] and [[B/y.md]]");
+        write(&v, "A/notes/x.md", "x");
+        write(&v, "B/y.md", "y");
+
+        let idx = build_index(&v).unwrap();
+        let out: Vec<String> = idx.outgoing["A/index.md"]
+            .iter()
+            .map(|l| format!("{}/{}", l.project, l.domain))
+            .collect();
+        assert_eq!(out, vec!["A/notes/x.md", "B/y.md"]);
+        assert!(idx.incoming.contains_key("A/notes/x.md"));
+        assert!(!idx.incoming.contains_key("notes/x.md"));
+        std::fs::remove_dir_all(v).ok();
+    }
+}
+

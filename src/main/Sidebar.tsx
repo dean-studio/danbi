@@ -3,10 +3,11 @@ import {
   ArrowDown,
   ArrowUp,
   ArrowUpCircle,
+  BarChart3,
   Bell,
-  CheckCheck,
   ChevronDown,
   ChevronRight,
+  Clock4,
   FileText,
   Folder,
   FolderOpen,
@@ -16,16 +17,15 @@ import {
   Layers,
   Network,
   Plus,
-  RefreshCw,
   Search as SearchIcon,
   Settings as SettingsIcon,
-  Trash2,
+  Sun,
 } from "lucide-react";
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
 import { ipc, type ProjectGroup, type TriggerKind } from "@/lib/ipc";
 import { applyPendingUpdate, dismissUpdatePill } from "@/lib/updater";
 import { ContextMenu, type MenuItem } from "@/components/ContextMenu";
-import { shortModel } from "@/components/ModelPicker";
+import { useMcpSummary } from "@/main/ConnectSheet";
 import { projectIconOf } from "@/components/ProjectIconPicker";
 import { projectColorVars } from "@/components/ProjectColorPicker";
 import { Wordmark } from "@/components/Wordmark";
@@ -56,14 +56,11 @@ export function Sidebar({
   onRenameDomain,
   onDeleteDomain,
   onOpenSettings,
-  onOpenSearch,
+  onOpenPalette,
   onOpenGraph,
-  onOpenReviews,
   reviewCount,
-  onOpenTrash,
-  trashHasUnseen,
-  onCopyMcpInstall,
-  onCopyClaudeMdTemplate,
+  onOpenConnect,
+  onNewNote,
   onChangeProjectIcon,
   onChangeProjectColor,
   onMarkProjectRead,
@@ -73,7 +70,6 @@ export function Sidebar({
   onRenameFolder,
   onDeleteFolder,
   onMoveDomain,
-  onRefreshTree,
 }: {
   onAddProject: () => void;
   /** Like `onAddProject` but pre-targets a group so the new project lands
@@ -89,16 +85,17 @@ export function Sidebar({
   onRenameDomain: (project: string, domain: string) => void;
   onDeleteDomain: (project: string, domain: string) => void;
   onOpenSettings: () => void;
-  onOpenSearch: () => void;
+  /** 검색창 모양 1개 — 클릭하면 ⌘K 통합 팔레트. 검색·그래프·휴지통·
+   *  새로고침·모두 읽음은 전부 팔레트 `>` 명령으로 옮겨 헤더 아이콘을
+   *  2개(+ 메뉴, 알림)로 줄였다. */
+  onOpenPalette: () => void;
   onOpenGraph: () => void;
-  onOpenReviews: () => void;
+  /** 검토함 내비 행의 배지 수 (저신뢰 리뷰 pending). */
   reviewCount: number;
-  onOpenTrash: () => void;
-  /** 마지막 본 시점 이후 새 휴지통 항목이 있는지. true 면 사이드바
-   *  Trash2 아이콘 옆에 미시 dot 으로 알림. 모달 한 번 열면 사라짐. */
-  trashHasUnseen: boolean;
-  onCopyMcpInstall: (project: string) => void;
-  onCopyClaudeMdTemplate: (project: string) => void;
+  /** 연결 시트 열기 (프로젝트 우클릭 "연결 관리…", 푸터 MCP 점). */
+  onOpenConnect: (project: string | null) => void;
+  /** 헤더 + 메뉴의 "새 노트" — 현재 프로젝트(없으면 팔레트 @ 모드). */
+  onNewNote: () => void;
   onChangeProjectIcon: (project: string) => void;
   onChangeProjectColor: (project: string) => void;
   onMarkProjectRead: (project: string) => void;
@@ -115,10 +112,6 @@ export function Sidebar({
     domain: string,
     toFolder: string | null,
   ) => void;
-  /** Force a vault tree refetch. Bound to the sidebar refresh button so
-   *  users can manually re-sync after an external change (e.g. a file
-   *  copied via Finder, or an MCP write from another agent). */
-  onRefreshTree: () => void;
 }) {
   const tree = useApp((s) => s.tree);
   const cfg = useApp((s) => s.cfg);
@@ -126,6 +119,8 @@ export function Sidebar({
   const selectProject = useApp((s) => s.selectProject);
   const selectDomain = useApp((s) => s.selectDomain);
   const clearSelection = useApp((s) => s.clearSelection);
+  const view = useApp((s) => s.view);
+  const setView = useApp((s) => s.setView);
   const groups = useApp((s) => s.groups);
   const setGroups = useApp((s) => s.setGroups);
   const projectUpdates = useApp((s) => s.projectUpdates);
@@ -522,12 +517,8 @@ export function Sidebar({
     },
     { kind: "divider" },
     {
-      label: "Claude Code 설치 명령 복사",
-      onClick: () => onCopyMcpInstall(project),
-    },
-    {
-      label: "CLAUDE.md 단비 블록 복사",
-      onClick: () => onCopyClaudeMdTemplate(project),
+      label: "연결 관리…",
+      onClick: () => onOpenConnect(project),
     },
     { kind: "divider" },
     { label: "프로젝트 삭제", onClick: () => onDeleteProject(project), danger: true },
@@ -681,77 +672,73 @@ export function Sidebar({
           <Wordmark className="h-5 w-auto shrink-0 transition-opacity group-hover:opacity-90" />
         </button>
         <div className="flex items-center gap-0.5">
-          <Tip text="검색 (⌘K)">
-          <button
-            onClick={onOpenSearch}
-            className="grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
-          >
-            <SearchIcon size={16} />
-          </button>
-          </Tip>
-          <Tip text="그래프 (⌘G)">
-          <button
-            onClick={onOpenGraph}
-            className="grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
-          >
-            <Network size={16} />
-          </button>
-          </Tip>
-          {/* 리뷰 인박스는 ghost scan / compound preview 등 LLM 결과를
-              사용자가 승인·거부하는 곳이라, LLM 미연결 상태에선 의미 없음.
-              cfg.provider 가 있을 때만 노출. */}
-          {cfg?.provider && (
-            <Tip text={`리뷰 인박스${reviewCount > 0 ? ` (${reviewCount})` : ""}`}>
-            <button
-              onClick={onOpenReviews}
-              className="relative grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
-            >
-              <Inbox size={16} />
-              {reviewCount > 0 && (
-                <span className="absolute -right-1 -top-1 grid h-4 min-w-[16px] place-items-center rounded-full bg-accent-red px-1 text-[10px] font-semibold leading-none text-on-dark">
-                  {reviewCount > 9 ? "9+" : reviewCount}
-                </span>
-              )}
-            </button>
-            </Tip>
-          )}
-          <Tip text="휴지통">
-          <button
-            onClick={onOpenTrash}
-            className="relative grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
-          >
-            <Trash2 size={15} />
-            {trashHasUnseen && (
-              <span
-                className="absolute h-1.5 w-1.5 rounded-full bg-accent-yellow"
-                style={{ right: 6, top: 6 }}
-                aria-hidden
-              />
-            )}
-          </button>
-          </Tip>
+          <AddMenu
+            onNewNote={onNewNote}
+            onNewProject={onAddProject}
+            onNewGroup={() => {
+              setCreatingGroup(true);
+              setNewGroupLabel("");
+            }}
+          />
           <NotificationBell />
-          <MarkAllReadButton onAfter={onRefreshTree} />
-          <Tip text="새로고침">
-          <button
-            onClick={onRefreshTree}
-            className="grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
-          >
-            <RefreshCw size={15} />
-          </button>
-          </Tip>
-          <Tip text="프로젝트 추가">
-          <button
-            onClick={onAddProject}
-            className="grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
-          >
-            <Plus size={17} />
-          </button>
-          </Tip>
         </div>
       </header>
 
+      {/* 검색 또는 명령 — 입력창 모양이지만 클릭 = 팔레트. */}
+      <div className="px-2 pt-2">
+        <button
+          onClick={onOpenPalette}
+          className="flex h-9 w-full items-center gap-2 rounded-md border border-hairline bg-surface-elevated px-2.5 text-left text-[13px] text-mute transition-colors hover:border-hairline-strong hover:text-body"
+        >
+          <SearchIcon size={14} className="shrink-0 text-stone" />
+          <span className="flex-1 truncate">검색 또는 명령…</span>
+          <kbd className="rounded-xs border border-hairline bg-surface px-1 font-mono text-[10px] leading-[16px] text-stone">
+            ⌘K
+          </kbd>
+        </button>
+      </div>
+
+      {/* 내비 — 오늘(홈) · 검토함 · 그래프 · 사용량 */}
+      <nav className="flex flex-col gap-px px-2 pt-2">
+        <NavRow
+          icon={<Sun size={14} />}
+          label="오늘"
+          active={view === "home" && !selection.project}
+          onClick={clearSelection}
+        />
+        <NavRow
+          icon={<Inbox size={14} />}
+          label="검토함"
+          badge={reviewCount}
+          active={view === "review"}
+          onClick={() => setView("review")}
+        />
+        <NavRow
+          icon={<Network size={14} />}
+          label="그래프"
+          active={false}
+          onClick={onOpenGraph}
+        />
+        <NavRow
+          icon={<BarChart3 size={14} />}
+          label="사용량"
+          active={view === "usage"}
+          onClick={() => setView("usage")}
+        />
+      </nav>
+
+      <RecentDocs
+        onOpen={(p, d) => {
+          selectDomain(p, d);
+          clearProjectUpdate(p);
+          ipc.projectMarkSeen(p).catch(() => {});
+        }}
+      />
+
       <div className="flex-1 overflow-y-auto py-2">
+        {tree !== null && tree.projects.length > 0 && (
+          <SectionLabel label="프로젝트" />
+        )}
         {/* tree 가 null 이면 아직 listTree 가 안 끝난 로딩 상태 — 빈 CTA
             를 띄우면 vault 가 큰 사용자에게도 매번 "프로젝트 없음" 깜빡임
             이 보인다. 진짜 빈 vault (tree.projects.length === 0) 일 때만
@@ -1020,6 +1007,7 @@ export function Sidebar({
       <SidebarFooter
         vaultPath={tree?.vault_path ?? null}
         onOpenSettings={onOpenSettings}
+        onOpenConnect={() => onOpenConnect(selection.project)}
       />
 
 
@@ -1225,23 +1213,39 @@ function ProjectNode({
         >
           <GripVertical size={10} />
         </span>
+        {/* ▸ = 펼침 전용 hit area, 이름 = 프로젝트 홈 이동. 한 버튼에
+            둘을 묶으면 "홈만 보고 싶다" 가 불가능해 분리(32개 프로젝트
+            스케일). */}
         <button
-          onClick={() => {
-            onSelect();
+          onClick={(e) => {
+            e.stopPropagation();
             onToggle();
           }}
+          title={expanded ? "접기" : "펼치기"}
+          className={cn(
+            "grid h-6 w-5 shrink-0 place-items-center rounded-sm transition-colors hover:bg-surface-elevated",
+            projectActive && !hasCustomColor ? "text-accent-blue" : "text-mute",
+          )}
+          style={
+            projectActive && hasCustomColor ? { color: colorVars.fg } : undefined
+          }
+        >
+          {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </button>
+        <button
+          onClick={onSelect}
           onContextMenu={(e) => {
             e.preventDefault();
             onProjectContext(e);
           }}
           className={cn(
-            "flex flex-1 items-center gap-1.5 rounded-sm px-2 py-1 text-left text-[14px] transition-colors",
+            "flex min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1.5 py-1 text-left text-[14px] transition-colors",
             projectActive
               ? hasCustomColor
                 ? null
                 : "bg-accent-blue-soft text-accent-blue"
               : expanded
-                ? "font-medium text-on-dark"
+                ? "font-medium text-on-dark hover:bg-surface-elevated"
                 : "text-body hover:bg-surface-elevated hover:text-on-dark",
             isDragging && "opacity-50",
           )}
@@ -1251,26 +1255,6 @@ function ProjectNode({
               : undefined
           }
         >
-          {expanded ? (
-            <ChevronDown
-              size={13}
-              className={cn(
-                "shrink-0",
-                projectActive && !hasCustomColor
-                  ? "text-accent-blue"
-                  : !projectActive
-                    ? "text-on-dark"
-                    : null,
-              )}
-              style={
-                projectActive && hasCustomColor
-                  ? { color: colorVars.fg }
-                  : undefined
-              }
-            />
-          ) : (
-            <ChevronRight size={13} className="shrink-0 text-mute" />
-          )}
           <ProjectIcon project={project.name} />
           <span className="flex-1 truncate">{project.name}</span>
           <UpdateBadge
@@ -2038,7 +2022,7 @@ function DomainRow({
         </span>
       )}
       {fileKinds && fileKinds.length > 0 && (
-        <DomainKindChips kinds={fileKinds} />
+        <DomainKindDot kinds={fileKinds} />
       )}
       {change && (
         <DomainChangeDot
@@ -2050,43 +2034,33 @@ function DomainRow({
   );
 }
 
-/** daily/*.md 파일 옆에 노출되는 trigger kind 미니 chip 행. 글자 없이
- *  점 형태로 컴팩트하게 — 사이드바에 4~6 px 만 차지하면서 "이 파일에는
- *  결정·재발 방지가 있다" 를 한눈에. 자세한 라벨은 hover 툴팁. */
-function DomainKindChips({ kinds }: { kinds: TriggerKind[] }) {
-  return (
-    <span className="flex shrink-0 items-center gap-1">
-      {kinds.map((k) => (
-        <DomainKindChip key={k} kind={k} />
-      ))}
-    </span>
-  );
-}
+/** daily/*.md 파일 옆의 trigger kind 표시 — 칩 N개 대신 점 1개(가장
+ *  강한 kind 색). 전체 목록은 툴팁. 사이드바 세로 공간을 칩이 잡아먹던
+ *  문제(UI 검토 #3)의 해결. */
+const KIND_META: Record<
+  TriggerKind,
+  { label: string; dot: string; rank: number }
+> = {
+  decision: { label: "결정", dot: "bg-accent-blue", rank: 5 },
+  cause: { label: "원인", dot: "bg-accent-red", rank: 4 },
+  pitfall: { label: "재발 방지", dot: "bg-on-dark", rank: 3 },
+  todo: { label: "TODO", dot: "bg-accent-yellow", rank: 2 },
+  knowhow: { label: "노하우", dot: "bg-accent-green", rank: 1 },
+  other: { label: "메모", dot: "bg-stone", rank: 0 },
+};
 
-function DomainKindChip({ kind }: { kind: TriggerKind }) {
-  const { label, cls } = (
-    {
-      decision: { label: "결정", cls: "bg-accent-blue-soft text-accent-blue" },
-      cause: { label: "원인", cls: "bg-accent-red-soft text-accent-red" },
-      todo: { label: "TODO", cls: "bg-accent-yellow-soft text-accent-yellow" },
-      knowhow: {
-        label: "노하우",
-        cls: "bg-accent-green-soft text-accent-green",
-      },
-      pitfall: { label: "재발 방지", cls: "bg-surface-elevated text-on-dark" },
-      other: { label: "메모", cls: "bg-surface-elevated text-stone" },
-    } as const
-  )[kind];
+function DomainKindDot({ kinds }: { kinds: TriggerKind[] }) {
+  const strongest = [...kinds].sort(
+    (a, b) => (KIND_META[b]?.rank ?? 0) - (KIND_META[a]?.rank ?? 0),
+  )[0];
+  const meta = KIND_META[strongest] ?? KIND_META.other;
+  const tip = kinds.map((k) => KIND_META[k]?.label ?? k).join(" · ");
   return (
     <span
-      className={cn(
-        "rounded-xs px-1 py-px text-[9px] font-medium uppercase leading-none tracking-[0.2px]",
-        cls,
-      )}
-      title={label}
-    >
-      {label}
-    </span>
+      className={cn("h-1.5 w-1.5 shrink-0 rounded-full", meta.dot)}
+      title={tip}
+      aria-label={tip}
+    />
   );
 }
 
@@ -2147,23 +2121,15 @@ function shortPath(p: string): string {
 function SidebarFooter({
   vaultPath,
   onOpenSettings,
+  onOpenConnect,
 }: {
   vaultPath: string | null;
   onOpenSettings: () => void;
+  onOpenConnect: () => void;
 }) {
-  const cfg = useApp((s) => s.cfg);
-  const embedModel = cfg?.embed_model ?? null;
-  // 자동화 LLM 모델 — 사용자가 명시 선택했으면 그 값, 아니면 provider
-  // 별 디폴트. provider 자체가 없으면 라인 자체 안 노출.
-  const providerKind = cfg?.embed_provider?.kind ?? null;
-  const automationModel = (() => {
-    const explicit = cfg?.automation_model?.trim();
-    if (explicit) return explicit;
-    if (providerKind === "google") return "gemini-2.5-flash-lite";
-    if (providerKind === "bedrock")
-      return "us.anthropic.claude-haiku-4-5-20251001-v1:0";
-    return null;
-  })();
+  // 모델 ID 2줄은 개발 정보라 설정 → AI 연동으로만. 푸터는 경로 · MCP
+  // 상태 점(클릭 = 연결 시트) · 설정.
+  const mcp = useMcpSummary();
 
   if (!vaultPath) return null;
 
@@ -2171,13 +2137,30 @@ function SidebarFooter({
     <footer className="shrink-0 border-t border-hairline px-2 py-2.5">
       <UpdatePill />
       <BgJobPill />
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center justify-between gap-1">
         <div
-          className="px-1 flex-1 truncate font-mono text-[12px] text-mute"
+          className="min-w-0 flex-1 truncate px-1 font-mono text-[12px] text-mute"
           title={vaultPath}
         >
           {shortPath(vaultPath)}
         </div>
+        <button
+          onClick={onOpenConnect}
+          title={
+            mcp.running
+              ? `MCP 서버 실행 중 · :${mcp.port} · 연결 파일 ${mcp.connectionCount}개 — 연결 관리`
+              : "MCP 서버 꺼짐 — 연결 관리"
+          }
+          className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-sm px-1.5 text-[11px] text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
+        >
+          <span
+            className={cn(
+              "h-1.5 w-1.5 rounded-full",
+              mcp.running ? "bg-accent-green" : "bg-stone",
+            )}
+          />
+          MCP{mcp.connectionCount > 0 ? ` ${mcp.connectionCount}` : ""}
+        </button>
         <button
           onClick={onOpenSettings}
           title="설정 (⌘,)"
@@ -2186,28 +2169,215 @@ function SidebarFooter({
           <SettingsIcon size={18} />
         </button>
       </div>
-      {/* AI 연동 (cfg.embed_provider) 가 켜져있을 때만 노출.
-          - embed: 의미 검색 인덱싱 모델
-          - llm  : 요약 / purpose 자동 작성 / ghost 제안에 쓰는 모델 */}
-      {(embedModel || automationModel) && (
-        <div className="mt-1.5 flex flex-col">
-          {embedModel && (
-            <ModelLine
-              label="embed"
-              id={embedModel}
-              onClick={onOpenSettings}
-            />
-          )}
-          {automationModel && (
-            <ModelLine
-              label="llm"
-              id={automationModel}
-              onClick={onOpenSettings}
-            />
-          )}
+    </footer>
+  );
+}
+
+/** 섹션 라벨 (최근 문서 · 프로젝트). caption-sm, 대문자 트래킹. */
+function SectionLabel({
+  label,
+  right,
+}: {
+  label: string;
+  right?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between px-3 pb-1 pt-2">
+      <span className="text-[11px] font-medium uppercase tracking-[0.5px] text-stone">
+        {label}
+      </span>
+      {right}
+    </div>
+  );
+}
+
+/** 사이드바 내비 행 (command-palette-row 규격, active = -active). */
+function NavRow({
+  icon,
+  label,
+  badge,
+  active,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  badge?: number;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "flex h-7 w-full items-center gap-2 rounded-sm px-2 text-left text-[13px] transition-colors",
+        active
+          ? "bg-surface-elevated font-medium text-on-dark"
+          : "text-body hover:bg-surface-elevated hover:text-on-dark",
+      )}
+    >
+      <span className={cn("shrink-0", active ? "text-on-dark" : "text-mute")}>
+        {icon}
+      </span>
+      <span className="flex-1 truncate">{label}</span>
+      {badge !== undefined && badge > 0 && (
+        <span className="rounded-full bg-surface-card px-1.5 font-mono text-[10px] leading-[16px] text-on-dark-mute">
+          {badge > 99 ? "99+" : badge}
+        </span>
+      )}
+    </button>
+  );
+}
+
+/** 최근 수정된 문서 5개 — vault 트리의 mtime 순. daily 는 폴더에서
+ *  바로 가므로 제외하지 않고 섞는다(에이전트가 쓴 게 daily 일 때가 많다).
+ *  접힘 상태는 localStorage. */
+const RECENT_DOCS_KEY = "danbi:sidebar-recent-collapsed";
+function RecentDocs({
+  onOpen,
+}: {
+  onOpen: (project: string, domain: string) => void;
+}) {
+  const tree = useApp((s) => s.tree);
+  const selection = useApp((s) => s.selection);
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(RECENT_DOCS_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const recent = (() => {
+    if (!tree) return [];
+    const all: { project: string; domain: string; ms: number }[] = [];
+    for (const p of tree.projects) {
+      const walk = (
+        domains: { name: string; modified_ms?: number | null }[],
+      ) => {
+        for (const d of domains) {
+          if (d.modified_ms) all.push({ project: p.name, domain: d.name, ms: d.modified_ms });
+        }
+      };
+      walk(p.domains);
+      for (const f of p.subfolders) {
+        walk(f.domains);
+        for (const g of f.subfolders ?? []) walk(g.domains);
+      }
+    }
+    all.sort((a, b) => b.ms - a.ms);
+    return all.slice(0, 5);
+  })();
+  if (recent.length === 0) return null;
+  return (
+    <div className="mt-1">
+      <SectionLabel
+        label="최근 문서"
+        right={
+          <button
+            onClick={() => {
+              setCollapsed((v) => {
+                try {
+                  localStorage.setItem(RECENT_DOCS_KEY, v ? "0" : "1");
+                } catch {
+                  /* ignore */
+                }
+                return !v;
+              });
+            }}
+            className="grid h-5 w-5 place-items-center rounded-sm text-stone hover:text-on-dark"
+            title={collapsed ? "펼치기" : "접기"}
+          >
+            {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+          </button>
+        }
+      />
+      {!collapsed && (
+        <div className="flex flex-col gap-px px-2">
+          {recent.map((r) => {
+            const active =
+              selection.project === r.project && selection.domain === r.domain;
+            const short = r.domain.replace(/\.md$/, "");
+            return (
+              <button
+                key={`${r.project}/${r.domain}`}
+                onClick={() => onOpen(r.project, r.domain)}
+                title={`${r.project} / ${r.domain}`}
+                className={cn(
+                  "flex h-6 w-full items-center gap-1.5 rounded-sm px-2 text-left text-[12px] transition-colors",
+                  active
+                    ? "bg-surface-elevated text-on-dark"
+                    : "text-body hover:bg-surface-elevated hover:text-on-dark",
+                )}
+              >
+                <Clock4 size={11} className="shrink-0 text-stone" />
+                <span className="shrink-0 text-mute">{r.project}</span>
+                <span className="text-stone">/</span>
+                <span className="min-w-0 flex-1 truncate font-mono">{short}</span>
+              </button>
+            );
+          })}
         </div>
       )}
-    </footer>
+    </div>
+  );
+}
+
+/** 헤더 [+ ▾] — 새 노트 / 새 프로젝트 / 새 그룹. */
+function AddMenu({
+  onNewNote,
+  onNewProject,
+  onNewGroup,
+}: {
+  onNewNote: () => void;
+  onNewProject: () => void;
+  onNewGroup: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    function onDown(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  const item = (label: string, hint: string, fn: () => void) => (
+    <button
+      onClick={() => {
+        setOpen(false);
+        fn();
+      }}
+      className="flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-[13px] text-body transition-colors hover:bg-surface-elevated hover:text-on-dark"
+    >
+      <span>{label}</span>
+      <span className="font-mono text-[10px] text-stone">{hint}</span>
+    </button>
+  );
+  return (
+    <div ref={ref} className="relative">
+      <Tip text="새로 만들기">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="grid h-8 w-8 place-items-center rounded-md text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
+        >
+          <Plus size={17} />
+        </button>
+      </Tip>
+      {open && (
+        <div className="absolute right-0 top-9 z-40 w-[180px] overflow-hidden rounded-md border border-hairline-strong bg-surface-card py-1">
+          {item("새 노트", "⌘N", onNewNote)}
+          {item("새 프로젝트", "", onNewProject)}
+          {item("새 그룹", "", onNewGroup)}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2496,31 +2666,6 @@ function BgJobPill() {
   );
 }
 
-function ModelLine({
-  label,
-  id,
-  onClick,
-}: {
-  label: string;
-  id: string | null;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      title={id ?? "모델 선택"}
-      className="group flex w-full items-center gap-1.5 rounded-sm px-1 py-1 text-left transition-colors hover:bg-surface-elevated"
-    >
-      <span className="w-10 shrink-0 text-[12px] leading-none text-stone">
-        {label}
-      </span>
-      <span className="flex-1 truncate font-mono text-[12px] leading-none text-mute group-hover:text-on-dark">
-        {shortModel(id)}
-      </span>
-    </button>
-  );
-}
-
 /** 사이드바 헤더 종 아이콘 + popover.
  *  - 안 읽은 알림 N 만큼 빨간 배지
  *  - 클릭 시 list popover 펼침 (요약 완료 / 에러 / 정보)
@@ -2566,7 +2711,7 @@ function Tip({
       {open && (
         <span
           role="tooltip"
-          className="pointer-events-none absolute left-1/2 top-full z-50 mt-1 -translate-x-1/2 whitespace-nowrap rounded-md border border-hairline bg-surface-card px-2 py-1 text-[11px] text-on-dark shadow-lg"
+          className="pointer-events-none absolute left-1/2 top-full z-50 mt-1 -translate-x-1/2 whitespace-nowrap rounded-md border border-hairline bg-surface-card px-2 py-1 text-[11px] text-on-dark"
         >
           {text}
         </span>
@@ -2578,62 +2723,24 @@ function Tip({
 /** Sidebar header button — mark every project + every domain as read.
  *  Clears the "N" badges across the whole vault in one click, which is
  *  faster than right-clicking each project. */
-function MarkAllReadButton({ onAfter }: { onAfter?: () => void }) {
-  const setProjectUpdates = useApp((s) => s.setProjectUpdates);
-  const setDomainUpdates = useApp((s) => s.setDomainUpdates);
-  const projectUpdates = useApp((s) => s.projectUpdates);
-  const domainUpdates = useApp((s) => s.domainUpdates);
-  const showToast = useApp((s) => s.showToast);
-  const [busy, setBusy] = useState(false);
-
-  // Cheap heuristic: hide the button when there's nothing to clear.
-  // We keep the slot to avoid layout shift, but render it disabled
-  // and dimmed so the row icons don't dance.
-  const hasAnything =
-    Object.keys(projectUpdates).length > 0 ||
-    Object.keys(domainUpdates).length > 0;
-
-  async function run() {
-    if (busy) return;
-    setBusy(true);
-    try {
-      const stamped = await ipc.vaultMarkAllRead();
-      // Clear local badge state immediately so the UI updates before
-      // the next tree refresh lands. Server is the source of truth on
-      // next refresh anyway.
-      setProjectUpdates({});
-      setDomainUpdates({});
-      showToast(
-        "ok",
-        stamped > 0
-          ? `${stamped.toLocaleString()}개 도메인을 모두 읽음으로 표시했어요.`
-          : "이미 모두 읽음 상태였어요.",
-      );
-    } catch (e) {
-      console.error("[sidebar] mark all read failed", e);
-      showToast("err", "모두 읽음 처리에 실패했어요.");
-    } finally {
-      setBusy(false);
-      onAfter?.();
-    }
+/** "모두 읽음" — 홈 헤더 [읽음 처리] 와 팔레트 `>` 명령이 공유. 로컬
+ *  배지를 즉시 비우고 서버 lastSeen 을 찍는다. */
+export async function markVaultAllRead(): Promise<void> {
+  const st = useApp.getState();
+  try {
+    const stamped = await ipc.vaultMarkAllRead();
+    st.setProjectUpdates({});
+    st.setDomainUpdates({});
+    st.showToast(
+      "ok",
+      stamped > 0
+        ? `${stamped.toLocaleString()}개 도메인을 모두 읽음으로 표시했어요.`
+        : "이미 모두 읽음 상태였어요.",
+    );
+  } catch (e) {
+    console.error("[sidebar] mark all read failed", e);
+    st.showToast("err", "모두 읽음 처리에 실패했어요.");
   }
-
-  return (
-    <Tip text={hasAnything ? "모두 읽음으로 표시" : "읽지 않은 항목 없음"}>
-      <button
-        onClick={run}
-        disabled={busy || !hasAnything}
-        className={cn(
-          "grid h-8 w-8 place-items-center rounded-md transition-colors",
-          hasAnything
-            ? "text-mute hover:bg-surface-elevated hover:text-on-dark"
-            : "cursor-default text-stone/40",
-        )}
-      >
-        <CheckCheck size={15} />
-      </button>
-    </Tip>
-  );
 }
 
 function NotificationBell() {
@@ -2704,7 +2811,7 @@ function NotificationBell() {
           <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />
           <div
             style={{ top: pos.top, left: pos.left, width: POPOVER_W }}
-            className="fixed z-40 overflow-hidden rounded-md border border-hairline bg-surface shadow-xl shadow-black/40"
+            className="fixed z-40 overflow-hidden rounded-md border border-hairline-strong bg-surface-card"
           >
             <div className="flex items-center justify-between border-b border-hairline px-3 py-2 text-[11px] uppercase tracking-[0.5px] text-stone">
               <span>알림</span>

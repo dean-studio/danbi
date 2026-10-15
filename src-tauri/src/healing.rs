@@ -86,9 +86,47 @@ pub fn scan(vault: &Path) -> DanbiResult<Vec<Suggestion>> {
 }
 
 fn is_index_like(name: &str) -> bool {
-    // Treat these as "always valid entry points" — no orphan flag.
+    // Treat these as "always valid entry points" — no orphan flag. The
+    // second row is Danbi's own scaffolding (purpose/schema, the Claude
+    // Code skill, the memory index): never linked to, never an orphan.
     matches!(
         name.to_lowercase().as_str(),
         "index.md" | "readme.md" | "overview.md" | "plan.md" | "ui.md"
+            | "purpose.md" | "schema.md" | "skill.md" | "memory_index.md"
     )
+}
+
+impl Suggestion {
+    pub fn project(&self) -> &str {
+        match self {
+            Suggestion::Orphan { project, .. }
+            | Suggestion::Empty { project, .. }
+            | Suggestion::EmptyProject { project }
+            | Suggestion::Oversized { project, .. } => project,
+        }
+    }
+
+    /// Lower sorts first in the briefing's top list: actionable signals
+    /// (empty projects/files, oversized docs) before the orphan long tail.
+    pub fn priority(&self) -> u8 {
+        match self {
+            Suggestion::EmptyProject { .. } => 0,
+            Suggestion::Empty { .. } => 1,
+            Suggestion::Oversized { .. } => 2,
+            Suggestion::Orphan { .. } => 3,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scaffolding_files_are_never_orphans() {
+        for n in ["purpose.md", "schema.md", "SKILL.md", "MEMORY_index.md", "README.md"] {
+            assert!(is_index_like(n), "{n}");
+        }
+        assert!(!is_index_like("notes/auth.md"));
+    }
 }
