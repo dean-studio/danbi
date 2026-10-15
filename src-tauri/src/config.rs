@@ -125,7 +125,8 @@ impl Default for AppearanceConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorConfig {
-    /// 자동 저장 (ctrl+s 없이도 blur에 저장)
+    /// 자동 저장 — 입력이 멈추면 디바운스 후, blur 시에도 저장. 기본 켜짐.
+    /// 꺼도 문서 전환 시 flush 는 항상 한다 (DocView).
     pub autosave: bool,
     /// Soft-wrap long lines
     pub word_wrap: bool,
@@ -134,7 +135,7 @@ pub struct EditorConfig {
 impl Default for EditorConfig {
     fn default() -> Self {
         Self {
-            autosave: false,
+            autosave: true,
             word_wrap: true,
         }
     }

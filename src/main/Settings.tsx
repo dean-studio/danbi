@@ -460,7 +460,7 @@ function EditorPanel({ cfg }: { cfg: DanbiConfig }) {
       <SectionTitle title="편집" hint="중앙 문서 뷰의 동작 방식을 조정합니다." />
       <Row
         label="자동 저장"
-        hint="포커스가 에디터에서 벗어나면 자동으로 저장합니다. (예정, 아직 비활성)"
+        hint="입력이 멈추고 1.5초 뒤, 그리고 에디터에서 포커스가 벗어날 때 저장합니다. 꺼도 다른 문서로 옮길 땐 항상 저장돼요."
       >
         <Toggle
           value={cfg.editor.autosave}

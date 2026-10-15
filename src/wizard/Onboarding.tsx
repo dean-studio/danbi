@@ -475,7 +475,7 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
                           : ["ui.md", "backend.md", "plan.md"],
                       default_folders: sel.default_folders ?? ["daily"],
                       appearance: { theme: "dark", compact: false },
-                      editor: { autosave: false, word_wrap: true },
+                      editor: { autosave: true, word_wrap: true },
                       // 처음 설치 직후엔 글로벌 단축키 OFF — macOS 한국어
                       // IME 토글 등 시스템 단축키와 충돌. 사용자가 Settings
                       // 에서 직접 등록할 때만 활성화.

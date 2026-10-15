@@ -16,6 +16,9 @@ import { useApp } from "@/state/store";
 import { resolveTheme, type ThemeChoice } from "@/lib/theme";
 import { isWikiHref, parseWikiHref } from "@/main/wikiLinks";
 
+/** 마지막 입력 뒤 이만큼 조용하면 자동 저장. */
+const AUTOSAVE_DELAY_MS = 1500;
+
 function useResolvedTheme(): "dark" | "light" {
   const choice = useApp(
     (s) => (s.cfg?.appearance.theme as ThemeChoice | undefined) ?? "dark",
@@ -101,36 +104,140 @@ export function DocView({
   const [saving, setSaving] = useState(false);
   const [bytes, setBytes] = useState(0);
 
-  // Last markdown we synced to disk — dirty = (current markdown !== lastSynced).
+  // Last markdown we synced to disk. `dirty` 는 onChange 플래그 — 키 입력마다
+  // 전체 마크다운을 직렬화해 비교하지 않는다 (큰 문서에서 타이핑이 끊기던
+  // 원인). 실제 "바뀐 게 없음" 판정은 save() 에서 한 번만 한다.
   const lastSyncedMd = useRef<string>("");
   // Suppress the onChange handler when we rehydrate from disk.
   const suppressChange = useRef(false);
+  // 타이머·load() 처럼 stale closure 를 피해야 하는 곳에서 읽는 미러.
+  const dirtyRef = useRef(false);
+  const markDirty = useCallback((v: boolean) => {
+    dirtyRef.current = v;
+    setDirty(v);
+  }, []);
 
   // Track which doc the *current* editor content represents. Used so a
   // watcher-triggered refreshKey bump doesn't rebuild the editor when
   // we'd just be replacing the document with itself — the rebuild
   // visibly flickers because BlockNote rerenders the entire tree.
+  //
+  // 저장은 항상 *이 문서* 로 간다 (selection 이 아니라). 사이드바에서 다른
+  // 문서를 고른 직후엔 selection 은 이미 B 인데 에디터 본문은 아직 A 라서,
+  // selection 기준으로 쓰면 A 본문이 B 경로에 저장되는 사고가 났다.
   const loadedKey = useRef<string | null>(null);
+  const loadedDoc = useRef<{
+    vault: string;
+    project: string;
+    domain: string;
+  } | null>(null);
+  // 진행 중인 저장. load() 는 전환 전에 이걸 기다린 뒤 flush 한다.
+  const saveInFlight = useRef<Promise<void> | null>(null);
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const cancelAutosave = useCallback(() => {
+    if (autosaveTimer.current) {
+      clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+    }
+  }, []);
+
+  /** 에디터 본문을 `loadedDoc` 경로에 저장. 바뀐 게 없으면 쓰기 없이
+   *  dirty 만 내린다. 동시 호출은 진행 중인 저장을 그대로 돌려준다. */
+  const save = useCallback((): Promise<void> => {
+    if (saveInFlight.current) return saveInFlight.current;
+    const target = loadedDoc.current;
+    if (!target || !dirtyRef.current) return Promise.resolve();
+    cancelAutosave();
+    const run = (async () => {
+      setSaving(true);
+      try {
+        const live = exportBlocksToMarkdown(editor);
+        const md = rewriteMdAbsoluteToRelative(live);
+        if (md === lastSyncedMd.current) {
+          // 타이핑 후 되돌린 경우 — 디스크와 같으니 커밋을 만들지 않는다.
+          if (loadedDoc.current === target) markDirty(false);
+          return;
+        }
+        // 우리가 만든 저장이라는 marker — Workspace 의 watcher refresh 가
+        // 이 직후 발화하는 vault:changed 를 한 번 무시하게 해서 사이드바
+        // listTree + linkIndex 재빌드를 건너뛴다.
+        useApp.getState().markSelfSave();
+        await ipc.writeDoc(target.vault, target.project, target.domain, md);
+        // 저장 중에 문서가 바뀌지 않았을 때만 상태를 내린다 (load() 가
+        // flush 를 기다리므로 보통은 항상 같다).
+        if (loadedDoc.current === target) {
+          lastSyncedMd.current = md;
+          setBytes(md.length);
+          markDirty(false);
+        }
+      } finally {
+        setSaving(false);
+        saveInFlight.current = null;
+      }
+    })();
+    saveInFlight.current = run;
+    return run;
+  }, [editor, cancelAutosave, markDirty]);
+
+  // 실패를 toast 로 알리는 변형 — 본문은 에디터에 그대로 남아 있으므로
+  // 전체 패널을 에러로 바꾸지 않는다 (사용자가 다시 ⌘S 하면 됨).
+  const saveOrNotify = useCallback(() => {
+    const target = loadedDoc.current;
+    return save().catch((e) => {
+      pushNotification({
+        tone: "err",
+        title: "저장 실패",
+        body: `${target?.project}/${target?.domain} — ${String(e).slice(0, 120)}`,
+      });
+    });
+  }, [save, pushNotification]);
+
   useEffect(() => {
     let alive = true;
     async function load() {
+      const nextKey =
+        cfg?.vault_path && selection.project && selection.domain
+          ? `${cfg.vault_path}|${selection.project}|${selection.domain}`
+          : null;
+      const isSwitchingDoc = loadedKey.current !== nextKey;
+
+      // 다른 문서로 가기 전에 미저장분을 "떠나는" 문서에 flush. 실패하면
+      // 전환을 멈추고 에러를 보여줘 본문이 사라지지 않게 한다.
+      if (isSwitchingDoc && loadedDoc.current) {
+        cancelAutosave();
+        try {
+          if (saveInFlight.current) await saveInFlight.current;
+          if (dirtyRef.current) await save();
+        } catch (e) {
+          const left = loadedDoc.current;
+          pushNotification({
+            tone: "err",
+            title: "저장 실패 — 문서를 전환하지 않았어요",
+            body: `${left?.project}/${left?.domain} — ${String(e).slice(0, 120)}`,
+          });
+          if (left) selectDomain(left.project, left.domain);
+          return;
+        }
+        if (!alive) return;
+      }
+
       if (!cfg?.vault_path || !selection.project || !selection.domain) {
         suppressChange.current = true;
         await replaceEditorFromMd(editor, "", null, null);
         suppressChange.current = false;
         lastSyncedMd.current = "";
         loadedKey.current = null;
+        loadedDoc.current = null;
         setBytes(0);
-        setDirty(false);
+        markDirty(false);
         setErr(null);
         return;
       }
       // If the user has unsaved edits, don't stomp them when the watcher
       // re-fires (e.g. we just saved). Only reload when clean.
-      if (dirty) return;
+      if (!isSwitchingDoc && dirtyRef.current) return;
 
-      const selKey = `${cfg.vault_path}|${selection.project}|${selection.domain}`;
-      const isSwitchingDoc = loadedKey.current !== selKey;
+      const selKey = nextKey!;
 
       // For watcher-fired reloads on the SAME doc, peek at the file
       // first. Skip the editor rebuild entirely if bytes are identical
@@ -159,8 +266,13 @@ export function DocView({
         suppressChange.current = false;
         lastSyncedMd.current = md;
         loadedKey.current = selKey;
+        loadedDoc.current = {
+          vault: cfg.vault_path,
+          project: selection.project,
+          domain: selection.domain,
+        };
         setBytes(md.length);
-        setDirty(false);
+        markDirty(false);
       } catch (e) {
         if (alive) setErr(String(e));
       } finally {
@@ -174,41 +286,17 @@ export function DocView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cfg?.vault_path, selection.project, selection.domain, refreshKey]);
 
-  async function save() {
-    if (
-      !cfg?.vault_path ||
-      !selection.project ||
-      !selection.domain ||
-      saving ||
-      !dirty
-    )
-      return;
-    setSaving(true);
-    try {
-      const live = exportBlocksToMarkdown(editor);
-      const md = rewriteMdAbsoluteToRelative(live);
-      // 우리가 만든 저장이라는 marker — Workspace 의 watcher refresh 가
-      // 이 직후 발화하는 vault:changed 를 한 번 무시하게 해서 사이드바
-      // listTree + linkIndex 재빌드를 건너뛴다.
-      useApp.getState().markSelfSave();
-      await ipc.writeDoc(
-        cfg.vault_path,
-        selection.project,
-        selection.domain,
-        md,
-      );
-      lastSyncedMd.current = md;
-      setBytes(md.length);
-      setDirty(false);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
+  // 언마운트(프로젝트 홈으로 이동 등) 시에도 미저장분을 flush.
+  useEffect(() => {
+    return () => {
+      cancelAutosave();
+      if (dirtyRef.current) saveOrNotify();
+    };
+  }, [saveOrNotify, cancelAutosave]);
 
   async function revert() {
     if (!dirty) return;
+    cancelAutosave();
     suppressChange.current = true;
     await replaceEditorFromMd(
       editor,
@@ -218,7 +306,7 @@ export function DocView({
     );
     suppressChange.current = false;
     setBytes(lastSyncedMd.current.length);
-    setDirty(false);
+    markDirty(false);
   }
 
   // ⌘S / Ctrl+S to save. ⌘F / Ctrl+F to open the in-doc find bar.
@@ -226,7 +314,7 @@ export function DocView({
     function onKey(e: KeyboardEvent) {
       if ((e.metaKey || e.ctrlKey) && e.key === "s") {
         e.preventDefault();
-        save();
+        saveOrNotify();
       } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setFindOpen(true);
@@ -234,8 +322,7 @@ export function DocView({
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg?.vault_path, selection.project, selection.domain, dirty]);
+  }, [saveOrNotify]);
 
   // wiki-link 클릭 — 본문에서 [[link]] 가 markdown anchor 로 변환돼서
   // <a href="danbi:..."> 로 렌더된다. 클릭을 가로채서 selection 만 바꾸고
@@ -516,11 +603,24 @@ export function DocView({
     setFindIndex((i) => (i + delta + findCount) % findCount);
   }
 
-  // Autosave on editor blur — the safest trigger. A commit snapshot already
-  // fires inside `save()` via the Rust `writeDoc` pipeline (editor changes
-  // go through vcs), so undo via ⌘Z-equivalent is preserved. Only runs when
-  // the user opted in via Settings > 편집 > 자동 저장.
-  const autosaveEnabled = cfg?.editor.autosave ?? false;
+  // 자동 저장 — 입력이 멈추고 AUTOSAVE_DELAY_MS 뒤 + 에디터 blur 시. 커밋은
+  // Rust `writeDoc` 파이프라인(vcs) 안에서 만들어지므로 되돌리기는 그대로.
+  // Settings > 편집 > 자동 저장 으로 끌 수 있다 (기본 켜짐). 꺼도 문서 전환
+  // 시 flush 는 항상 한다.
+  const autosaveEnabled = cfg?.editor.autosave ?? true;
+  const autosaveRef = useRef(autosaveEnabled);
+  useEffect(() => {
+    autosaveRef.current = autosaveEnabled;
+    if (!autosaveEnabled) cancelAutosave();
+  }, [autosaveEnabled, cancelAutosave]);
+  const scheduleAutosave = useCallback(() => {
+    if (!autosaveRef.current) return;
+    cancelAutosave();
+    autosaveTimer.current = setTimeout(() => {
+      autosaveTimer.current = null;
+      saveOrNotify();
+    }, AUTOSAVE_DELAY_MS);
+  }, [saveOrNotify, cancelAutosave]);
   useEffect(() => {
     if (!autosaveEnabled) return;
     // We target the editor's outermost container. `focusout` bubbles
@@ -532,15 +632,14 @@ export function DocView({
       // moving between internal blocks — not a true blur.
       const nextTarget = e.relatedTarget as HTMLElement | null;
       if (nextTarget && nextTarget.closest(".danbi-editor")) return;
-      if (!dirty || saving) return;
-      save();
+      if (!dirtyRef.current) return;
+      saveOrNotify();
     }
     const el = document.querySelector(".danbi-editor");
     if (!el) return;
     el.addEventListener("focusout", onFocusOut as EventListener);
     return () => el.removeEventListener("focusout", onFocusOut as EventListener);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autosaveEnabled, dirty, saving, cfg?.vault_path, selection.project, selection.domain]);
+  }, [autosaveEnabled, saveOrNotify, loading, selection.project, selection.domain]);
 
   if (!selection.project || !selection.domain) {
     return (
@@ -887,7 +986,7 @@ export function DocView({
                 <Undo2 size={11} /> 되돌리기
               </button>
               <button
-                onClick={save}
+                onClick={saveOrNotify}
                 disabled={saving}
                 className={cn(
                   "inline-flex h-7 items-center gap-1 rounded-sm px-2 text-[12px] font-medium transition-colors",
@@ -1114,14 +1213,9 @@ export function DocView({
               theme={editorTheme}
               onChange={() => {
                 if (suppressChange.current) return;
-                try {
-                  const live = exportBlocksToMarkdown(editor);
-                  const md = rewriteMdAbsoluteToRelative(live);
-                  setDirty(md !== lastSyncedMd.current);
-                  setBytes(md.length);
-                } catch {
-                  /* ignore */
-                }
+                // 직렬화 없이 플래그만. 글자 수는 저장 시점에 갱신된다.
+                if (!dirtyRef.current) markDirty(true);
+                scheduleAutosave();
               }}
             />
           </div>
