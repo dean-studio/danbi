@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.8.9] — 2026-10-15
+
 ### Removed
 
 - **Quick Capture(⌃Space 전역 팝업) 제거** — 별도 창·전역 단축키·트레이 메뉴
