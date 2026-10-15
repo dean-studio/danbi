@@ -170,6 +170,19 @@ pub fn merge_mcp_json(
         )));
     };
     let mut replaced = false;
+    // A folder writes to one project. Re-connecting it to another project
+    // must drop the previous project's write server, or the agent could
+    // still pick it and write into the old project.
+    let ours: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+    let stale: Vec<String> = map
+        .iter()
+        .filter(|(name, v)| !ours.contains(&name.as_str()) && is_danbi_write_url(v))
+        .map(|(name, _)| name.clone())
+        .collect();
+    for name in stale {
+        map.remove(&name);
+        replaced = true;
+    }
     for s in servers {
         if map.contains_key(&s.name) {
             replaced = true;
@@ -180,6 +193,15 @@ pub fn merge_mcp_json(
         .map_err(|e| DanbiError::Other(format!("serialize mcp.json: {e}")))?;
     body.push('\n');
     Ok((body, replaced))
+}
+
+/// A server entry pointing at a Danbi per-project write endpoint
+/// (`http://127.0.0.1:<port>/mcp/<id>/write`).
+fn is_danbi_write_url(entry: &Value) -> bool {
+    entry
+        .get("url")
+        .and_then(Value::as_str)
+        .is_some_and(|u| u.starts_with("http://127.0.0.1:") && u.contains("/mcp/") && u.ends_with("/write"))
 }
 
 // ---------- registry -------------------------------------------------------
@@ -247,11 +269,28 @@ pub fn rewrite_with_token(conn: &Connection, token: &str) -> DanbiResult<bool> {
     let Some(agent) = Agent::parse(&conn.agent) else {
         return Err(DanbiError::Other(format!("unknown agent: {}", conn.agent)));
     };
+    // Only refresh entries that are still in the file: a server the user
+    // deleted by hand stays deleted. None left → treat like a removed file.
+    let present: Vec<ServerEntry> = conn
+        .servers
+        .iter()
+        .filter(|s| match agent {
+            Agent::Claude | Agent::Cursor => serde_json::from_str::<Value>(&existing)
+                .ok()
+                .and_then(|v| v.get("mcpServers").and_then(|m| m.get(&s.name)).cloned())
+                .is_some(),
+            Agent::Codex => existing.contains(&format!("[mcp_servers.{}]", s.name)),
+        })
+        .cloned()
+        .collect();
+    if present.is_empty() {
+        return Ok(false);
+    }
     let merged = match agent {
-        Agent::Claude | Agent::Cursor => merge_mcp_json(&existing, agent, &conn.servers, token)?.0,
+        Agent::Claude | Agent::Cursor => merge_mcp_json(&existing, agent, &present, token)?.0,
         Agent::Codex => {
             let mut body = existing;
-            for s in &conn.servers {
+            for s in &present {
                 body = crate::commands::merge_codex_block(&body, &s.name, &s.url, token).0;
             }
             body
@@ -426,6 +465,45 @@ mod tests {
         assert_eq!(s[0].name, "danbi_read");
         assert_eq!(s[0].url, "http://127.0.0.1:47921/mcp/read");
         assert_eq!(s[1].url, "http://127.0.0.1:47921/mcp/abc-123/write");
+    }
+
+    #[test]
+    fn reconnecting_a_folder_to_another_project_drops_the_old_write_server() {
+        let (a, _) = merge_mcp_json("", Agent::Claude, &servers(), "TOK").unwrap();
+        let b_servers = split_servers("Other", "def-456", 47921);
+        let (out, replaced) = merge_mcp_json(&a, Agent::Claude, &b_servers, "TOK").unwrap();
+        assert!(replaced);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let names: Vec<&String> = v["mcpServers"].as_object().unwrap().keys().collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(v["mcpServers"]["danbi-other"]["url"].as_str().unwrap().ends_with("/def-456/write"));
+        // Unrelated servers stay.
+        let with_other = out.replace("\"mcpServers\": {", "\"mcpServers\": {\"github\": {\"url\": \"https://x\"},");
+        let (out, _) = merge_mcp_json(&with_other, Agent::Claude, &b_servers, "TOK").unwrap();
+        assert!(out.contains("github"));
+    }
+
+    #[test]
+    fn rotation_does_not_resurrect_servers_the_user_deleted() {
+        let home = temp_dir("rotate-deleted-home");
+        let repo = temp_dir("rotate-deleted-repo");
+        let path = repo.join(".mcp.json");
+        std::fs::write(&path, "{\"mcpServers\": {\"github\": {\"url\": \"https://x\"}}}\n").unwrap();
+        register(
+            &home,
+            Connection {
+                agent: "claude".into(),
+                project: "보니_앨범".into(),
+                path: path.to_string_lossy().to_string(),
+                servers: servers(),
+                connected_at: 1,
+            },
+        )
+        .unwrap();
+        let report = rotate_all(&home, "NEW");
+        assert_eq!(report.removed.len(), 1, "{report:?}");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(!body.contains("danbi"), "{body}");
     }
 
     #[test]

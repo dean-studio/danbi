@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Check,
   ChevronDown,
@@ -65,16 +65,49 @@ function hhmm(ms: number): string {
   return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
 }
 
-/** "마지막 기록 14:32 (Claude Code)" — 메모리 presence(읽기 포함) 우선,
- *  없으면 usage 로그의 마지막 쓰기. */
+/** "마지막 접속 14:32 (Claude Code)" — 메모리 presence(핸드셰이크·읽기
+ *  포함) 우선, 없으면 usage 로그의 마지막 쓰기("마지막 기록"). */
 function lastRecordText(st: AgentConnectionStatus | null): string | null {
   if (!st) return null;
   const ts = st.last_call_at ?? st.last_write_at;
   if (!ts) return null;
   const client = st.last_call_at ? st.last_call_client : st.last_write_client;
   const who = clientLabel(client);
-  return `마지막 기록 ${hhmm(ts)}${who ? ` (${who})` : ""}`;
+  const what = st.last_call_at ? "마지막 접속" : "마지막 기록";
+  return `${what} ${hhmm(ts)}${who ? ` (${who})` : ""}`;
 }
+
+type AgentState = "connected" | "waiting" | "off" | "none";
+
+/** 호출자 토큰(`claude-code`, `claude_code`, `codex`, `cursor`) → 에이전트. */
+function agentOfClient(client: string | null | undefined): AgentTarget | null {
+  const c = (client ?? "").replace(/_/g, "-");
+  if (c.startsWith("claude")) return "claude";
+  if (c.startsWith("codex")) return "codex";
+  if (c.startsWith("cursor")) return "cursor";
+  return null;
+}
+
+/** 띠·시트가 함께 쓰는 연결 판정. 파일을 썼다고 "연결됨"이 아니다 —
+ *  서버가 켜져 있고 그 에이전트가 실제로 호출해 와야 연결됨. Skill 은
+ *  전역 파일이라 판정에 섞지 않는다. */
+function agentState(st: AgentConnectionStatus | null, agent: AgentTarget): AgentState {
+  if (!st) return "none";
+  const hasFile = st.connections.some((c) => c.agent === agent && c.exists);
+  if (!hasFile) return "none";
+  if (!st.server_running) return "off";
+  const called =
+    (st.last_call_at && agentOfClient(st.last_call_client) === agent) ||
+    (st.last_write_at && agentOfClient(st.last_write_client) === agent);
+  return called ? "connected" : "waiting";
+}
+
+const STATE_LABEL: Record<AgentState, string> = {
+  connected: "연결됨",
+  waiting: "연결 파일 기록 · 호출 대기",
+  off: "MCP 서버 꺼짐",
+  none: "미연결",
+};
 
 /** 연결 결과 한 줄 + 예전 `claude mcp add` 등록이 겹치면 안내 (ProjectHome
  *  ConnectCard 와 같은 문구). 사용자 설정 파일은 건드리지 않는다. */
@@ -100,6 +133,8 @@ function useProjectConnection(project: string | null, deps: unknown[] = []) {
     codex: false,
     cursor: false,
   });
+  const latest = useRef(project);
+  latest.current = project;
   const reload = useCallback(async () => {
     if (!project) {
       setStatus(null);
@@ -110,6 +145,8 @@ function useProjectConnection(project: string | null, deps: unknown[] = []) {
       ipc.skillStatus(project, "claude").catch(() => false),
       ipc.skillStatus(project, "codex").catch(() => false),
     ]);
+    // 프로젝트를 빠르게 바꾸면 이전 응답이 늦게 와서 덮어쓸 수 있다.
+    if (latest.current !== project) return;
     setStatus(st);
     setSkills({ claude, codex, cursor: false });
   }, [project]);
@@ -172,7 +209,7 @@ export function ConnectStatusBand({
     setHintDismissed(localStorage.getItem(dismissKey) === "1");
   }, [dismissKey]);
 
-  const none = status !== null && connectedAgents.length === 0 && !skills.claude && !skills.codex;
+  const none = status !== null && connectedAgents.length === 0;
   const last = lastRecordText(status);
 
   return (
@@ -180,7 +217,8 @@ export function ConnectStatusBand({
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
         <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
           {AGENTS.map((a) => {
-            const on = connectedAgents.includes(a.key) || (a.skill && skills[a.key]);
+            const state = agentState(status, a.key);
+            const on = state === "connected";
             return (
               <span key={a.key} className="inline-flex items-center gap-1.5">
                 <span
@@ -190,7 +228,7 @@ export function ConnectStatusBand({
                   )}
                 />
                 <span className={on ? "text-on-dark" : "text-mute"}>
-                  {a.label} {on ? "연결됨" : "미연결"}
+                  {a.label} {STATE_LABEL[state]}
                 </span>
                 {a.skill && (
                   <span className="text-mute">· Skill {skills[a.key] ? "✓" : "○"}</span>
@@ -287,7 +325,7 @@ function SheetBody({
   const [busy, setBusy] = useState<string | null>(null);
   const [hookOpen, setHookOpen] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const { status, skills, connectedAgents, reload } = useProjectConnection(project);
+  const { status, skills, reload } = useProjectConnection(project);
 
   const loadMcp = useCallback(async () => {
     try {
@@ -467,7 +505,8 @@ function SheetBody({
             const files = (status?.connections ?? []).filter(
               (c) => c.agent === a.key && c.exists,
             );
-            const on = connectedAgents.includes(a.key);
+            const state = agentState(status, a.key);
+            const on = state === "connected";
             return (
               <section key={a.key} className="mt-4 border-t border-hairline pt-3">
                 <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-[0.4px] text-mute">
@@ -482,7 +521,7 @@ function SheetBody({
                       )}
                     />
                     <span className={on ? "text-on-dark" : "text-mute"}>
-                      {on ? "연결됨" : "미연결"}
+                      {STATE_LABEL[state]}
                     </span>
                   </span>
                   {files.map((f) => (

@@ -3885,6 +3885,7 @@ pub fn reviews_list() -> DanbiResult<crate::reviews::ReviewStore> {
 
 #[tauri::command]
 pub fn reviews_resolve(
+    app: AppHandle,
     id: String,
     status: String,
 ) -> DanbiResult<crate::reviews::ReviewStore> {
@@ -3902,7 +3903,11 @@ pub fn reviews_resolve(
             )))
         }
     };
-    crate::reviews::resolve(&vault_path, &id, next)
+    let store = crate::reviews::resolve(&vault_path, &id, next)?;
+    // Sidebar badge and review lists listen for this instead of polling.
+    use tauri::Emitter;
+    let _ = app.emit(crate::reviews::REVIEWS_CHANGED_EVENT, ());
+    Ok(store)
 }
 
 #[tauri::command]
@@ -4528,7 +4533,7 @@ fn exclude_local_file_from_git(
         .is_some()
     {
         return Err(DanbiError::Other(format!(
-            "{} 파일이 Git에서 이미 추적 중이라 {refused}. 먼저 추적을 해제한 뒤 다시 연결하세요.",
+            "{} 파일이 Git에서 이미 추적 중이라 {refused} (토큰이 저장소에 커밋될 수 있어요). 추적을 해제하지 말고, 연결 시트 [고급]의 로컬 등록 명령(Claude Code: `claude mcp add -s local …`, 저장소 밖에 저장)이나 Cursor 전역 설정(~/.cursor/mcp.json)을 쓰세요.",
             config_path.display()
         )));
     }

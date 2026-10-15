@@ -177,13 +177,15 @@ function inEditable(): boolean {
   );
 }
 
-/** entry.files 에서 이 문서의 경로 — 되돌리기 path. */
+/** entry.files 에서 이 문서의 경로 — 되돌리기 path. 행에 적힌 문서와
+ *  맞는 파일이 없으면(이름 변경·여러 파일 커밋) null — 엉뚱한 파일을
+ *  되돌리지 않게 버튼을 숨긴다. 문서가 안 적힌 행은 파일이 하나일 때만. */
 function revertPath(e: ActivityEntry): string | null {
   if (e.project && e.domain) {
     const want = `Projects/${e.project}/${e.domain}`;
-    if (e.files.includes(want)) return want;
+    return e.files.includes(want) ? want : null;
   }
-  return e.files[0] ?? null;
+  return e.files.length === 1 ? e.files[0] : null;
 }
 
 export function ActivityFeed({
@@ -576,7 +578,8 @@ function FeedRow({
   onCancelRevert: () => void;
 }) {
   const openable = !!e.project && !!e.domain;
-  const canRevert = openable && e.files.length > 0 && e.op !== "init" && e.op !== "migration";
+  const canRevert =
+    openable && revertPath(e) !== null && e.op !== "init" && e.op !== "migration";
   const btn =
     "inline-flex h-6 items-center rounded-sm border border-hairline bg-surface px-1.5 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark";
   return (
@@ -704,7 +707,9 @@ function FeedRow({
             <div className="text-body">
               <span className="font-mono text-[11px] text-stone">{e.id.slice(0, 7)}</span>
               {" 이 "}
-              <span className="font-mono">{e.domain}</span>
+              <span className="font-mono">
+                {(revertPath(e) ?? "").replace(/^Projects\//, "")}
+              </span>
               {" 에 한 변경만 되돌릴까요? 새 커밋으로 남아요."}
             </div>
           ) : (

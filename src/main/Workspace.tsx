@@ -275,9 +275,17 @@ export function Workspace() {
         !!target?.closest?.("[contenteditable=\"true\"]")
       );
     }
+    function inEditorContent(e: KeyboardEvent): boolean {
+      const target = e.target as HTMLElement | null;
+      return !!target?.closest?.("[contenteditable=\"true\"]");
+    }
     function onKey(e: KeyboardEvent) {
       const mod = e.metaKey || e.ctrlKey;
       if (!mod) return;
+      // 에디터가 이미 처리한 키(⌘⇧U 밑줄 등)는 화면 전환으로 넘기지 않는다.
+      if (e.defaultPrevented) return;
+      // ⌘⇧ 조합은 에디터 서식 단축키와 겹치므로 본문 편집 중엔 건너뛴다.
+      if (e.shiftKey && inEditorContent(e)) return;
       const key = e.key.toLowerCase();
       if (key === "," && !e.shiftKey) {
         e.preventDefault();
@@ -1254,7 +1262,8 @@ export function Workspace() {
         open={paletteOpen}
         mode={paletteMode}
         onClose={() => setPaletteOpen(false)}
-        initialScope={selection.project}
+        // 프로젝트 홈에서만 범위를 미리 고정 — 문서를 보다 연 ⌘K 는 vault 전체.
+        initialScope={selection.domain ? null : selection.project}
         commands={paletteCommands}
       />
 
