@@ -196,9 +196,15 @@ export function GraphView({
   }, [open, onClose, popup]);
 
   // Project color palette — stable per project name, so re-renders don't
-  // shuffle colors around. The palette is taken from the design tokens.
+  // shuffle colors around. Resolved from the design tokens so light mode
+  // picks up its own accent values.
   const projectColor = useCallback((project: string): string => {
-    const palette = ["#57c1ff", "#59d499", "#ffc533", "#ff6161"];
+    const palette = [
+      cssToken("accent-blue"),
+      cssToken("accent-green"),
+      cssToken("accent-yellow"),
+      cssToken("accent-red"),
+    ];
     let h = 0;
     for (const ch of project) h = (h * 31 + ch.charCodeAt(0)) | 0;
     return palette[Math.abs(h) % palette.length];
@@ -321,9 +327,9 @@ export function GraphView({
   //   ghost     → accent blue, dashed (AI proposal, waiting for user)
   //   soft      → accent yellow, thin dashed (implicit relevance hint)
   function linkColor(l: GLink): string {
-    if (l.kind === "ghost") return "#57c1ff";
-    if (l.kind === "soft") return "rgba(255,197,51,0.55)";
-    return "rgba(255,255,255,0.55)";
+    if (l.kind === "ghost") return cssToken("accent-blue");
+    if (l.kind === "soft") return withAlpha(cssToken("accent-yellow"), 0.55);
+    return withAlpha(cssToken("ink"), 0.55);
   }
 
   // Canvas custom node painter — draws the circle + a label that fades in
@@ -368,8 +374,8 @@ export function GraphView({
       if (node.isHub) {
         const haloR = r * 2.4;
         const grad = ctx.createRadialGradient(x, y, r * 0.9, x, y, haloR);
-        grad.addColorStop(0, "rgba(255,255,255,0.18)");
-        grad.addColorStop(1, "rgba(255,255,255,0)");
+        grad.addColorStop(0, withAlpha(cssToken("ink"), 0.18));
+        grad.addColorStop(1, withAlpha(cssToken("ink"), 0));
         ctx.beginPath();
         ctx.arc(x, y, haloR, 0, Math.PI * 2);
         ctx.fillStyle = grad;
@@ -378,17 +384,17 @@ export function GraphView({
 
       ctx.beginPath();
       ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = node.color ?? "#888";
+      ctx.fillStyle = node.color ?? cssToken("ash");
       ctx.fill();
 
       if (node.isHub) {
         // Double ring: thicker inner stroke in the node color's white
         // highlight, thin outer ring for separation from the halo.
-        ctx.strokeStyle = "rgba(255,255,255,0.95)";
+        ctx.strokeStyle = withAlpha(cssToken("ink"), 0.95);
         ctx.lineWidth = 2 / scale;
         ctx.stroke();
       } else if (matches || hovered?.id === node.id) {
-        ctx.strokeStyle = "#fff";
+        ctx.strokeStyle = cssToken("ink");
         ctx.lineWidth = 1.5 / scale;
         ctx.stroke();
       }
@@ -406,8 +412,8 @@ export function GraphView({
         ctx.font = `${node.isHub ? "600 " : ""}${fontPx}px Inter, sans-serif`;
         ctx.fillStyle =
           matches || hovered?.id === node.id || node.isHub
-            ? "#f4f4f6"
-            : "#cdcdcd";
+            ? cssToken("ink")
+            : cssToken("body");
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillText(prettyLabel(node.label), x + r + 4 / scale, y);
@@ -674,7 +680,7 @@ export function GraphView({
         )}
 
         {hovered && (
-          <div className="pointer-events-none absolute bottom-3 right-3 rounded-md border border-hairline bg-surface px-3 py-2 text-caption-md shadow-lg shadow-black/40">
+          <div className="pointer-events-none absolute bottom-3 right-3 rounded-md border border-hairline bg-surface px-3 py-2 text-caption-md">
             <div className="text-mute">{hovered.project}</div>
             <div className="text-[13px] font-medium text-ink">
               {prettyLabel(hovered.label)}
@@ -773,7 +779,7 @@ function GhostPopup({
 
   return (
     <div
-      className="fixed z-40 w-[300px] rounded-md border border-hairline bg-surface p-3 shadow-2xl shadow-black/50"
+      className="fixed z-40 w-[300px] rounded-md border border-hairline-strong bg-surface-card p-3"
       style={{
         left: Math.min(x, window.innerWidth - 320),
         top: Math.min(y + 4, window.innerHeight - 160),
@@ -840,7 +846,7 @@ function ConfirmedPopup({
   const tgt = link.target as GNode;
   return (
     <div
-      className="fixed z-40 w-[320px] rounded-md border border-hairline bg-surface p-3 shadow-2xl shadow-black/50"
+      className="fixed z-40 w-[320px] rounded-md border border-hairline-strong bg-surface-card p-3"
       style={{
         left: Math.min(x, window.innerWidth - 340),
         top: Math.min(y + 4, window.innerHeight - 180),
@@ -917,7 +923,7 @@ function InsightsPanel({
     nodes.find((n) => n.id === id)?.project ?? "";
 
   return (
-    <div className="absolute right-3 top-3 z-20 flex max-h-[calc(100%-24px)] w-[320px] flex-col overflow-hidden rounded-md border border-hairline bg-surface/95 shadow-xl shadow-black/40 backdrop-blur">
+    <div className="absolute right-3 top-3 z-20 flex max-h-[calc(100%-24px)] w-[320px] flex-col overflow-hidden rounded-md border border-hairline-strong bg-surface-card/95 backdrop-blur">
       <header className="flex items-center gap-2 border-b border-hairline px-3 py-2 text-[12px] font-medium text-ink">
         <Lightbulb size={12} className="text-accent-yellow" />
         그래프 인사이트
@@ -1048,7 +1054,7 @@ function InsightSection({
 
 function GraphLegend({ colorMode }: { colorMode: ColorMode }) {
   return (
-    <div className="pointer-events-none absolute bottom-3 left-3 select-none rounded-md border border-hairline bg-surface/90 px-3 py-2 shadow-lg shadow-black/40 backdrop-blur">
+    <div className="pointer-events-none absolute bottom-3 left-3 select-none rounded-md border border-hairline bg-surface/90 px-3 py-2 backdrop-blur">
       <div className="mb-1.5 text-[10px] uppercase tracking-[0.6px] text-mute">
         범례
       </div>
@@ -1057,10 +1063,7 @@ function GraphLegend({ colorMode }: { colorMode: ColorMode }) {
         <div className="mb-1 text-caption-sm text-stone">노드</div>
         <div className="flex flex-col gap-0.5 text-caption-md text-body">
           <div className="flex items-center gap-1.5">
-            <span
-              className="inline-block h-2 w-2 rounded-full"
-              style={{ background: "#57c1ff" }}
-            />
+            <span className="inline-block h-2 w-2 rounded-full bg-accent-blue" />
             <span>
               {colorMode === "community"
                 ? "커뮤니티 (같은 색 = 같은 주제군)"
@@ -1097,3 +1100,27 @@ function GraphLegend({ colorMode }: { colorMode: ColorMode }) {
 
 // Consumed only for typing — suppress unused warning via re-export alias.
 export type { GhostSuggestion as _Unused };
+
+/** 캔버스는 CSS 변수를 직접 못 읽으니 :root 의 토큰 값을 가져온다.
+ *  라이트 모드로 바뀌면 다음 렌더에서 자연히 새 값. */
+function cssToken(name: string): string {
+  const v = getComputedStyle(document.documentElement)
+    .getPropertyValue(`--color-${name}`)
+    .trim();
+  return v || "#888";
+}
+
+/** `#rrggbb` / `rgb(a)` 토큰에 알파를 입힌다 (링크·헤일로용). */
+function withAlpha(color: string, alpha: number): string {
+  const hex = color.match(/^#([0-9a-f]{6})$/i);
+  if (hex) {
+    const n = parseInt(hex[1], 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+  }
+  const rgb = color.match(/^rgba?\(([^)]+)\)$/);
+  if (rgb) {
+    const [r, g, b] = rgb[1].split(",").map((x) => x.trim());
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+  return color;
+}

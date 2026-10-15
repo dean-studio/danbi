@@ -7,8 +7,6 @@ import {
 } from "react";
 import { Check, X } from "lucide-react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
-import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
 import { Dialog } from "@/components/Dialog";
 import { ProjectIconPicker } from "@/components/ProjectIconPicker";
 import { ProjectColorPicker } from "@/components/ProjectColorPicker";
@@ -18,18 +16,19 @@ import {
   PrimaryButton,
   SecondaryButton,
 } from "@/components/WizardShell";
-import { Backlinks } from "@/main/Backlinks";
 import { CommandBar } from "@/main/CommandBar";
+import { CommandPalette, type PaletteCommand, type PaletteMode } from "@/main/CommandPalette";
+import { ConnectSheet } from "@/main/ConnectSheet";
 import { DocView } from "@/main/DocView";
 import { GraphView } from "@/main/GraphView";
 import { Home } from "@/main/Home";
-import { ReviewPanel } from "@/main/ReviewPanel";
 import { ProjectHome } from "@/main/ProjectHome";
-import { SearchPalette } from "@/main/SearchPalette";
-import { ProjectSwitcher } from "@/main/ProjectSwitcher";
+import { ReviewView } from "@/main/ReviewView";
 import { Settings } from "@/main/Settings";
+import { ShortcutsHelp } from "@/main/ShortcutsHelp";
 import { TrashPanel } from "@/main/TrashPanel";
-import { Sidebar } from "@/main/Sidebar";
+import { UsageView } from "@/main/UsageView";
+import { Sidebar, markVaultAllRead } from "@/main/Sidebar";
 import {
   ipc,
   onReviewsChanged,
@@ -78,13 +77,21 @@ export function Workspace() {
   const [settingsInitial, setSettingsInitial] = useState<
     "appearance" | "shortcuts" | "vault" | "editor" | "mcp" | "vector" | "backup" | "about" | undefined
   >(undefined);
-  const [searchOpen, setSearchOpen] = useState(false);
+  // ⌘K 통합 팔레트 — SearchPalette + ProjectSwitcher 를 흡수. ⌘P 는
+  // 같은 팔레트를 "@" 프로젝트 모드로 연다.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteMode, setPaletteMode] = useState<PaletteMode>("mixed");
   const [graphOpen, setGraphOpen] = useState(false);
-  const [projectSwitcherOpen, setProjectSwitcherOpen] = useState(false);
   const [graphProject, setGraphProject] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
-  const [reviewOpen, setReviewOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [trashOpen, setTrashOpen] = useState(false);
+  const view = useApp((s) => s.view);
+  const setView = useApp((s) => s.setView);
+  const connectSheet = useApp((s) => s.connectSheet);
+  const openConnectSheet = useApp((s) => s.openConnectSheet);
+  const closeConnectSheet = useApp((s) => s.closeConnectSheet);
   const [trashCount, setTrashCount] = useState(0);
   // 마지막으로 사용자가 휴지통 패널을 본 시점의 항목 수. 그보다 많아지면
   // 사이드바에 미시 dot 으로 알린다 — 한 번 열어보면 다시 사라진다.
@@ -94,6 +101,8 @@ export function Workspace() {
     const v = Number(localStorage.getItem(TRASH_SEEN_KEY));
     return Number.isFinite(v) ? v : 0;
   });
+  // 휴지통은 팔레트 `>휴지통` 명령으로만 열린다. 새 항목 안내 dot 은
+  // 명령 힌트에 표시.
   const trashHasUnseen = trashCount > trashSeenCount;
   const [reviewCount, setReviewCount] = useState(0);
 
@@ -211,283 +220,115 @@ export function Workspace() {
     setTimeout(() => setToast(null), 2400);
   }
 
-  async function copyMcpInstall(
-    project: string,
-    agent: import("@/lib/ipc").AgentTarget = "claude",
-  ) {
-    try {
-      const status = await ipc.mcpStatus();
-      if (!status.enabled || !status.running) {
-        flash(
-          "err",
-          "MCP 서버가 꺼져 있어요. ⌘, 설정 → MCP 에서 먼저 켜주세요.",
-        );
-        return;
-      }
-      if (agent === "codex") {
-        const targetDir = await openFolderDialog({
-          directory: true,
-          multiple: false,
-          title: `Codex 가 실행될 코드 폴더 선택 · ${project}`,
-        });
-        if (typeof targetDir !== "string") return;
-        const res = await ipc.codexConnect(project, targetDir);
-        flash(
-          "ok",
-          (res.action === "updated"
-            ? `"${project}"의 폴더별 Codex 연결을 갱신했어요. Codex 를 재시작하세요.`
-            : `"${project}"를 ${res.path}에 연결했어요. Codex 를 재시작하세요.`) +
-            (res.global_removed ? " 기존 전역 연결도 제거했습니다." : "") +
-            " 처음 여는 폴더라면 Codex에서 프로젝트를 신뢰해 주세요.",
-        );
-        return;
-      }
+  /** 현재(또는 마지막으로 본) 프로젝트 — ⌘N · ⌘⇧D 의 대상. */
+  function currentProjectOrRecent(): string | null {
+    const st = useApp.getState();
+    if (st.selection.project) return st.selection.project;
+    return st.cfg?.capture?.last_project ?? st.tree?.projects[0]?.name ?? null;
+  }
 
-      // Claude Code · Cursor: Codex 와 같은 흐름 — 코드 폴더를 고르면 그
-      // 폴더의 .mcp.json / .cursor/mcp.json 에 읽기+쓰기 서버를 직접
-      // 기록한다 (서버 이름은 백엔드가 정함). 명령 복사 단계 없음.
-      const label = agent === "cursor" ? "Cursor" : "Claude Code";
-      const targetDir = await openFolderDialog({
-        directory: true,
-        multiple: false,
-        title: `${label} 가 실행될 코드 폴더 선택 · ${project}`,
-      });
-      if (typeof targetDir !== "string") return;
-      const res = await ipc.agentConnect(project, agent, targetDir);
-      flash("ok", describeAgentConnect(project, label, res));
+  function newNote() {
+    const project = currentProjectOrRecent();
+    if (!project) {
+      setPaletteMode("project");
+      setPaletteOpen(true);
+      return;
+    }
+    openDialog({ kind: "add-domain", project, folder: null }, "");
+  }
+
+  async function openTodayNote() {
+    const project = currentProjectOrRecent();
+    if (!project) {
+      setPaletteMode("project");
+      setPaletteOpen(true);
+      return;
+    }
+    try {
+      const domain = await ipc.ensureTodayNote(project);
+      useApp.getState().selectDomain(project, domain);
     } catch (e) {
-      flash("err", `연결 실패: ${e}`);
+      flash("err", `오늘 노트를 열지 못했어요: ${e}`);
     }
   }
 
-  /** 연결 결과 한 줄 + 기존 `claude mcp add` 등록이 겹치면 안내. 사용자
-   *  설정 파일(~/.claude*.json)은 건드리지 않으므로 지우는 법만 알려준다. */
-  function describeAgentConnect(
-    project: string,
-    label: string,
-    res: import("@/lib/ipc").AgentConnectResult,
-  ): string {
-    let msg =
-      res.action === "updated"
-        ? `"${project}"의 ${label} 연결을 갱신했어요 (${res.path}). ${label} 를 재시작하세요.`
-        : `"${project}"를 ${res.path}에 연결했어요. ${label} 를 재시작하세요.`;
-    const local = res.legacy.filter((l) => l.scope === "local");
-    const user = res.legacy.filter((l) => l.scope === "user");
-    if (local.length > 0) {
-      msg += ` 이 폴더에 예전 방식으로 등록한 서버(${local
-        .map((l) => l.name)
-        .join(", ")})가 있어 도구가 겹쳐요 — 터미널에서 \`claude mcp remove ${local[0].name}\` 로 지우면 됩니다.`;
-    } else if (user.length > 0) {
-      msg += ` 전역(user)에 등록된 단비 서버(${user
-        .map((l) => l.name)
-        .join(", ")})도 함께 뜹니다.`;
-    }
-    return msg;
-  }
-
-  async function copyClaudeMdTemplate(project: string) {
-    try {
-      const tpl = `<!--
-  단비(Danbi) vault 연동 블록. 이 마커 사이는 단비가 관리한다.
-  기존 CLAUDE.md 에 병합하는 규칙:
-  1. 파일에 <!-- danbi:start --> ... <!-- danbi:end --> 마커가 이미 있으면
-     그 사이만 이 블록 전체로 교체한다. 마커 밖의 사용자 콘텐츠는 건드리지 않는다.
-  2. 마커가 없으면 파일 맨 끝에 이 블록 전체를 append 한다.
-  3. 사용자 고유 섹션 (프로젝트 특화 빌드 명령, 팀 컨벤션 등) 은 마커 밖에 두면 유지된다.
--->
-<!-- danbi:start v=2 project=${project} -->
-# ${project} — 단비 vault 연동 가이드
-
-이 저장소는 단비(Danbi) MCP 서버의 "${project}" 전용 엔드포인트에 연결돼 있다.
-단비 vault는 이 프로젝트의 **외부 장기 기억**이다 — 결정·디버깅·TODO·학습이
-세션을 넘어 누적된다.
-
-## 핵심 원칙 (이것만 기억하면 됨)
-
-1. **답변 전에 단비부터 물어본다** — 일반론 대신 vault의 맥락으로 답한다.
-2. **중요한 건 즉시 기록한다** — 기술 결정·버그 원인·TODO는 ${"`danbi_log`"}로 바로.
-3. **쓸 때는 연결한다** — 관련 문서를 ${"`[[wiki-link]]`"}로 걸어 그래프에 누적시킨다.
-
-## 도구 목록
-
-**읽기** (vault 전체 조회 가능):
-- \`danbi_briefing\` — 최근 활동·ghost 제안·고아 파일·daily 노트를 한 JSON으로 반환
-- \`danbi_recent\` — 최근 수정된 문서 목록
-- \`danbi_search\` — tantivy 전문 검색 (한국어 n-gram 지원)
-- \`danbi_context\` — 질문 하나로 관련 문서의 해당 섹션 + 연결 문서 목록을 글자 예산 안에서 한 번에. **search → read 반복 대신 먼저**
-- \`danbi_related\` — 문서 하나의 링크·백링크·내용상 가까운 문서·같은 주제 묶음
-- \`danbi_read\` — 특정 프로젝트/도메인 파일의 전체 내용
-- \`danbi_daily\` — 오늘 + 1주/1달/1년 전 daily 노트
-- \`danbi_list_projects\` — vault 전체 프로젝트·도메인 트리
-
-**쓰기** (이 엔드포인트는 "${project}"로 자동 clamp — 다른 프로젝트로 잘못 쓸 위험 0):
-- \`danbi_log\` — 오늘 daily 노트에 append. project 파라미터 **생략**.
-- \`danbi_append\` — 임의 도메인 파일에 append (없으면 자동 생성). project 파라미터 **생략**.
-- \`danbi_create_folder\` — 프로젝트 안에 1~2단계 sub-folder 생성 (예: \`stats\`, \`daily/2026-05\`). 카테고리·시기별 누적용. project 파라미터 **생략**.
-- \`danbi_create_file\` — **폴더 + 파일을 한 번에 보장 + 내용 append**. \`danbi_create_folder\` + \`danbi_append\` 두 호출을 한 번으로 합친 편의 도구. 매일 통계 자동 기록 같은 자동화에 적합. project 파라미터 **생략**.
-
-## Read — 언제 무엇을 읽는가
-
-### 세션 시작 (새 대화 첫 턴)
-
-반드시 이 순서로:
-
-1. \`danbi_briefing\` 호출 → 응답에서 다음 확인:
-   - \`daily.today_notes[0]\` 있으면 오늘 이미 기록된 내용이 있다는 뜻
-   - \`activity.recent_summaries[0..3]\` 로 직전 작업 맥락 파악
-   - \`ghost_suggestions\` 에 pending 있으면 사용자에게 알릴지 판단
-2. \`daily.today_notes\` 또는 어제 노트 있으면 \`danbi_read\` 로 읽고 **한 줄 요약**
-3. 읽은 요약 + 진행 중이던 TODO가 있으면 **그것부터 이어서 제안**
-
-### 질문 응답 중
-
-| 사용자가 이런 뉘앙스로 물으면 | 이 도구를 먼저 |
-|---|---|
-| "예전에 이거 어떻게 정했지?" | \`danbi_context\` (부족하면 \`danbi_read\`) |
-| "이 문서랑 관련된 건?" | \`danbi_related\` |
-| "지난주/어제 뭐 했지?" | \`danbi_briefing\` activity |
-| "1년 전 오늘" / "비슷한 작업 한 적 있나" | \`danbi_daily\` |
-| "X 관련 기존 노트" | \`danbi_search\` 쿼리 |
-| "다른 프로젝트에선 어떻게?" | \`danbi_list_projects\` → 해당 프로젝트 \`danbi_read\` |
-
-**금지**: 일반론으로 답하기. 검색 안 돌리고 추측하기. "아마도" "일반적으로"로 시작하기.
-
-## Write — 언제 무엇을 기록하는가
-
-${"`danbi_log`"}를 호출하는 **트리거**:
-
-| 트리거 | 기록 예시 |
-|---|---|
-| 기술 결정 확정 | "JWT refresh 7일로 정함. 이유: 모바일 세션 유지 vs 보안 트레이드오프" |
-| 버그 원인 발견 | "CORS 에러는 /api/auth preflight 미설정. next.config.js headers 에 추가" |
-| 세션 종료 전 TODO | "내일: RLS 정책 테이블 4개 더 마이그레이션, 스키마 dump 비교" |
-| 노하우 (되풀이하면 좋은 것) | "Supabase RLS는 service_role 키 쓰면 자동 우회 — 마이그레이션 스크립트에서 유용" |
-| 재발 방지 (또 겪지 말아야 할 것) | "Tauri v2 webview에서 window.prompt 작동 안 함 → 인라인 input 대신" |
-| 아키텍처 전환 | "REST → tRPC 마이그레이션 시작. 이유: 타입 안전성 + codegen 불필요" |
-
-**기록 형식**:
-- 짧은 markdown 섹션. \`###\` 헤더 + 2-4줄 본문.
-- 코드는 핵심만 5줄 이내.
-- 잡담·회고·감상 금지 — "결정 / 원인 / TODO / 노하우 / 재발 방지" 중 하나로 분류.
-
-특정 도메인 파일(예: \`notes/auth.md\`)을 갱신해야 하면 ${"`danbi_append`"}.
-
-### 폴더로 누적할 때
-
-같은 카테고리·날짜·주제로 \`.md\` 가 계속 쌓이는 패턴이면 sub-folder 를 먼저 만들어 분리한다. 단비는 폴더를 최대 2단계까지 지원한다 (\`<folder>/<sub>/<file>.md\`).
-
-| 시나리오 | 권장 구조 |
-|---|---|
-| 매일 통계·메트릭 자동 기록 | \`daily/YYYY-MM/DD.md\` 또는 \`stats/YYYY-MM-DD.md\` |
-| 주제별 리서치 누적 | \`research/<topic>.md\` |
-| 회의록 / 인터뷰 | \`meetings/YYYY-MM-DD-<who>.md\` |
-| 드래프트·임시 메모 | \`drafts/<title>.md\` |
-
-호출 패턴 — 두 가지 옵션:
-
-**A. 한 번 호출 (권장 · 자동화에 적합)**
-\`\`\`
-danbi_create_file(domain="stats/2026-05-17.md", content="...")
-\`\`\`
-폴더 없으면 만들고, 파일 없으면 만들고, content 가 있으면 append. 모두 idempotent — 매 실행마다 안전하게 호출 가능.
-
-**B. 두 호출로 분리 (폴더 미리 만들고 시간차로 채울 때)**
-\`\`\`
-1. danbi_create_folder(folder="stats")              ← 첫 날 한 번만 (idempotent)
-2. danbi_append(domain="stats/2026-05-17.md", ...)  ← 그 안에 append
-\`\`\`
-
-### 기록 타이밍
-
-- **즉시**: 위 트리거에 해당하는 순간이 오면 다른 일 끝나기 전에 바로 호출
-- **세션 종료 시**: 대화가 자연스럽게 끝날 때 누락된 트리거가 있으면 몰아서
-- **이중 기록 방지**: 같은 세션에서 동일 내용 중복 호출 금지 (체크 후 추가)
-
-## Link — 언제 [[wiki-link]]를 넣는가
-
-단비는 문서 간 연결이 쌓일수록 vault가 똑똑해진다. 그래프 뷰에서 확정 링크(실선)와 ghost 제안(점선)을 구분 렌더한다.
-
-### 위키링크 문법
-
-- 같은 프로젝트 내: \`[[파일명.md]]\`
-- 다른 프로젝트: \`[[프로젝트명/파일명.md]]\`
-
-### 언제 링크를 삽입하는가
-
-${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 해당되면 본문에 \`[[...]]\` 자연스럽게 포함:
-
-1. 언급하는 개념이 기존 문서에 이미 다뤄졌음 (\`danbi_search\` 결과로 확인)
-2. 같은 프로젝트 내 관련 결정/토픽이 있음
-3. 답변 근거로 \`danbi_read\` 한 문서를 인용함
-
-예시:
-\`\`\`markdown
-### JWT refresh 7일로 확정
-
-세션 만료 UX 개선 위해 기존 1일 → 7일. 보안 이슈는 [[notes/auth-security.md]]
-에 정리된 리스크 매트릭스 기준으로 수용 가능 범위로 판단. 관련 토큰 만료
-처리는 [[notes/token-refresh-flow.md]] 참조.
-\`\`\`
-
-### Ghost 제안 처리
-
-\`danbi_briefing\` 응답의 \`ghost_suggestions\` 는 단비가 제안한 "아직 확정 안 된 링크"다. 작업 중 해당 source 문서를 편집하게 되면, 제안된 target이 정말 관련 있는지 판단하고 ${"`[[target]]`"}을 본문에 삽입. 확정되면 그래프의 점선이 실선으로 바뀐다.
-
-## 안티 패턴
-
-- **❌ \`danbi_log\` 누락**: "이건 단비에 기록하기엔 너무 작은데..." — 작은 결정일수록 나중에 찾기 어렵다. 기록한다.
-- **❌ 일반 지식으로 답**: "일반적으로 JWT는..." — 이 vault가 어떤 결정을 내렸는지가 중요하다. 먼저 검색.
-- **❌ 링크 없이 기록**: 관련 문서가 있는데 \`[[링크]]\` 안 걺 — 그래프가 자라지 않음.
-- **❌ project 파라미터 수동 지정**: 이 엔드포인트는 "${project}"로 clamp됨. 생략이 맞다.
-<!-- danbi:end -->
-`;
-      await clipboardWriteText(tpl);
-      flash(
-        "ok",
-        `"${project}" 용 CLAUDE.md 단비 블록을 복사했어요. 기존 CLAUDE.md 에 붙여넣거나, Claude Code에 "CLAUDE.md 단비 블록 업데이트해줘" 라고 말하세요.`,
-      );
-    } catch (e) {
-      flash("err", `복사 실패: ${e}`);
-    }
+  /** 사이드바 순서(미분류 → 그룹) 로 n번째 프로젝트 — ⌘1~9. */
+  function projectByIndex(n: number): string | null {
+    const st = useApp.getState();
+    const all = st.tree?.projects.map((p) => p.name) ?? [];
+    const grouped = new Set(st.groups.flatMap((g) => g.projects));
+    const ordered = [
+      ...all.filter((p) => !grouped.has(p)),
+      ...st.groups.flatMap((g) => g.projects.filter((p) => all.includes(p))),
+    ];
+    return ordered[n - 1] ?? null;
   }
 
   useEffect(() => {
+    function inEditable(e: KeyboardEvent): boolean {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName.toLowerCase();
+      return (
+        tag === "input" ||
+        tag === "textarea" ||
+        target?.getAttribute("contenteditable") === "true" ||
+        !!target?.closest?.("[contenteditable=\"true\"]")
+      );
+    }
     function onKey(e: KeyboardEvent) {
-      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === "," && !e.shiftKey) {
         e.preventDefault();
         setSettingsOpen((v) => !v);
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      } else if (key === "k" && !e.shiftKey) {
         e.preventDefault();
-        setSearchOpen((v) => !v);
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key === "p") {
-        // 프로젝트 빠른 전환 — 사이드바 클릭 없이 키보드만으로 프로젝트
-        // 전환. recent + fuzzy. 입력 / textarea 안에선 브라우저 기본
-        // (인쇄 다이얼로그) 도 막아서 사용자 흐름 끊기지 않게.
+        setPaletteMode("mixed");
+        setPaletteOpen((v) => !v);
+      } else if (key === "p" && !e.shiftKey) {
+        // 프로젝트 빠른 전환 — 팔레트 @ 모드. 입력 안에서도 브라우저
+        // 기본(인쇄)을 막아 흐름이 안 끊기게.
         e.preventDefault();
-        setProjectSwitcherOpen((v) => !v);
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key === "g") {
+        setPaletteMode("project");
+        setPaletteOpen((v) => !v);
+      } else if (key === "g" && !e.shiftKey) {
         e.preventDefault();
         setGraphProject(null);
         setGraphOpen((v) => !v);
-      }
-      // ⌘[ / ⌘← : back. Most external mice with a "back" button send ⌘[ on macOS.
-      if (
-        (e.metaKey || e.ctrlKey) &&
-        (e.key === "[" || e.key === "ArrowLeft")
-      ) {
-        const target = e.target as HTMLElement | null;
-        const tag = target?.tagName.toLowerCase();
-        // Don't hijack typing in the editor / inputs.
-        if (
-          tag === "input" ||
-          tag === "textarea" ||
-          target?.getAttribute("contenteditable") === "true"
-        ) {
-          return;
+      } else if (key === "/" ) {
+        e.preventDefault();
+        setShortcutsOpen((v) => !v);
+      } else if (key === "\\") {
+        e.preventDefault();
+        setSidebarCollapsed((v) => !v);
+      } else if (key === "r" && e.shiftKey) {
+        e.preventDefault();
+        setView(useApp.getState().view === "review" ? "home" : "review");
+      } else if (key === "u" && e.shiftKey) {
+        e.preventDefault();
+        setView(useApp.getState().view === "usage" ? "home" : "usage");
+      } else if (key === "d" && e.shiftKey) {
+        e.preventDefault();
+        openTodayNote();
+      } else if (key === "n" && !e.shiftKey) {
+        e.preventDefault();
+        newNote();
+      } else if (key === "j" && !e.shiftKey) {
+        // 홈(오늘)으로. 2단계에서 빠른 메모 입력 포커스가 붙는다.
+        if (inEditable(e)) return;
+        e.preventDefault();
+        useApp.getState().clearSelection();
+      } else if (/^[1-9]$/.test(e.key) && !e.shiftKey && !e.altKey) {
+        if (inEditable(e)) return;
+        const p = projectByIndex(Number(e.key));
+        if (p) {
+          e.preventDefault();
+          useApp.getState().selectProject(p);
         }
+      } else if (e.key === "[" || e.key === "ArrowLeft") {
+        // ⌘[ / ⌘← : back. Most external mice with a "back" button send ⌘[ on macOS.
+        if (inEditable(e)) return;
         const { project, domain } = useApp.getState().selection;
         if (domain && project) {
           e.preventDefault();
@@ -500,6 +341,7 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Mouse back button: domain view → project home → global home.
@@ -896,6 +738,26 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
     if (e.key === "Enter") handleSubmit();
   };
 
+  // ⌘K 팔레트 `>` 명령 — 사이드바 헤더에서 뺀 아이콘들(그래프·휴지통·
+  // 새로고침·모두 읽음)과 화면 이동이 여기로 모인다.
+  const paletteCommands: PaletteCommand[] = [
+    { id: "today", label: "오늘 노트 열기", shortcut: "⌘⇧D", run: openTodayNote, keywords: ["daily", "데일리"] },
+    { id: "new-note", label: "새 노트", shortcut: "⌘N", run: newNote },
+    { id: "new-project", label: "새 프로젝트", run: () => openDialog({ kind: "add-project" }) },
+    { id: "home", label: "오늘(홈)으로", shortcut: "⌘J", run: () => useApp.getState().clearSelection() },
+    { id: "review", label: "검토함", shortcut: "⌘⇧R", run: () => setView("review") },
+    { id: "usage", label: "사용량", shortcut: "⌘⇧U", run: () => setView("usage") },
+    { id: "graph", label: "그래프", shortcut: "⌘G", run: () => { setGraphProject(useApp.getState().selection.project); setGraphOpen(true); } },
+    { id: "connect", label: "연결 관리 (Claude Code · Codex · Cursor)", run: () => openConnectSheet(useApp.getState().selection.project), keywords: ["mcp", "skill", "cursor", "codex", "claude"] },
+    { id: "trash", label: trashHasUnseen ? "휴지통 · 새 항목" : "휴지통", hint: trashCount > 0 ? `${trashCount}개` : undefined, run: () => { setTrashOpen(true); setTrashSeenCount(trashCount); localStorage.setItem(TRASH_SEEN_KEY, String(trashCount)); } },
+    { id: "mark-read", label: "모두 읽음으로 표시", run: () => { markVaultAllRead().then(() => refresh()); } },
+    { id: "refresh", label: "새로고침 (vault 다시 읽기)", run: () => { refresh(); } },
+    { id: "settings", label: "설정", shortcut: "⌘,", run: () => setSettingsOpen(true) },
+    { id: "settings-ai", label: "설정 · AI 연동", run: () => { setSettingsInitial("vector"); setSettingsOpen(true); } },
+    { id: "shortcuts", label: "단축키", shortcut: "⌘/", run: () => setShortcutsOpen(true) },
+    { id: "about", label: "단비 정보", run: () => setAboutOpen(true) },
+  ];
+
   // 첫 진입 splash — tree 가 도착하기 전엔 App.tsx 의 단비 LoadingScreen
   // 그대로 보여줌. App splash 와 같은 화면이라 시각적 끊김 없이 로딩 →
   // 실 화면 swap 이 자연스럽다. macOS 비치볼이 webview 위에서 빈 사이드바
@@ -922,6 +784,8 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
         />
         */}
         <div className="flex min-h-0 flex-1">
+        {/* ⌘\ 접기 — 사이드바 자체 상태(폭·펼침)는 유지한 채 숨긴다. */}
+        <div className={cn("flex min-h-0 shrink-0", sidebarCollapsed && "hidden")}>
         <Sidebar
           onAddProject={() => openDialog({ kind: "add-project" })}
           onAddProjectToGroup={(groupId) =>
@@ -949,23 +813,17 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
             openDialog({ kind: "confirm-delete-domain", project, domain })
           }
           onOpenSettings={() => setSettingsOpen(true)}
-          onOpenSearch={() => setSearchOpen(true)}
+          onOpenPalette={() => {
+            setPaletteMode("mixed");
+            setPaletteOpen(true);
+          }}
           onOpenGraph={() => {
             setGraphProject(null);
             setGraphOpen(true);
           }}
-          onOpenReviews={() => setReviewOpen(true)}
           reviewCount={reviewCount}
-          onOpenTrash={() => {
-            setTrashOpen(true);
-            // 패널을 여는 순간 = 사용자가 모두 본 것으로 간주. dot 즉시
-            // 사라지게 seen 을 현재 count 로 동기화.
-            setTrashSeenCount(trashCount);
-            localStorage.setItem(TRASH_SEEN_KEY, String(trashCount));
-          }}
-          trashHasUnseen={trashHasUnseen}
-          onCopyMcpInstall={copyMcpInstall}
-          onCopyClaudeMdTemplate={copyClaudeMdTemplate}
+          onOpenConnect={openConnectSheet}
+          onNewNote={newNote}
           onChangeProjectIcon={(project) => setIconPickerProject(project)}
           onChangeProjectColor={(project) => setColorPickerProject(project)}
           onMarkProjectRead={async (project) => {
@@ -1020,25 +878,42 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
               console.error("[danbi] move_domain failed", e);
             }
           }}
-          onRefreshTree={refresh}
         />
+        </div>
         <div className="flex flex-1 min-w-0 flex-col">
           <div className="flex-1 min-h-0 flex flex-col">
-            {selection.project && selection.domain ? (
-              <>
-                <div className="flex-1 min-h-0">
-                  <DocView
-                    refreshKey={refreshKey}
-                    onOpenGraph={() => {
-                      // 현재 도메인을 spotlight 한 채로 그래프 뷰 열기.
-                      // GraphView 가 initialProject 를 받아 자동 zoom 한다.
-                      setGraphProject(useApp.getState().selection.project);
-                      setGraphOpen(true);
-                    }}
-                  />
-                </div>
-                <Backlinks />
-              </>
+            {view === "review" ? (
+              <ReviewView
+                project={selection.project}
+                onOpenDoc={(p, d) => useApp.getState().selectDomain(p, d)}
+                onOpenGraph={(p) => {
+                  setGraphProject(p);
+                  setGraphOpen(true);
+                }}
+              />
+            ) : view === "usage" ? (
+              <UsageView />
+            ) : selection.project && selection.domain ? (
+              <div className="flex-1 min-h-0">
+                <DocView
+                  refreshKey={refreshKey}
+                  onOpenGraph={() => {
+                    // 현재 도메인을 spotlight 한 채로 그래프 뷰 열기.
+                    // GraphView 가 initialProject 를 받아 자동 zoom 한다.
+                    setGraphProject(useApp.getState().selection.project);
+                    setGraphOpen(true);
+                  }}
+                  onRenameDomain={(project, domain) =>
+                    openDialog(
+                      { kind: "rename-domain", project, domain },
+                      domain.replace(/\.md$/i, ""),
+                    )
+                  }
+                  onDeleteDomain={(project, domain) =>
+                    openDialog({ kind: "confirm-delete-domain", project, domain })
+                  }
+                />
+              </div>
             ) : selection.project ? (
               <ProjectHome
                 project={selection.project}
@@ -1049,10 +924,9 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
                   setGraphProject(project);
                   setGraphOpen(true);
                 }}
-                onCopyMcpInstall={copyMcpInstall}
               />
             ) : (
-              <Home />
+              <Home onOpenShortcuts={() => setShortcutsOpen(true)} />
             )}
           </div>
           {/* CommandBar 는 LLM provider 가 연결된 경우에만 노출. 단비
@@ -1357,15 +1231,22 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
         initialSection={settingsInitial}
       />
 
-      <SearchPalette
-        open={searchOpen}
-        onClose={() => setSearchOpen(false)}
+      <CommandPalette
+        open={paletteOpen}
+        mode={paletteMode}
+        onClose={() => setPaletteOpen(false)}
+        initialScope={selection.project}
+        commands={paletteCommands}
       />
 
-      <ProjectSwitcher
-        open={projectSwitcherOpen}
-        onClose={() => setProjectSwitcherOpen(false)}
+      <ConnectSheet
+        open={connectSheet.open}
+        project={connectSheet.project}
+        onClose={closeConnectSheet}
+        onOpenDoc={(p, d) => useApp.getState().selectDomain(p, d)}
       />
+
+      <ShortcutsHelp open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 
       <TrashPanel
         open={trashOpen}
@@ -1465,29 +1346,13 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
         )}
       </Dialog>
 
-      <ReviewPanel
-        open={reviewOpen}
-        onClose={() => {
-          setReviewOpen(false);
-          // Refresh count after the user possibly resolved some items.
-          ipc
-            .reviewsList()
-            .then((s) =>
-              setReviewCount(
-                s.items.filter((it) => it.status === "pending").length,
-              ),
-            )
-            .catch(() => {});
-        }}
-      />
-
       {toast && (
         <div className="pointer-events-none fixed bottom-20 left-1/2 z-50 -translate-x-1/2">
           <div
             className={
               // 배경은 vault surface 위로 완전 불투명하게 — 뒤 글자가
               // 비춰서 안 읽히는 문제 해결. 폰트도 키워서 가독성 확보.
-              "pointer-events-auto inline-flex max-w-[560px] items-start gap-3 rounded-lg border bg-surface-elevated px-5 py-4 text-[14px] leading-[1.55] shadow-2xl shadow-black/60 " +
+              "pointer-events-auto inline-flex max-w-[560px] items-start gap-3 rounded-lg border bg-surface-elevated px-5 py-4 text-[14px] leading-[1.55] " +
               (toast.tone === "ok"
                 ? "border-accent-green text-ink"
                 : "border-accent-red text-ink")
@@ -1519,7 +1384,7 @@ function GlobalToast() {
     <div className="pointer-events-none fixed right-6 top-14 z-[60]">
       <div
         className={
-          "pointer-events-auto inline-flex max-w-[440px] items-start gap-3 rounded-lg border bg-surface-elevated px-4 py-3 text-[13px] leading-[1.55] shadow-2xl shadow-black/60 " +
+          "pointer-events-auto inline-flex max-w-[440px] items-start gap-3 rounded-lg border bg-surface-elevated px-4 py-3 text-[13px] leading-[1.55] " +
           (t.tone === "ok"
             ? "border-accent-green text-ink"
             : "border-accent-red text-ink")
