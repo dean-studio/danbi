@@ -48,7 +48,12 @@ pub fn ensure_repo(vault: &Path) -> DanbiResult<()> {
     if repo.head().is_err() {
         commit_all(&repo, "danbi: initialize vault")?;
     }
-    untrack_ignored(&repo)?;
+    // Reads call this too (list_tree → init_vault), so a transient git
+    // failure here (another process holding index.lock) must not fail
+    // them — the migration simply runs on the next call.
+    if let Err(e) = untrack_ignored(&repo) {
+        eprintln!("[vcs] .danbi/config.json untrack deferred: {e}");
+    }
     Ok(())
 }
 
