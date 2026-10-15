@@ -620,13 +620,13 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
           <AgentPreviewRow
             icon={<ClaudeIcon size={16} />}
             label="Claude Code"
-            desc="설치 명령을 복사해 당신 프로젝트 폴더에서 한 번 실행하면 연결돼요."
+            desc="코드 폴더를 선택하면 그 폴더의 .mcp.json 에 바로 기록돼요. Cursor 도 같은 방식(.cursor/mcp.json)."
           />
         </div>
         <div className="mt-3 rounded-md border border-hairline bg-surface px-3.5 py-2.5 text-[12px] leading-[1.6] text-mute">
-          연결은 지금 안 해도 괜찮아요. 홈 화면 상단에{" "}
-          <span className="text-on-dark">“이 프로젝트를 에이전트에 연결하세요”</span>{" "}
-          카드가 떠서 언제든 한 번에 붙일 수 있습니다.
+          연결은 지금 안 해도 괜찮아요. 프로젝트 홈의 에이전트 상태 띠에서{" "}
+          <span className="text-on-dark">[연결 관리]</span> 를 누르면 언제든 한
+          곳에서 붙일 수 있습니다 (사이드바 푸터의 MCP 점도 같은 시트).
         </div>
       </WizardShell>
     );
