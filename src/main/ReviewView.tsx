@@ -20,7 +20,7 @@ import { useApp } from "@/state/store";
  * 복제하지 않음). 고아 "제외" 만 `cfg.review_excluded_paths` 에 남는다.
  */
 
-type Filter = "all" | "ghost" | "orphan" | "empty" | "large" | "review";
+export type Filter = "all" | "ghost" | "orphan" | "empty" | "large" | "review";
 
 const FILTERS: Array<{ key: Filter; label: string }> = [
   { key: "all", label: "전체" },
@@ -45,7 +45,7 @@ const INDEX_LIKE = new Set([
 const ORPHAN_VISIBLE = 20;
 
 /** 큐의 한 행. 세 소스를 같은 모양으로 정규화해 키보드·필터를 한 코드로. */
-type Row = {
+export type ReviewRow = {
   key: string;
   filter: Exclude<Filter, "all">;
   badge: string;
@@ -60,28 +60,47 @@ type Row = {
   ghost?: GhostSuggestion;
   review?: ReviewItem;
 };
+type Row = ReviewRow;
 
-export function ReviewView({
-  project,
-  onOpenDoc,
-  onOpenGraph,
-}: {
-  project?: string | null;
-  onOpenDoc: (project: string, domain: string) => void;
-  onOpenGraph?: (project: string) => void;
-}) {
+/** 표시 순서: ghost → 저신뢰 → 큰 파일 → 빈 파일 → 고아(최근 수정 우선). */
+const FILTER_ORDER: Record<Exclude<Filter, "all">, number> = {
+  ghost: 0,
+  review: 1,
+  large: 2,
+  empty: 3,
+  orphan: 4,
+};
+
+/**
+ * 검토함의 데이터 층 — dashboardSnapshot·reviewsList 조회, vault/reviews
+ * 변경 구독, 제외 목록(cfg)·세션 숨김 적용, 승인/무시 동작. ReviewView(전체
+ * 화면)와 ReviewMini(홈·프로젝트 홈 요약)가 같은 큐를 본다.
+ */
+export function useReviewRows(project?: string | null): {
+  rows: ReviewRow[];
+  loading: boolean;
+  /** 첫 조회 전인지 — 스켈레톤 판단용. */
+  initial: boolean;
+  err: string | null;
+  counts: Record<Exclude<Filter, "all">, number>;
+  pendingTotal: number;
+  actions: {
+    open: (row: ReviewRow) => { project: string; domain: string } | null;
+    approve: (row: ReviewRow) => Promise<void>;
+    dismiss: (row: ReviewRow) => Promise<void>;
+    reload: () => void;
+    /** 고아 제외 목록 전체 교체 (제외 해제에 쓴다). */
+    persistExcluded: (next: string[]) => Promise<void>;
+  };
+} {
   const cfg = useApp((s) => s.cfg);
   const tree = useApp((s) => s.tree);
   const [snap, setSnap] = useState<DashboardSnapshot | null>(null);
   const [reviews, setReviews] = useState<ReviewItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
-  const [active, setActive] = useState(0);
   // 빈 파일·큰 파일의 "무시" 와 아직 서버에 반영 전인 항목 — 세션 한정.
   const [hidden, setHidden] = useState<Set<string>>(() => new Set());
-  const [showOldOrphans, setShowOldOrphans] = useState(false);
-  const [showExcluded, setShowExcluded] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -184,7 +203,9 @@ export function ReviewView({
         review: it,
       });
     }
-    return out.filter((r) => !hidden.has(r.key));
+    return out
+      .filter((r) => !hidden.has(r.key))
+      .sort((a, b) => FILTER_ORDER[a.filter] - FILTER_ORDER[b.filter] || b.ts - a.ts);
   }, [snap, reviews, project, excluded, hidden, mtimeOf]);
 
   const counts = useMemo(() => {
@@ -198,40 +219,6 @@ export function ReviewView({
     for (const r of rows) c[r.filter] += 1;
     return c;
   }, [rows]);
-
-  // 표시 순서: ghost → 저신뢰 → 큰 파일 → 빈 파일 → 고아(최근 수정 우선).
-  // 고아는 ORPHAN_VISIBLE 개 뒤를 접는다.
-  const { visible, foldedOrphans } = useMemo(() => {
-    const order: Record<Exclude<Filter, "all">, number> = {
-      ghost: 0,
-      review: 1,
-      large: 2,
-      empty: 3,
-      orphan: 4,
-    };
-    const list = rows
-      .filter((r) => filter === "all" || r.filter === filter)
-      .sort((a, b) => order[a.filter] - order[b.filter] || b.ts - a.ts);
-    if (showOldOrphans) return { visible: list, foldedOrphans: 0 };
-    let seenOrphans = 0;
-    const visible: Row[] = [];
-    let folded = 0;
-    for (const r of list) {
-      if (r.filter === "orphan") {
-        seenOrphans += 1;
-        if (seenOrphans > ORPHAN_VISIBLE) {
-          folded += 1;
-          continue;
-        }
-      }
-      visible.push(r);
-    }
-    return { visible, foldedOrphans: folded };
-  }, [rows, filter, showOldOrphans]);
-
-  useEffect(() => {
-    setActive((i) => Math.min(i, Math.max(0, visible.length - 1)));
-  }, [visible.length]);
 
   const persistExcluded = useCallback(
     async (next: string[]) => {
@@ -247,16 +234,11 @@ export function ReviewView({
     [cfg],
   );
 
-  const open = useCallback(
-    (r: Row) => {
-      if (r.ghost) {
-        onOpenDoc(r.ghost.project, r.ghost.source_domain);
-        return;
-      }
-      if (r.domain) onOpenDoc(r.project, r.domain);
-    },
-    [onOpenDoc],
-  );
+  const open = useCallback((r: Row) => {
+    if (r.ghost) return { project: r.ghost.project, domain: r.ghost.source_domain };
+    if (r.domain) return { project: r.project, domain: r.domain };
+    return null;
+  }, []);
 
   const approve = useCallback(
     async (r: Row) => {
@@ -301,6 +283,67 @@ export function ReviewView({
     },
     [load],
   );
+
+  return {
+    rows,
+    loading,
+    initial: !snap,
+    err,
+    counts,
+    pendingTotal: rows.length,
+    actions: { open, approve, dismiss, reload: load, persistExcluded },
+  };
+}
+
+export function ReviewView({
+  project,
+  onOpenDoc,
+  onOpenGraph,
+}: {
+  project?: string | null;
+  onOpenDoc: (project: string, domain: string) => void;
+  onOpenGraph?: (project: string) => void;
+}) {
+  const cfg = useApp((s) => s.cfg);
+  const { rows, loading, initial, err, counts, actions } = useReviewRows(project);
+  const { reload: load, persistExcluded } = actions;
+  const [filter, setFilter] = useState<Filter>("all");
+  const [active, setActive] = useState(0);
+  const [showOldOrphans, setShowOldOrphans] = useState(false);
+  const [showExcluded, setShowExcluded] = useState(false);
+
+  // 필터 적용 + 고아는 ORPHAN_VISIBLE 개 뒤를 접는다 (rows 는 이미 정렬됨).
+  const { visible, foldedOrphans } = useMemo(() => {
+    const list = rows.filter((r) => filter === "all" || r.filter === filter);
+    if (showOldOrphans) return { visible: list, foldedOrphans: 0 };
+    let seenOrphans = 0;
+    const visible: Row[] = [];
+    let folded = 0;
+    for (const r of list) {
+      if (r.filter === "orphan") {
+        seenOrphans += 1;
+        if (seenOrphans > ORPHAN_VISIBLE) {
+          folded += 1;
+          continue;
+        }
+      }
+      visible.push(r);
+    }
+    return { visible, foldedOrphans: folded };
+  }, [rows, filter, showOldOrphans]);
+
+  useEffect(() => {
+    setActive((i) => Math.min(i, Math.max(0, visible.length - 1)));
+  }, [visible.length]);
+
+  const open = useCallback(
+    (r: Row) => {
+      const t = actions.open(r);
+      if (t) onOpenDoc(t.project, t.domain);
+    },
+    [actions, onOpenDoc],
+  );
+  const { approve, dismiss } = actions;
 
   // J/K 이동 · ↩ 열기 · A 승인/제외 · X 무시 — 입력에 포커스 없을 때만.
   const visibleRef = useRef(visible);
@@ -416,7 +459,7 @@ export function ReviewView({
             </div>
           )}
 
-          {!snap && loading ? (
+          {initial && loading ? (
             <ul className="mt-4 flex flex-col gap-1">
               {[0, 1, 2].map((i) => (
                 <li

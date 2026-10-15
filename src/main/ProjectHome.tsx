@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   Check,
+  ChevronDown,
+  ChevronRight,
   Loader2,
   Network,
   Plus,
@@ -18,7 +20,9 @@ import {
   type ProjectNode,
   type TriggerKind,
 } from "@/lib/ipc";
+import { ActivityFeed } from "@/main/ActivityFeed";
 import { ConnectStatusBand } from "@/main/ConnectSheet";
+import { ReviewMini } from "@/main/ReviewMini";
 import { projectIconOf } from "@/components/ProjectIconPicker";
 import { ReindexProgressCard } from "@/main/Settings";
 import { cn } from "@/lib/utils";
@@ -41,6 +45,7 @@ export function ProjectHome({
   const tree = useApp((s) => s.tree);
   const selectDomain = useApp((s) => s.selectDomain);
   const openConnectSheet = useApp((s) => s.openConnectSheet);
+  const setView = useApp((s) => s.setView);
 
   const projectNode: ProjectNode | undefined = useMemo(
     () => tree?.projects.find((p) => p.name === project),
@@ -85,30 +90,180 @@ export function ProjectHome({
               onOpenSheet={() => openConnectSheet(project)}
             />
           </div>
+          {/* 이 프로젝트 피드 | 지난 7일 · 검토 N (화면 B) */}
+          <div className="mt-6 grid gap-5" style={{ gridTemplateColumns: "minmax(0,1fr) 260px" }}>
+            <ActivityFeed
+              scopeProject={project}
+              limit={30}
+              compact
+              onOpenDoc={selectDomain}
+              className="rounded-lg border border-hairline bg-surface"
+            />
+            <div className="flex min-w-0 flex-col gap-4">
+              <div className="rounded-lg border border-hairline bg-surface px-4 py-4">
+                <SevenDayBar project={project} embedded />
+              </div>
+              <ReviewMini
+                project={project}
+                max={3}
+                onOpenDoc={selectDomain}
+                onOpenAll={() => setView("review")}
+              />
+            </div>
+          </div>
+          <div className="mt-6">
+            <RecentDocsCard project={projectNode} onOpen={(d) => selectDomain(project, d)} />
+          </div>
           <div className="mt-6">
             <ProjectActions
               project={project}
               onOpenGraph={() => onOpenGraph(project)}
             />
           </div>
-          <div className="mt-6">
-            <SevenDayBar project={project} />
-          </div>
-          <div className="mt-6">
-            <McpInboundProjectMini
-              project={project}
-              onOpenDomain={(d) => selectDomain(project, d)}
-            />
-          </div>
-          <div className="mt-6">
+          <Collapsible id="journal" title="받아 적은 것" className="mt-6">
             <AutoJournalPanel
               project={project}
               onOpen={(d) => selectDomain(project, d)}
             />
-          </div>
+          </Collapsible>
+          <Collapsible id="usage" title="사용량 (이 프로젝트 MCP 저장 토큰)" className="mt-4">
+            <McpInboundProjectMini
+              project={project}
+              onOpenDomain={(d) => selectDomain(project, d)}
+            />
+          </Collapsible>
         </div>
       </div>
     </div>
+  );
+}
+
+/** 최근 문서 — daily 제외, mtime 순 2열 카드, H1 제목 표시. 뼈대 문서
+ *  (purpose/schema/SKILL) 는 아래 칩 행. */
+const SKELETON_DOCS = ["purpose.md", "schema.md", "SKILL.md"];
+function RecentDocsCard({
+  project,
+  onOpen,
+}: {
+  project: ProjectNode;
+  onOpen: (domain: string) => void;
+}) {
+  const docs = useMemo(() => {
+    const all: { name: string; ms: number; title: string | null }[] = [];
+    const push = (d: { name: string; modified_ms?: number | null; title?: string | null }) => {
+      if (d.name.startsWith("daily/") || SKELETON_DOCS.includes(d.name)) return;
+      all.push({ name: d.name, ms: d.modified_ms ?? 0, title: d.title ?? null });
+    };
+    project.domains.forEach(push);
+    for (const f of project.subfolders) {
+      if (f.name === "daily") continue;
+      f.domains.forEach(push);
+      for (const g of f.subfolders ?? []) g.domains.forEach(push);
+    }
+    all.sort((a, b) => b.ms - a.ms);
+    return all.slice(0, 6);
+  }, [project]);
+  const skeleton = SKELETON_DOCS.filter((n) => project.domains.some((d) => d.name === n));
+
+  return (
+    <section className="rounded-lg border border-hairline bg-surface p-4">
+      <div className="mb-2.5 flex items-center justify-between">
+        <span className="text-[13px] font-medium text-ink">최근 문서</span>
+        <span className="text-caption-sm text-stone">daily 제외 · 수정순</span>
+      </div>
+      {docs.length === 0 ? (
+        <div className="text-[12px] text-mute">
+          아직 문서가 없어요. 헤더의 [새 노트] 로 시작하세요.
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          {docs.map((d) => (
+            <button
+              key={d.name}
+              onClick={() => onOpen(d.name)}
+              title={d.name}
+              className="flex min-w-0 flex-col gap-0.5 rounded-md border border-hairline bg-surface-elevated px-3 py-2 text-left transition-colors hover:border-hairline-strong"
+            >
+              <span className="truncate text-[13px] text-ink">
+                {d.title ?? d.name.replace(/\.md$/, "")}
+              </span>
+              <span className="flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-[11px] text-mute">{d.name}</span>
+                <span className="shrink-0 text-[11px] text-stone">
+                  {d.ms ? relAgo(d.ms) : ""}
+                </span>
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      {skeleton.length > 0 && (
+        <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+          {skeleton.map((n) => (
+            <button
+              key={n}
+              onClick={() => onOpen(n)}
+              className="inline-flex h-6 items-center rounded-full border border-hairline bg-surface-elevated px-2.5 font-mono text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function relAgo(ms: number): string {
+  const diff = Math.max(0, Date.now() - ms);
+  const m = Math.floor(diff / 60_000);
+  if (m < 1) return "방금";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+/** 접힘 섹션 — 상태는 localStorage. 기본 접힘. */
+function Collapsible({
+  id,
+  title,
+  className,
+  children,
+}: {
+  id: string;
+  title: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  const key = `danbi:project-home-open:${id}`;
+  const [open, setOpen] = useState(() => {
+    try {
+      return localStorage.getItem(key) === "1";
+    } catch {
+      return false;
+    }
+  });
+  return (
+    <section className={className}>
+      <button
+        onClick={() =>
+          setOpen((v) => {
+            try {
+              localStorage.setItem(key, v ? "0" : "1");
+            } catch {
+              /* ignore */
+            }
+            return !v;
+          })
+        }
+        className="flex w-full items-center gap-1.5 rounded-sm px-1 py-1 text-left text-[13px] font-medium text-body hover:text-on-dark"
+      >
+        {open ? <ChevronDown size={13} className="text-mute" /> : <ChevronRight size={13} className="text-mute" />}
+        {title}
+      </button>
+      {open && <div className="mt-2">{children}</div>}
+    </section>
   );
 }
 

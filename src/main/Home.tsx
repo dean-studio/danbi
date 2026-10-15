@@ -1,63 +1,51 @@
-import { useEffect, useMemo, useState } from "react";
-import {
-  BarChart3,
-  CalendarDays,
-  CheckCheck,
-  Clock4,
-  FileText,
-  GitCommit,
-  Plus,
-  Server,
-} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { CheckCheck, ChevronDown, Clock4, Send, Server } from "lucide-react";
 import {
   ipc,
-  type CommitSummary,
+  type ActivityEntry,
   type DailySnapshot,
 } from "@/lib/ipc";
+import { ActivityFeed, clientLabel, type ActivityStats } from "@/main/ActivityFeed";
+import { useMcpSummary } from "@/main/ConnectSheet";
+import { ReviewMini } from "@/main/ReviewMini";
 import { Keycap } from "@/main/ShortcutsHelp";
 import { markVaultAllRead } from "@/main/Sidebar";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 
-/** 오늘(홈). 아침에 열면 "오늘 무슨 일이 있었나" 가 먼저 — DailyCard 가
- *  최상단, 사용량 카드는 사용량 화면으로 이동. 활동 피드(2단계)가
- *  들어오기 전까지 "최근 작업" 은 커밋 요약을 사람이 읽을 수 있는 행으로
- *  풀어 보여주고 클릭하면 문서가 열린다. */
+/** ⌘J — Workspace 가 쏘고 빠른 메모 입력이 듣는 포커스 신호. */
+export const FOCUS_MEMO_EVENT = "danbi:focus-memo";
+
+/** 오늘(홈, 화면 A). 아침에 열면 30초 안에 "어제 이후 누가 무엇을 썼고
+ *  내가 봐야 할 게 몇 개인지" 를 알고, 떠오른 메모를 바로 남긴다.
+ *  빠른 메모(흰 CTA 1개) → 요약 한 줄 → 활동 피드 | 검토함·지난 오늘·
+ *  에이전트. LLM 없이 동작(피드=git, 검토=ghost store+healing, 메모=
+ *  quick capture 의 LLM 우회 경로). */
 export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
   const tree = useApp((s) => s.tree);
   const selectDomain = useApp((s) => s.selectDomain);
   const setView = useApp((s) => s.setView);
   const openConnectSheet = useApp((s) => s.openConnectSheet);
 
-  const [commits, setCommits] = useState<CommitSummary[]>([]);
-  const [daily, setDaily] = useState<DailySnapshot | null>(null);
+  const [scope, setScope] = useState<string | null>(null);
+  const [stats, setStats] = useState<ActivityStats | null>(null);
+  const [reviewCount, setReviewCount] = useState(0);
+  const [optimistic, setOptimistic] = useState<ActivityEntry[]>([]);
   const [marking, setMarking] = useState(false);
 
-  useEffect(() => {
-    ipc
-      .recentCommits(200)
-      .then(setCommits)
-      .catch(() => setCommits([]));
-    ipc
-      .dailySnapshot()
-      .then(setDaily)
-      .catch(() => setDaily(null));
-  }, [tree]);
-
-  const recent = useMemo(
-    () =>
-      commits
-        .filter((c) => !c.summary.includes("(pre)"))
-        .map((c) => ({ ...c, parsed: parseCommitSummary(c.summary) }))
-        .slice(0, 12),
-    [commits],
-  );
-
-  // 빈 vault (프로젝트 0개) 에선 집계 카드를 감춘다 — 첫 프로젝트를
-  // 만들기 전까진 환영 + 시작 안내만.
-  const hasProjects = (tree?.projects?.length ?? 0) > 0;
+  const projects = useMemo(() => tree?.projects.map((p) => p.name) ?? [], [tree]);
+  const hasProjects = projects.length > 0;
   const today = new Date();
   const dateLabel = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")} (${"일월화수목금토"[today.getDay()]})`;
+
+  // 메모 전송 직후 피드 맨 위에 넣는 옵티미스틱 행. 워처 → 피드 갱신이
+  // 수 초 안에 실제 커밋 행을 가져오면 id 가 달라 중복되니 8초 뒤 거둔다.
+  const pushOptimistic = useCallback((e: ActivityEntry) => {
+    setOptimistic((rows) => [e, ...rows]);
+    window.setTimeout(() => {
+      setOptimistic((rows) => rows.filter((r) => r.id !== e.id));
+    }, 8000);
+  }, []);
 
   return (
     <div className="flex h-full flex-col">
@@ -72,6 +60,9 @@ export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
           <span className="font-mono text-[12px] text-stone">{dateLabel}</span>
         </div>
         <div className="flex items-center gap-1.5">
+          {hasProjects && (
+            <ScopeSelect projects={projects} value={scope} onChange={setScope} />
+          )}
           <button
             onClick={async () => {
               setMarking(true);
@@ -91,7 +82,7 @@ export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
             <button
               onClick={onOpenShortcuts}
               title="단축키 표"
-              className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] text-mute hover:bg-surface-elevated hover:text-on-dark"
+              className="inline-flex h-7 items-center gap-1 rounded-md px-2 text-[12px] text-mute hover:bg-surface-elevated hover:text-on-dark"
             >
               <Keycap>⌘</Keycap>
               <Keycap>/</Keycap>
@@ -101,8 +92,8 @@ export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
       </header>
 
       <div className="flex-1 min-h-0 overflow-auto">
-        <div className="mx-auto max-w-[960px] px-7 py-9">
-          {!hasProjects && (
+        <div className="mx-auto max-w-[1040px] px-6 py-6">
+          {!hasProjects ? (
             <>
               <h1 className="text-[32px] font-medium leading-tight text-ink">
                 단비에 오신 걸 환영해요 👋
@@ -112,88 +103,39 @@ export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
                 만들면 여기에 활동이 채워집니다.
               </p>
             </>
-          )}
-
-          {hasProjects && (
+          ) : (
             <>
-              {/* 오늘 — 최상단. */}
-              {daily && <DailyCard snapshot={daily} onOpen={selectDomain} first />}
+              <QuickMemo projects={projects} onStored={pushOptimistic} />
 
-              {/* 최근 작업 — 커밋 요약을 사람이 읽을 행으로. */}
-              {recent.length > 0 && (
-                <section className="mt-7 overflow-hidden rounded-lg border border-hairline bg-surface">
-                  <header className="flex items-center justify-between border-b border-hairline px-4 py-2.5">
-                    <div className="flex items-center gap-1.5">
-                      <GitCommit size={13} className="text-mute" />
-                      <h2 className="text-[14px] font-medium text-ink">최근 작업</h2>
-                    </div>
-                    <span className="text-caption-sm text-stone">
-                      {commits.length.toLocaleString()} commits
-                    </span>
-                  </header>
-                  <ul className="divide-y divide-hairline">
-                    {recent.map((c) => {
-                      const { op, project, domain } = c.parsed;
-                      const openable = !!project && !!domain;
-                      return (
-                        <li key={c.id}>
-                          <button
-                            onClick={() => {
-                              if (openable) selectDomain(project!, domain!);
-                            }}
-                            disabled={!openable}
-                            title={c.summary}
-                            className={cn(
-                              "flex w-full items-center gap-3 px-4 py-2 text-left transition-colors",
-                              openable
-                                ? "hover:bg-surface-elevated"
-                                : "cursor-default",
-                            )}
-                          >
-                            <span className="w-[44px] shrink-0 font-mono text-[11px] text-stone">
-                              {formatHM(c.ts * 1000)}
-                            </span>
-                            <span className="shrink-0 rounded-xs bg-surface-elevated px-1.5 py-px text-[10px] font-medium uppercase tracking-[0.2px] text-on-dark-mute">
-                              {op}
-                            </span>
-                            {project ? (
-                              <>
-                                <span className="shrink-0 text-[12px] text-mute">{project}</span>
-                                <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-body">
-                                  {domain}
-                                </span>
-                              </>
-                            ) : (
-                              <span className="min-w-0 flex-1 truncate text-[12px] text-body">
-                                {c.summary}
-                              </span>
-                            )}
-                            <span className="shrink-0 text-caption-sm text-stone">
-                              {timeAgo(c.ts * 1000)}
-                            </span>
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </section>
-              )}
+              <SummaryLine
+                stats={stats}
+                reviewCount={reviewCount}
+                onOpenReview={() => setView("review")}
+              />
 
-              {/* 사용량·에이전트는 별도 화면/시트 — 입구만. */}
-              <div className="mt-6 flex flex-wrap items-center gap-2">
-                <button
-                  onClick={() => setView("usage")}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
-                >
-                  <BarChart3 size={12} /> 사용량 보기
-                  <Keycap>⌘⇧U</Keycap>
-                </button>
-                <button
-                  onClick={() => openConnectSheet(null)}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
-                >
-                  <Server size={12} /> 에이전트 연결 관리
-                </button>
+              <div className="mt-4 grid gap-5" style={{ gridTemplateColumns: "minmax(0,1fr) 320px" }}>
+                <ActivityFeed
+                  scopeProject={scope}
+                  limit={50}
+                  onOpenDoc={selectDomain}
+                  onStats={setStats}
+                  optimistic={optimistic}
+                  className="rounded-lg border border-hairline bg-surface"
+                />
+                <div className="flex min-w-0 flex-col gap-4">
+                  <ReviewMini
+                    project={scope}
+                    max={4}
+                    onOpenDoc={selectDomain}
+                    onOpenAll={() => setView("review")}
+                    onCount={setReviewCount}
+                  />
+                  <PastTodayCard onOpen={selectDomain} />
+                  <AgentsCard
+                    stats={stats}
+                    onManage={() => openConnectSheet(scope)}
+                  />
+                </div>
               </div>
             </>
           )}
@@ -203,195 +145,242 @@ export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
   );
 }
 
-/** `danbi: mcp log · 단비/daily/2026-10-15.md · …` 같은 커밋 요약을
- *  op / project / domain 으로. 형식이 다르면 project=null (원문 표시). */
-function parseCommitSummary(summary: string): {
-  op: string;
-  project: string | null;
-  domain: string | null;
-} {
-  const body = summary.replace(/^danbi:\s*/, "");
-  const parts = body.split(" · ").map((p) => p.trim());
-  let project: string | null = null;
-  let domain: string | null = null;
-  for (const part of parts) {
-    const m = part.match(/^([^/\s][^/]*)\/(.+\.md)$/);
-    if (m) {
-      project = m[1];
-      domain = m[2];
-      break;
-    }
-  }
-  const rawOp = parts[0] ?? body;
-  const op = OP_LABELS[rawOp] ?? OP_LABELS[rawOp.split(" ")[0]] ?? rawOp.slice(0, 14);
-  return { op, project, domain };
-}
-
-const OP_LABELS: Record<string, string> = {
-  "mcp log": "로그",
-  "mcp append": "추가",
-  "mcp create_file": "생성",
-  "mcp create_folder": "폴더",
-  "mcp replace_section": "섹션 교체",
-  "mcp upsert_item": "항목 갱신",
-  "rest overwrite": "REST 저장",
-  "rest append": "REST 추가",
-  "editor": "저장",
-  "save": "저장",
-  "quick_capture": "캡처",
-  "restore before": "되돌림",
-  "restore at": "복원",
-  "undo": "되돌림",
-  "apply": "AI 편집",
-  "compound": "Compound",
-  "create": "생성",
-  "rename": "이름 변경",
-  "delete": "삭제",
-  "move": "이동",
-  "session-end": "세션 기록",
-};
-
-export function cardFallback(error: Error, reset: () => void) {
+/** 헤더 [전체 ▾] — 피드·검토함 범위. */
+function ScopeSelect({
+  projects,
+  value,
+  onChange,
+}: {
+  projects: string[];
+  value: string | null;
+  onChange: (v: string | null) => void;
+}) {
   return (
-    <section className="mt-7 rounded-lg border border-hairline bg-surface px-4 py-4">
-      <div className="text-[13px] text-on-dark">
-        이 카드를 표시하는 중 문제가 생겼어요.
-      </div>
-      <div className="mt-1 truncate text-[11px] text-stone" title={error.message}>
-        {error.message}
-      </div>
-      <button
-        type="button"
-        onClick={reset}
-        className="mt-2 inline-flex h-7 items-center rounded-md border border-hairline bg-surface-elevated px-2.5 text-[11px] text-body transition-colors hover:border-hairline-strong hover:text-on-dark"
+    <label className="relative inline-flex h-7 items-center rounded-md border border-hairline bg-surface-elevated pl-2.5 pr-6 text-[12px] text-body hover:border-hairline-strong">
+      <select
+        value={value ?? ""}
+        onChange={(e) => onChange(e.target.value || null)}
+        className="absolute inset-0 cursor-pointer opacity-0"
+        aria-label="범위"
       >
-        다시 시도
-      </button>
-    </section>
+        <option value="">전체</option>
+        {projects.map((p) => (
+          <option key={p} value={p}>
+            {p}
+          </option>
+        ))}
+      </select>
+      <span className="pointer-events-none truncate">{value ?? "전체"}</span>
+      <ChevronDown size={11} className="pointer-events-none absolute right-2 text-mute" />
+    </label>
   );
 }
 
-function DailyCard({
-  snapshot,
-  onOpen,
-  first = false,
+/** 빠른 메모 — ⌃Space 팝업과 같은 백엔드(quick_capture, LLM 없음)의
+ *  메인 윈도우 입구. 프로젝트 칩 기본 = 마지막 사용 프로젝트, 도메인 칩
+ *  기본 = daily(오늘 노트, 백엔드가 자동 라우팅). ↵ 전송, ⇧↵ 줄바꿈,
+ *  ⌘J 포커스. 흰 CTA 는 이 [기록] 하나. */
+function QuickMemo({
+  projects,
+  onStored,
 }: {
-  snapshot: DailySnapshot;
-  onOpen: (project: string, domain: string) => void;
-  /** 최상단 카드면 위 여백 없음. */
-  first?: boolean;
+  projects: string[];
+  onStored: (e: ActivityEntry) => void;
 }) {
   const tree = useApp((s) => s.tree);
-  const [creating, setCreating] = useState(false);
+  const lastProject = useApp((s) => s.cfg?.capture?.last_project ?? null);
+  const showToast = useApp((s) => s.showToast);
+  const [project, setProject] = useState<string>(
+    () => (lastProject && projects.includes(lastProject) ? lastProject : projects[0]) ?? "",
+  );
+  const [domain, setDomain] = useState<string>("daily");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  async function createForProject(project: string) {
-    setCreating(true);
+  // 프로젝트 목록이 바뀌었는데(삭제 등) 현재 값이 사라졌으면 첫 항목으로.
+  useEffect(() => {
+    if (!projects.includes(project)) setProject(projects[0] ?? "");
+  }, [projects, project]);
+
+  useEffect(() => {
+    function onFocus() {
+      inputRef.current?.focus();
+    }
+    window.addEventListener(FOCUS_MEMO_EVENT, onFocus);
+    return () => window.removeEventListener(FOCUS_MEMO_EVENT, onFocus);
+  }, []);
+
+  // 도메인 후보 — daily + 그 프로젝트의 최상위 .md.
+  const domains = useMemo(() => {
+    const node = tree?.projects.find((p) => p.name === project);
+    return ["daily", ...(node?.domains.map((d) => d.name) ?? [])];
+  }, [tree, project]);
+  useEffect(() => {
+    if (!domains.includes(domain)) setDomain("daily");
+  }, [domains, domain]);
+
+  async function send() {
+    const message = text.trim();
+    if (!message || !project || busy) return;
+    setBusy(true);
     try {
-      const domain = await ipc.ensureTodayNote(project);
-      onOpen(project, domain);
+      const res = await ipc.quickCapture(
+        message,
+        project,
+        domain === "daily" ? undefined : domain,
+      );
+      if (res.status !== "stored") {
+        showToast("err", "프로젝트를 먼저 골라주세요.");
+        return;
+      }
+      setText("");
+      onStored({
+        id: `local-${Date.now()}`,
+        ts: Math.floor(Date.now() / 1000),
+        client: "human",
+        actor: "human",
+        project: res.project,
+        domain: res.domain,
+        op: "quick_capture",
+        preview: message.split("\n")[0].slice(0, 60),
+        files: [`Projects/${res.project}/${res.domain}`],
+      });
+      inputRef.current?.focus();
+    } catch (e) {
+      showToast("err", `기록 실패: ${String(e).slice(0, 120)}`);
     } finally {
-      setCreating(false);
+      setBusy(false);
     }
   }
 
-  const hasPast =
-    snapshot.one_week_ago.length +
-      snapshot.one_month_ago.length +
-      snapshot.one_year_ago.length >
-    0;
-
-  const projects = tree?.projects ?? [];
+  const chip =
+    "h-7 max-w-[160px] cursor-pointer appearance-none truncate rounded-full border border-hairline bg-surface-elevated pl-2.5 pr-6 text-[12px] text-body hover:border-hairline-strong focus:outline-none";
 
   return (
-    <section className={cn("rounded-lg border border-hairline bg-surface p-5", !first && "mt-7")}>
-      <header className="flex items-center justify-between">
-        <div className="flex items-center gap-2.5">
-          <CalendarDays size={16} className="text-mute" />
-          <h2 className="text-[18px] font-medium text-ink">오늘</h2>
-          <span className="font-mono text-[13px] text-stone">
-            {snapshot.today}
-          </span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          {snapshot.today_notes.length === 0 &&
-            projects.length > 0 &&
-            projects.slice(0, 3).map((p) => (
-              <button
-                key={p.name}
-                onClick={() => createForProject(p.name)}
-                disabled={creating}
-                className="inline-flex h-6 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[11px] text-body hover:border-hairline-strong hover:text-on-dark"
-              >
-                <Plus size={10} />
-                {p.name}
-              </button>
-            ))}
-        </div>
-      </header>
-
-      {snapshot.today_notes.length > 0 ? (
-        <ul className="mt-3 flex flex-col gap-1">
-          {[...snapshot.today_notes]
-            .sort((a, b) => (b.modified_ms ?? 0) - (a.modified_ms ?? 0))
-            .map((n) => (
-            <li key={`${n.project}/${n.domain}`}>
-              <button
-                onClick={() => onOpen(n.project, n.domain)}
-                className="flex w-full items-center gap-2.5 rounded-sm px-2 py-1.5 text-left transition-colors hover:bg-surface-elevated"
-              >
-                <FileText size={13} className="text-mute" />
-                <span className="text-[14px] text-mute">{n.project}</span>
-                <span className="text-stone">/</span>
-                <span className="font-mono text-[14px] text-body">
-                  {n.domain}
-                </span>
-                <span className="ml-auto flex items-center gap-3 text-[12px] text-stone">
-                  {n.modified_ms && (
-                    <span className="font-mono" title={new Date(n.modified_ms).toLocaleString()}>
-                      {formatHM(n.modified_ms)}
-                    </span>
-                  )}
-                  <span>
-                    {n.bytes > 0 ? `${(n.bytes / 1024).toFixed(1)}KB` : "empty"}
-                  </span>
-                </span>
-              </button>
-            </li>
+    <div className="flex items-center gap-2 rounded-md border border-hairline bg-surface-elevated px-2.5 focus-within:border-hairline-strong">
+      <span className="relative shrink-0">
+        <select
+          value={project}
+          onChange={(e) => setProject(e.target.value)}
+          className={chip}
+          aria-label="프로젝트"
+        >
+          {projects.map((p) => (
+            <option key={p} value={p}>
+              {p}
+            </option>
           ))}
-        </ul>
-      ) : (
-        <div className="mt-3 text-[13px] text-stone">
-          오늘 작성한 데일리 노트가 없어요. 프로젝트별로 시작할 수 있어요.
-        </div>
-      )}
+        </select>
+        <ChevronDown size={11} className="pointer-events-none absolute right-2 top-2 text-mute" />
+      </span>
+      <span className="relative shrink-0">
+        <select
+          value={domain}
+          onChange={(e) => setDomain(e.target.value)}
+          className={chip}
+          aria-label="도메인"
+        >
+          {domains.map((d) => (
+            <option key={d} value={d}>
+              {d === "daily" ? "daily (오늘)" : d}
+            </option>
+          ))}
+        </select>
+        <ChevronDown size={11} className="pointer-events-none absolute right-2 top-2 text-mute" />
+      </span>
+      <textarea
+        ref={inputRef}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            send();
+          }
+        }}
+        rows={1}
+        placeholder="지금 떠오른 것… (↵ 기록 · ⇧↵ 줄바꿈 · ⌘J 포커스)"
+        className="min-h-[44px] flex-1 resize-none bg-transparent py-3 text-[14px] text-ink outline-none placeholder:text-stone"
+        style={{ maxHeight: 140 }}
+      />
+      <button
+        onClick={send}
+        disabled={busy || !text.trim() || !project}
+        title="기록 (↵)"
+        className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 text-[12px] font-medium text-on-primary transition-colors hover:bg-primary-pressed disabled:opacity-40"
+      >
+        <Send size={12} /> 기록
+      </button>
+    </div>
+  );
+}
 
-      {hasPast && (
-        <div className="mt-4 border-t border-hairline pt-3">
-          <div className="mb-1.5 flex items-center gap-1.5">
-            <Clock4 size={11} className="text-stone" />
-            <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
-              지난 오늘
-            </span>
-          </div>
-          <div className="flex flex-col gap-1">
-            <ReminiscenceRow
-              label="1주 전"
-              notes={snapshot.one_week_ago}
-              onOpen={onOpen}
-            />
-            <ReminiscenceRow
-              label="1개월 전"
-              notes={snapshot.one_month_ago}
-              onOpen={onOpen}
-            />
-            <ReminiscenceRow
-              label="1년 전"
-              notes={snapshot.one_year_ago}
-              onOpen={onOpen}
-            />
-          </div>
-        </div>
+/** "어제 이후 14건 · Claude Code 9 · Codex 3 · 사람 2 · 검토 대기 6". */
+function SummaryLine({
+  stats,
+  reviewCount,
+  onOpenReview,
+}: {
+  stats: ActivityStats | null;
+  reviewCount: number;
+  onOpenReview: () => void;
+}) {
+  const parts: string[] = [];
+  if (stats) {
+    parts.push(`어제 이후 ${stats.sinceYesterday}건`);
+    const by = Object.entries(stats.byClient).sort((a, b) => b[1] - a[1]);
+    for (const [client, n] of by) parts.push(`${clientLabel(client)} ${n}`);
+  }
+  return (
+    <div className="mt-2.5 flex flex-wrap items-center gap-x-1.5 px-1 text-[12px] text-mute">
+      {parts.map((p, i) => (
+        <span key={p} className="flex items-center gap-1.5">
+          {i > 0 && <span className="text-stone">·</span>}
+          <span>{p}</span>
+        </span>
+      ))}
+      {reviewCount > 0 && (
+        <>
+          {parts.length > 0 && <span className="text-stone">·</span>}
+          <button onClick={onOpenReview} className="text-body hover:text-on-dark">
+            검토 대기 {reviewCount}
+          </button>
+        </>
       )}
+      {parts.length === 0 && reviewCount === 0 && <span>&nbsp;</span>}
+    </div>
+  );
+}
+
+/** 지난 오늘 — 1주/1달/1년 전 daily. 기존 ReminiscenceRow 그대로. */
+function PastTodayCard({
+  onOpen,
+}: {
+  onOpen: (project: string, domain: string) => void;
+}) {
+  const tree = useApp((s) => s.tree);
+  const [snap, setSnap] = useState<DailySnapshot | null>(null);
+  useEffect(() => {
+    ipc.dailySnapshot().then(setSnap).catch(() => setSnap(null));
+  }, [tree]);
+  if (!snap) return null;
+  const total =
+    snap.one_week_ago.length + snap.one_month_ago.length + snap.one_year_ago.length;
+  if (total === 0) return null;
+  return (
+    <section className="rounded-lg border border-hairline bg-surface px-4 py-3">
+      <div className="mb-2 flex items-center gap-1.5">
+        <Clock4 size={11} className="text-stone" />
+        <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">
+          지난 오늘
+        </span>
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <ReminiscenceRow label="1주 전" notes={snap.one_week_ago} onOpen={onOpen} />
+        <ReminiscenceRow label="1개월 전" notes={snap.one_month_ago} onOpen={onOpen} />
+        <ReminiscenceRow label="1년 전" notes={snap.one_year_ago} onOpen={onOpen} />
+      </div>
     </section>
   );
 }
@@ -424,36 +413,53 @@ function ReminiscenceRow({
   );
 }
 
-export function prettyBytes(n: number): string {
-  if (n < 1024) return `${n}B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
-  return `${(n / (1024 * 1024)).toFixed(1)}MB`;
+/** 에이전트 — MCP 상태 + 어제 이후 에이전트별 기록 수 + [연결 관리]. */
+function AgentsCard({
+  stats,
+  onManage,
+}: {
+  stats: ActivityStats | null;
+  onManage: () => void;
+}) {
+  const mcp = useMcpSummary();
+  const agents = ["claude-code", "codex", "cursor"] as const;
+  return (
+    <section className="rounded-lg border border-hairline bg-surface px-4 py-3">
+      <div className="mb-2 flex items-center justify-between">
+        <span className="text-caption-sm uppercase tracking-[0.4px] text-mute">에이전트</span>
+        <span className="flex items-center gap-1.5 text-[11px] text-mute">
+          <span
+            className={cn(
+              "h-1.5 w-1.5 rounded-full",
+              mcp.running ? "bg-accent-green" : "bg-stone",
+            )}
+          />
+          {mcp.running ? `MCP :${mcp.port}` : "MCP 꺼짐"}
+        </span>
+      </div>
+      <ul className="flex flex-col gap-1 text-[12px]">
+        {agents.map((a) => {
+          const n = stats?.byClient[a] ?? 0;
+          return (
+            <li key={a} className="flex items-center justify-between">
+              <span className={n > 0 ? "text-body" : "text-mute"}>{clientLabel(a)}</span>
+              <span className="font-mono text-[11px] text-stone">
+                {n > 0 ? `${n}건` : "—"}
+              </span>
+            </li>
+          );
+        })}
+        <li className="flex items-center justify-between">
+          <span className="text-mute">연결 파일</span>
+          <span className="font-mono text-[11px] text-stone">{mcp.connectionCount}개</span>
+        </li>
+      </ul>
+      <button
+        onClick={onManage}
+        className="mt-2.5 inline-flex h-7 w-full items-center justify-center gap-1.5 rounded-md border border-hairline bg-surface-elevated text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
+      >
+        <Server size={12} /> 연결 관리
+      </button>
+    </section>
+  );
 }
-
-function formatHM(ms: number): string {
-  const d = new Date(ms);
-  const h = String(d.getHours()).padStart(2, "0");
-  const m = String(d.getMinutes()).padStart(2, "0");
-  return `${h}:${m}`;
-}
-
-function timeAgo(ms: number): string {
-  const diff = Date.now() - ms;
-  if (diff < 60 * 1000) return "방금";
-  if (diff < 60 * 60 * 1000) return `${Math.floor(diff / (60 * 1000))}분 전`;
-  if (diff < 24 * 60 * 60 * 1000)
-    return `${Math.floor(diff / (60 * 60 * 1000))}시간 전`;
-  if (diff < 7 * 24 * 60 * 60 * 1000)
-    return `${Math.floor(diff / (24 * 60 * 60 * 1000))}일 전`;
-  const d = new Date(ms);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-}
-
-/** Top-of-Home card explaining the two-step Claude Code 통합:
- *   1. MCP 서버 등록 (사이드바 → 프로젝트 우클릭 → Claude Code 설치 명령)
- *   2. Skill 설치 (각 프로젝트 홈 헤더의 "Skill 설치" 버튼)
- *  Skill 은 프로젝트별로 분리돼서 각 SKILL 안에 그 프로젝트의 scoped
- *  endpoint URL 이 박힘. 여기서는 일괄 설치/갱신 단축 버튼 + 현재
- *  설치 현황만 보여준다.
- */
-

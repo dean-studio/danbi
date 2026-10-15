@@ -21,7 +21,7 @@ import { CommandPalette, type PaletteCommand, type PaletteMode } from "@/main/Co
 import { ConnectSheet } from "@/main/ConnectSheet";
 import { DocView } from "@/main/DocView";
 import { GraphView } from "@/main/GraphView";
-import { Home } from "@/main/Home";
+import { FOCUS_MEMO_EVENT, Home } from "@/main/Home";
 import { ProjectHome } from "@/main/ProjectHome";
 import { ReviewView } from "@/main/ReviewView";
 import { Settings } from "@/main/Settings";
@@ -315,10 +315,12 @@ export function Workspace() {
         e.preventDefault();
         newNote();
       } else if (key === "j" && !e.shiftKey) {
-        // 홈(오늘)으로. 2단계에서 빠른 메모 입력 포커스가 붙는다.
-        if (inEditable(e)) return;
+        // 홈(오늘)으로 가서 빠른 메모 입력에 포커스. 이미 홈이면 포커스만.
         e.preventDefault();
         useApp.getState().clearSelection();
+        requestAnimationFrame(() =>
+          window.dispatchEvent(new CustomEvent(FOCUS_MEMO_EVENT)),
+        );
       } else if (/^[1-9]$/.test(e.key) && !e.shiftKey && !e.altKey) {
         if (inEditable(e)) return;
         const p = projectByIndex(Number(e.key));

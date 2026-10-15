@@ -311,7 +311,7 @@ function ChangesTab({
   );
 }
 
-function DiffBlock({ diff }: { diff: DocDiff }) {
+export function DiffBlock({ diff }: { diff: DocDiff }) {
   if (diff.binary) {
     return <div className="text-caption-sm text-mute">바이너리 변경이에요.</div>;
   }
