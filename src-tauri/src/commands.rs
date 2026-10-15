@@ -4339,11 +4339,13 @@ pub fn danbi_log_quick(
     if trimmed.is_empty() {
         return Err(DanbiError::Other("content is empty".into()));
     }
-    let tree = crate::vault::list_tree(&vault_path)?;
-    if !tree.projects.iter().any(|p| p.name == project) {
+    if !crate::vault::project_exists(&vault_path, &project) {
         return Err(DanbiError::Config(format!("unknown project: {project}")));
     }
 
+    // Shares the MCP/REST write lock — the popover and an agent can hit
+    // the same daily note in the same second.
+    let _write_guard = crate::vcs::write_guard();
     let domain = crate::daily::ensure_today_note(&vault_path, &project)?;
     let current = crate::vault::read_doc(&vault_path, &project, &domain)?;
     let op = crate::edit_ops::EditOp::Append {
@@ -4358,14 +4360,20 @@ pub fn danbi_log_quick(
         &format!("danbi: popover quick · {project}/{domain} (pre)"),
     );
     crate::vault::write_doc(&vault_path, &project, &domain, &next)?;
-    let commit = crate::vcs::snapshot(
+    // Saved already — a commit failure is a warning, not a reason to
+    // make the user re-send the memo.
+    let (commit, warning) = match crate::vcs::snapshot(
         &vault_path,
         &format!("danbi: popover quick · {project}/{domain}"),
-    )?;
+    ) {
+        Ok(c) => (c, None),
+        Err(e) => (None, Some(format!("저장됐지만 git 커밋 실패: {e}"))),
+    };
     Ok(serde_json::json!({
         "project": project,
         "domain": domain,
         "commit": commit,
+        "warning": warning,
     }))
 }
 

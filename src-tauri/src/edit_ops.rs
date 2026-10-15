@@ -61,7 +61,7 @@ fn parse_heading(line: &str) -> Option<(usize, &str)> {
 /// Locates the `[start, end)` line range of a section identified by its
 /// heading text. The range covers the heading line and its body up to (but
 /// excluding) the next heading of equal or shallower depth.
-fn locate_section(lines: &[&str], heading: &str) -> Option<(usize, usize)> {
+pub(crate) fn locate_section(lines: &[&str], heading: &str) -> Option<(usize, usize)> {
     let target = heading.trim_start_matches('#').trim();
     let mut found: Option<(usize, usize)> = None; // (start, depth)
     for (i, line) in lines.iter().enumerate() {

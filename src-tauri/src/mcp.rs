@@ -18,6 +18,7 @@ use crate::error::DanbiError;
 use crate::search;
 use crate::vault;
 use crate::vcs;
+use chrono::Local;
 use axum::{
     extract::{DefaultBodyLimit, Path as AxumPath, State},
     http::{HeaderMap, StatusCode},
@@ -400,17 +401,10 @@ async fn handle_v1_vault_put(
     };
     // Verify the project actually exists — the spec calls for 404 on
     // unknown projects rather than silently creating one.
-    let known = match crate::vault::list_tree(&vault_path) {
-        Ok(t) => t.projects.iter().any(|p| p.name == resolved_project),
-        Err(_) => false,
-    };
-    if !known {
+    if let Err(e) = require_project(&vault_path, &resolved_project) {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({
-                "ok": false,
-                "error": format!("unknown project: {resolved_project}")
-            })),
+            Json(json!({ "ok": false, "error": format!("{e}") })),
         );
     }
 
@@ -441,6 +435,9 @@ async fn handle_v1_vault_put(
         }
     }
 
+    // Same lock as the MCP write tools — the append below reads then
+    // writes, and the commit must not race another writer's.
+    let _write_guard = vcs::write_guard();
     // Snapshot before edit so the user has an undo point.
     let _ = vcs::ensure_repo(&vault_path);
     let _ = vcs::snapshot(
@@ -476,11 +473,10 @@ async fn handle_v1_vault_put(
         body.len()
     };
 
-    let commit = vcs::snapshot(
+    let (commit, warning) = commit_or_warn(
         &vault_path,
         &format!("danbi: rest {mode} · {resolved_project}/{domain}"),
-    )
-    .unwrap_or_default();
+    );
 
     // Token-track this write under a synthetic tool name so the
     // dashboard shows v1/vault PUT volume alongside the JSON-RPC
@@ -510,17 +506,18 @@ async fn handle_v1_vault_put(
         );
     }
 
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "project": resolved_project,
-            "domain": domain,
-            "bytes": final_bytes,
-            "mode": mode,
-            "commit": commit,
-        })),
-    )
+    let mut body = json!({
+        "ok": true,
+        "project": resolved_project,
+        "domain": domain,
+        "bytes": final_bytes,
+        "mode": mode,
+        "commit": commit,
+    });
+    if let Some(w) = warning {
+        body["warning"] = Value::String(w);
+    }
+    (StatusCode::OK, Json(body))
 }
 
 #[derive(Deserialize, Default)]
@@ -580,6 +577,7 @@ async fn run_api_call(
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
+    attach_client(&tool, &mut args, user_agent.as_deref());
     let args_for_banner = args.clone();
 
     // danbi_search 는 RRF 하이브리드 fast-path 로. 임베딩 provider 가
@@ -847,6 +845,7 @@ async fn run_rpc(
                 .get("user-agent")
                 .and_then(|v| v.to_str().ok())
                 .map(|s| s.to_string());
+            attach_client(name, &mut args, user_agent.as_deref());
             // Snapshot args before dispatch consumes them — banner
             // injection later needs the project hint from the args.
             let args_for_banner = args.clone();
@@ -1349,6 +1348,15 @@ async fn context_dispatch(args: Value) -> Result<String, DanbiError> {
 
 pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
     let vault_path = current_vault_path()?;
+    dispatch_in(&vault_path, name, args)
+}
+
+/// `dispatch` against an explicit vault — what the tests drive.
+fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<String, DanbiError> {
+    let vault_path = vault_path.to_path_buf();
+    // One writer at a time across MCP, REST and the popover: the read →
+    // edit → write → commit sequence below must not interleave.
+    let _write_guard = is_write_tool(name).then(vcs::write_guard);
 
     match name {
         "danbi_list_projects" => {
@@ -1390,47 +1398,62 @@ pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
         "danbi_log" => {
             let project = string_arg(&args, "project")?;
             let content = string_arg(&args, "content")?;
-            // Make sure project exists; refuse silent side effects.
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
+            require_project(&vault_path, &project)?;
+            let body = content.trim();
+            if body.is_empty() {
+                return Err(DanbiError::Config(
+                    "content 가 비어 있어요. 기록할 markdown 을 주세요 (예: \"### 결정\\n- JWT refresh 7일\").".into(),
+                ));
             }
             let domain = daily::ensure_today_note(&vault_path, &project)?;
             let current = vault::read_doc(&vault_path, &project, &domain)?;
-            let op = EditOp::Append {
-                content: content.clone(),
+            // Same body twice on the same day (an agent retrying, two
+            // agents told the same thing) → acknowledge, don't duplicate.
+            if log_is_duplicate(&current, body) {
+                return Ok(json!({
+                    "project": project,
+                    "domain": domain,
+                    "deduped": true,
+                    "commit": Value::Null,
+                    "bytes": current.len(),
+                })
+                .to_string());
+            }
+            let stamp = args.get("stamp").and_then(|v| v.as_bool()).unwrap_or(true);
+            let client = args.get("_client").and_then(|v| v.as_str());
+            let entry = if stamp {
+                format!("{}\n{body}", log_stamp(Local::now().format("%H:%M").to_string(), client))
+            } else {
+                body.to_string()
             };
+            let op = EditOp::Append { content: entry };
             edit_ops::validate(&op)?;
             let next = edit_ops::apply(&current, &op)?;
 
             vcs::ensure_repo(&vault_path)?;
             let _ = vcs::snapshot(&vault_path, &format!("danbi: mcp log · {project}/{domain} (pre)"));
             vault::write_doc(&vault_path, &project, &domain, &next)?;
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp log · {project}/{domain}"),
-            )?;
-            Ok(json!({
-                "project": project,
-                "domain": domain,
-                "commit": commit,
-                "bytes": next.len(),
-            })
-            .to_string())
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain,
+                    "stamped": stamp,
+                    "bytes": next.len(),
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_append" => {
             let project = string_arg(&args, "project")?;
             let domain = string_arg(&args, "domain")?;
             let content = string_arg(&args, "content")?;
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
-            let domain_norm = if domain.to_lowercase().ends_with(".md") {
-                domain.clone()
-            } else {
-                format!("{domain}.md")
-            };
+            require_project(&vault_path, &project)?;
+            let domain_norm = normalize_md(&domain);
             let current =
                 vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
             let op = EditOp::Append { content };
@@ -1445,32 +1468,27 @@ pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             // Create-on-demand so /mcp writers can target new files.
             let _ = vault::create_domain(&vault_path, &project, &domain_norm);
             vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp append · {project}/{domain_norm}"),
-            )?;
-            Ok(json!({
-                "project": project,
-                "domain": domain_norm,
-                "commit": commit,
-                "bytes": next.len(),
-            })
-            .to_string())
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain_norm,
+                    "bytes": next.len(),
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_replace_section" => {
             let project = string_arg(&args, "project")?;
             let domain = string_arg(&args, "domain")?;
             let heading = string_arg(&args, "heading")?;
             let new_body = string_arg(&args, "new_body")?;
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
-            let domain_norm = if domain.to_lowercase().ends_with(".md") {
-                domain.clone()
-            } else {
-                format!("{domain}.md")
-            };
+            require_project(&vault_path, &project)?;
+            let domain_norm = normalize_md(&domain);
             let current =
                 vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
             let op = EditOp::ReplaceSection {
@@ -1489,20 +1507,22 @@ pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             );
             let _ = vault::create_domain(&vault_path, &project, &domain_norm);
             vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!(
                     "danbi: mcp replace_section · {project}/{domain_norm} · {heading}"
                 ),
-            )?;
-            Ok(json!({
-                "project": project,
-                "domain": domain_norm,
-                "heading": heading,
-                "commit": commit,
-                "bytes": next.len(),
-            })
-            .to_string())
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain_norm,
+                    "heading": heading,
+                    "bytes": next.len(),
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_upsert_item" => {
             let project = string_arg(&args, "project")?;
@@ -1510,15 +1530,8 @@ pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             let heading = string_arg(&args, "heading")?;
             let key = string_arg(&args, "key")?;
             let item = string_arg(&args, "item")?;
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
-            let domain_norm = if domain.to_lowercase().ends_with(".md") {
-                domain.clone()
-            } else {
-                format!("{domain}.md")
-            };
+            require_project(&vault_path, &project)?;
+            let domain_norm = normalize_md(&domain);
             let current =
                 vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
             // Detect whether the key already lives in the section so we can
@@ -1542,22 +1555,24 @@ pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             );
             let _ = vault::create_domain(&vault_path, &project, &domain_norm);
             vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!(
                     "danbi: mcp upsert_item · {project}/{domain_norm} · {mode} · {key}"
                 ),
-            )?;
-            Ok(json!({
-                "project": project,
-                "domain": domain_norm,
-                "heading": heading,
-                "key": key,
-                "mode": mode,
-                "commit": commit,
-                "bytes": next.len(),
-            })
-            .to_string())
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain_norm,
+                    "heading": heading,
+                    "key": key,
+                    "mode": mode,
+                    "bytes": next.len(),
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_create_file" => {
             // Convenience for "make sure this folder + file exist, here's
@@ -1571,15 +1586,8 @@ pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
-            let domain_norm = if domain.to_lowercase().ends_with(".md") {
-                domain.clone()
-            } else {
-                format!("{domain}.md")
-            };
+            require_project(&vault_path, &project)?;
+            let domain_norm = normalize_md(&domain);
 
             vcs::ensure_repo(&vault_path)?;
             let _ = vcs::snapshot(
@@ -1622,29 +1630,28 @@ pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
                 vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
             }
 
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp create_file · {project}/{domain_norm}"),
-            )?;
+            );
             let final_bytes = vault::read_doc(&vault_path, &project, &domain_norm)
                 .unwrap_or_default()
                 .len();
-            Ok(json!({
-                "project": project,
-                "domain": domain_norm,
-                "commit": commit,
-                "bytes": final_bytes,
-                "already_existed": already_existed,
-            })
-            .to_string())
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain_norm,
+                    "bytes": final_bytes,
+                    "already_existed": already_existed,
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_create_folder" => {
             let project = string_arg(&args, "project")?;
             let folder = string_arg(&args, "folder")?;
-            let tree = vault::list_tree(&vault_path)?;
-            if !tree.projects.iter().any(|p| p.name == project) {
-                return Err(DanbiError::Config(format!("unknown project: {project}")));
-            }
+            require_project(&vault_path, &project)?;
             vcs::ensure_repo(&vault_path)?;
             let _ = vcs::snapshot(
                 &vault_path,
@@ -1660,16 +1667,18 @@ pub(crate) fn dispatch(name: &str, args: Value) -> Result<String, DanbiError> {
             if !placeholder_path.exists() {
                 let _ = std::fs::write(&placeholder_path, b"");
             }
-            let commit = vcs::snapshot(
+            let (commit, warning) = commit_or_warn(
                 &vault_path,
                 &format!("danbi: mcp create_folder · {project}/{folder}"),
-            )?;
-            Ok(json!({
-                "project": project,
-                "folder": folder,
-                "commit": commit,
-            })
-            .to_string())
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "folder": folder,
+                }),
+                commit,
+                warning,
+            ))
         }
         "danbi_recent" => {
             let limit = args
@@ -1822,6 +1831,134 @@ fn record_inbound_after_success(
     );
 }
 
+// ---------- Write helpers ----------
+
+/// `danbi_log` stamps each entry with the calling client; the name is
+/// derived from the User-Agent here and passed down as a private arg so
+/// the sync dispatcher stays header-free.
+fn attach_client(tool: &str, args: &mut Value, user_agent: Option<&str>) {
+    if tool != "danbi_log" {
+        return;
+    }
+    if let Value::Object(map) = args {
+        let client = crate::usage::classify_user_agent(user_agent);
+        map.insert("_client".into(), Value::String(client.to_string()));
+    }
+}
+
+fn normalize_md(domain: &str) -> String {
+    if domain.to_lowercase().ends_with(".md") {
+        domain.to_string()
+    } else {
+        format!("{domain}.md")
+    }
+}
+
+/// Existence check by directory, not `list_tree` (which opens every
+/// markdown file). Unknown names come back with the closest matches and
+/// the full list so the agent can fix a typo without another round trip.
+fn require_project(vault: &std::path::Path, project: &str) -> Result<(), DanbiError> {
+    if vault::project_exists(vault, project) {
+        return Ok(());
+    }
+    Err(unknown_project_error(vault, project))
+}
+
+fn unknown_project_error(vault: &std::path::Path, project: &str) -> DanbiError {
+    let names = vault::project_names(vault).unwrap_or_default();
+    let similar = closest_names(project, &names, 3);
+    let mut msg = format!("unknown project: {project}.");
+    if !similar.is_empty() {
+        msg.push_str(&format!(" 혹시 {}?", similar.join(" / ")));
+    }
+    if names.is_empty() {
+        msg.push_str(" 등록된 프로젝트가 없어요 — 단비 앱에서 먼저 만드세요.");
+    } else {
+        msg.push_str(&format!(" 등록된 프로젝트: {}", names.join(", ")));
+    }
+    DanbiError::Config(msg)
+}
+
+/// Up to `max` candidates ranked by edit distance (case-insensitive),
+/// substring matches first. Only names within a reasonable distance of
+/// the query are returned.
+fn closest_names(query: &str, names: &[String], max: usize) -> Vec<String> {
+    let q = query.to_lowercase();
+    let mut scored: Vec<(usize, &String)> = names
+        .iter()
+        .filter_map(|n| {
+            let lc = n.to_lowercase();
+            if lc.contains(&q) || q.contains(&lc) {
+                return Some((0, n));
+            }
+            let d = edit_distance(&q, &lc);
+            let allowed = (q.chars().count().max(lc.chars().count()) / 2).max(2);
+            (d <= allowed).then_some((d, n))
+        })
+        .collect();
+    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(b.1)));
+    scored.into_iter().take(max).map(|(_, n)| n.clone()).collect()
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// Post-edit commit. The file is already on disk by now, so a git failure
+/// (index.lock held by another process, odd permissions) is reported as a
+/// warning on the successful response — never as an error that would make
+/// the agent retry and duplicate the write.
+fn commit_or_warn(vault: &std::path::Path, msg: &str) -> (Option<String>, Option<String>) {
+    match vcs::snapshot(vault, msg) {
+        Ok(c) => (c, None),
+        Err(e) => (
+            None,
+            Some(format!(
+                "파일은 저장됐지만 git 커밋에 실패했어요 ({e}). 재시도하지 마세요 — 다음 쓰기 때 함께 커밋돼요."
+            )),
+        ),
+    }
+}
+
+fn write_result(mut body: Value, commit: Option<String>, warning: Option<String>) -> String {
+    if let Value::Object(ref mut map) = body {
+        map.insert("commit".into(), commit.map(Value::String).unwrap_or(Value::Null));
+        if let Some(w) = warning {
+            map.insert("warning".into(), Value::String(w));
+        }
+    }
+    body.to_string()
+}
+
+/// `#### HH:MM · <client>` heading for a `danbi_log` entry, so a daily
+/// note several agents wrote stays readable for a human.
+fn log_stamp(hhmm: String, client: Option<&str>) -> String {
+    match client.filter(|c| !c.is_empty() && *c != "unknown") {
+        Some(c) => format!("#### {hhmm} · {}", c.replace('_', "-")),
+        None => format!("#### {hhmm}"),
+    }
+}
+
+/// Minimum body length for dedupe — anything shorter ("ok", "done") is
+/// too generic to treat a repeat as a retry.
+const LOG_DEDUPE_MIN_CHARS: usize = 8;
+
+fn log_is_duplicate(current: &str, body: &str) -> bool {
+    body.chars().count() >= LOG_DEDUPE_MIN_CHARS && current.contains(body)
+}
+
 fn string_arg(args: &Value, key: &str) -> Result<String, DanbiError> {
     args.get(key)
         .and_then(|v| v.as_str())
@@ -1947,5 +2084,151 @@ mod tests {
         )
         .await;
         assert_eq!(init["result"]["serverInfo"]["name"], "danbi · read");
+    }
+
+    // ---------- write path ----------
+
+    fn temp_vault(label: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "danbi-mcp-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = std::env::temp_dir().join(unique);
+        std::fs::create_dir_all(path.join("Projects/보니/notes")).unwrap();
+        std::fs::create_dir_all(path.join("Projects/상식이")).unwrap();
+        vault::init_vault(&path).unwrap();
+        path
+    }
+
+    fn log(vault: &std::path::Path, project: &str, content: &str) -> Value {
+        let out = dispatch_in(
+            vault,
+            "danbi_log",
+            json!({ "project": project, "content": content, "_client": "claude_code" }),
+        )
+        .unwrap();
+        serde_json::from_str(&out).unwrap()
+    }
+
+    fn today_note(vault: &std::path::Path, project: &str) -> String {
+        let domain = format!("daily/{}.md", chrono::Local::now().format("%Y-%m-%d"));
+        vault::read_doc(vault, project, &domain).unwrap()
+    }
+
+    #[test]
+    fn log_stamps_client_and_time_and_dedupes_same_body() {
+        let vault = temp_vault("log");
+        let first = log(&vault, "보니", "### 결정\n- JWT refresh 7일");
+        assert_eq!(first["stamped"], true);
+        assert!(first["commit"].is_string(), "{first}");
+        assert!(first.get("warning").is_none());
+        let note = today_note(&vault, "보니");
+        assert!(note.contains("· claude-code\n### 결정\n- JWT refresh 7일"), "{note}");
+        assert!(note.lines().any(|l| l.starts_with("#### ") && l.contains(" · claude-code")));
+
+        let again = log(&vault, "보니", "  ### 결정\n- JWT refresh 7일\n");
+        assert_eq!(again["deduped"], true);
+        assert!(again["commit"].is_null());
+        assert_eq!(today_note(&vault, "보니"), note, "no second entry");
+
+        // Short bodies are never deduped (too generic to be a retry).
+        log(&vault, "보니", "ok");
+        log(&vault, "보니", "ok");
+        assert_eq!(today_note(&vault, "보니").matches("\nok\n").count(), 2);
+
+        // stamp:false writes the body verbatim.
+        let out = dispatch_in(
+            &vault,
+            "danbi_log",
+            json!({ "project": "상식이", "content": "plain body here", "stamp": false }),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["stamped"], false);
+        let note = today_note(&vault, "상식이");
+        assert!(note.ends_with("\nplain body here\n"), "{note}");
+        assert!(!note.contains("#### "));
+    }
+
+    #[test]
+    fn log_stamp_formats() {
+        assert_eq!(log_stamp("14:32".into(), Some("claude_code")), "#### 14:32 · claude-code");
+        assert_eq!(log_stamp("14:32".into(), Some("unknown")), "#### 14:32");
+        assert_eq!(log_stamp("14:32".into(), None), "#### 14:32");
+    }
+
+    #[test]
+    fn unknown_project_lists_similar_and_all_names() {
+        let vault = temp_vault("unknown");
+        let err = dispatch_in(&vault, "danbi_log", json!({ "project": "보니앨범", "content": "x" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown project: 보니앨범"), "{err}");
+        assert!(err.contains("혹시 보니?"), "{err}");
+        assert!(err.contains("등록된 프로젝트: 보니, 상식이"), "{err}");
+        // A file was not created for the unknown project.
+        assert!(!vault.join("Projects/보니앨범").exists());
+
+        assert_eq!(closest_names("bony", &["Bonny".into(), "Zed".into()], 3), vec!["Bonny"]);
+        assert!(closest_names("zzzzzz", &["Bonny".into()], 3).is_empty());
+    }
+
+    #[test]
+    fn commit_failure_is_a_warning_not_an_error() {
+        let vault = temp_vault("lock");
+        log(&vault, "보니", "first entry to init repo");
+        // Simulate another git process holding the index.
+        std::fs::write(vault.join(".git/index.lock"), b"").unwrap();
+        let v = log(&vault, "보니", "second entry while locked");
+        assert!(v["commit"].is_null(), "{v}");
+        assert!(v["warning"].as_str().unwrap().contains("커밋"), "{v}");
+        assert!(today_note(&vault, "보니").contains("second entry while locked"), "saved anyway");
+        std::fs::remove_file(vault.join(".git/index.lock")).unwrap();
+        // The next successful write commits the earlier one along.
+        let v = log(&vault, "보니", "third entry after unlock");
+        assert!(v["commit"].is_string());
+    }
+
+    #[test]
+    fn concurrent_logs_never_lose_an_entry() {
+        let vault = temp_vault("race");
+        let handles: Vec<_> = (0..6)
+            .map(|i| {
+                let vault = vault.clone();
+                std::thread::spawn(move || {
+                    for j in 0..5 {
+                        log(&vault, "보니", &format!("entry from writer {i} round {j}"));
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let note = today_note(&vault, "보니");
+        for i in 0..6 {
+            for j in 0..5 {
+                assert!(note.contains(&format!("entry from writer {i} round {j}")), "{i}/{j}");
+            }
+        }
+    }
+
+    #[test]
+    fn append_creates_file_and_returns_commit() {
+        let vault = temp_vault("append");
+        let out = dispatch_in(
+            &vault,
+            "danbi_append",
+            json!({ "project": "보니", "domain": "notes/auth", "content": "- refresh 7d" }),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["domain"], "notes/auth.md");
+        assert!(v["commit"].is_string());
+        assert_eq!(vault::read_doc(&vault, "보니", "notes/auth.md").unwrap(), "- refresh 7d\n");
     }
 }

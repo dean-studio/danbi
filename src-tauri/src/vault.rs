@@ -167,13 +167,17 @@ fn folder_skips_title(prefix: Option<&str>) -> bool {
     head.eq_ignore_ascii_case("daily")
 }
 
-fn read_md_domains(dir: &Path, prefix: Option<&str>) -> DanbiResult<Vec<DomainNode>> {
+fn read_md_domains(
+    dir: &Path,
+    prefix: Option<&str>,
+    sniff_titles: bool,
+) -> DanbiResult<Vec<DomainNode>> {
     let mut out: Vec<DomainNode> = Vec::new();
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(_) => return Ok(out),
     };
-    let want_title = !folder_skips_title(prefix);
+    let want_title = sniff_titles && !folder_skips_title(prefix);
     for de in rd {
         let de = de?;
         let path = de.path();
@@ -304,7 +308,44 @@ fn truncate_title(s: &str) -> String {
     out
 }
 
+/// Project folder names, sorted case-insensitively. A cheap read_dir — use
+/// this (or `project_exists`) for existence checks instead of `list_tree`,
+/// which opens every markdown file to sniff titles.
+pub fn project_names(vault: &Path) -> DanbiResult<Vec<String>> {
+    let root = projects_root(vault);
+    let mut out: Vec<String> = Vec::new();
+    let rd = match std::fs::read_dir(&root) {
+        Ok(r) => r,
+        Err(_) => return Ok(out),
+    };
+    for entry in rd {
+        let entry = entry?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if let Some(n) = entry.file_name().to_str() {
+            if !n.starts_with('.') {
+                out.push(n.to_string());
+            }
+        }
+    }
+    out.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+    Ok(out)
+}
+
+pub fn project_exists(vault: &Path, project: &str) -> bool {
+    project_path(vault, project)
+        .map(|p| p.is_dir())
+        .unwrap_or(false)
+}
+
 pub fn list_tree(vault: &Path) -> DanbiResult<VaultTree> {
+    list_tree_with(vault, true)
+}
+
+/// `list_tree` with the per-file title/kind sniff optional — the MCP
+/// project listing only needs names and sizes.
+pub fn list_tree_with(vault: &Path, sniff_titles: bool) -> DanbiResult<VaultTree> {
     init_vault(vault)?;
     let root = projects_root(vault);
 
@@ -321,8 +362,8 @@ pub fn list_tree(vault: &Path) -> DanbiResult<VaultTree> {
         };
 
         // Top-level .md files.
-        let domains = read_md_domains(&p, None)?;
-        let subfolders = read_subfolders(&p, None)?;
+        let domains = read_md_domains(&p, None, sniff_titles)?;
+        let subfolders = read_subfolders(&p, None, sniff_titles)?;
 
         projects.push(ProjectNode {
             name: project_name,
@@ -346,7 +387,11 @@ pub fn list_tree(vault: &Path) -> DanbiResult<VaultTree> {
 /// Stops recursing after `MAX_DOMAIN_DEPTH - 1` levels (currently 2 folder
 /// levels under a project root, since the third path segment is reserved
 /// for the .md file). Hidden / `_assets` folders are skipped.
-fn read_subfolders(dir: &Path, parent_prefix: Option<&str>) -> DanbiResult<Vec<SubfolderNode>> {
+fn read_subfolders(
+    dir: &Path,
+    parent_prefix: Option<&str>,
+    sniff_titles: bool,
+) -> DanbiResult<Vec<SubfolderNode>> {
     let depth_so_far = parent_prefix
         .map(|p| p.split('/').count())
         .unwrap_or(0);
@@ -375,9 +420,9 @@ fn read_subfolders(dir: &Path, parent_prefix: Option<&str>) -> DanbiResult<Vec<S
             Some(p) => format!("{p}/{sname}"),
             None => sname.to_string(),
         };
-        let domains = read_md_domains(&sub, Some(&qualified))?;
+        let domains = read_md_domains(&sub, Some(&qualified), sniff_titles)?;
         let nested = if allow_recurse {
-            read_subfolders(&sub, Some(&qualified))?
+            read_subfolders(&sub, Some(&qualified), sniff_titles)?
         } else {
             Vec::new()
         };
@@ -674,6 +719,24 @@ pub fn read_doc(vault: &Path, project: &str, domain: &str) -> DanbiResult<String
         return Ok(String::new());
     }
     Ok(std::fs::read_to_string(path)?)
+}
+
+/// Like `read_doc` but distinguishes "missing" from "empty": `Ok(None)`
+/// when the file doesn't exist. Also returns the file's metadata so
+/// callers can report size and mtime without a second stat.
+pub fn read_doc_opt(
+    vault: &Path,
+    project: &str,
+    domain: &str,
+) -> DanbiResult<Option<(String, std::fs::Metadata)>> {
+    let path = domain_path(vault, project, domain)?;
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Ok(None);
+    };
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    Ok(Some((std::fs::read_to_string(path)?, meta)))
 }
 
 pub fn write_doc(vault: &Path, project: &str, domain: &str, content: &str) -> DanbiResult<()> {
