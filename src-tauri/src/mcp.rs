@@ -1379,7 +1379,16 @@ async fn dispatch_any(name: &str, args: Value) -> Result<Dispatched, DanbiError>
     match name {
         "danbi_search" => search_hybrid_dispatch(args).await,
         "danbi_context" => context_dispatch(args).await,
-        _ => dispatch(name, args).map(|text| Dispatched { text, warning: None }),
+        _ => {
+            // Writes take the vault lock and stage the whole tree; keep that
+            // off the async workers so reads, health and the session-brief
+            // hook don't queue behind a burst of agent writes.
+            let name = name.to_string();
+            tokio::task::spawn_blocking(move || dispatch(&name, args))
+                .await
+                .map_err(|e| DanbiError::Other(format!("dispatch join: {e}")))?
+                .map(|text| Dispatched { text, warning: None })
+        }
     }
 }
 

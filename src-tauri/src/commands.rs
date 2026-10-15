@@ -586,11 +586,30 @@ pub fn read_doc(
 /// next writer's `(pre)` snapshot, so a human edit never had a row of its
 /// own; the activity feed needs one. Same lock as every other writer; an
 /// unchanged document makes no commit (autosave fires often).
+/// Autosaves of the same doc within this window share one commit.
+const SAVE_COALESCE_SECS: i64 = 300;
+
 /// Error prefix the editor matches to show its conflict banner.
 pub const DOC_CONFLICT: &str = "DOC_CONFLICT";
 
+/// Editor save. Runs off the main thread: it may wait on the vault write
+/// lock while an agent commits, and autosave calls it every few seconds.
 #[tauri::command]
-pub fn write_doc(
+pub async fn write_doc(
+    vault_path: String,
+    project: String,
+    domain: String,
+    content: String,
+    expected_base: Option<String>,
+) -> DanbiResult<()> {
+    tokio::task::spawn_blocking(move || {
+        write_doc_blocking(vault_path, project, domain, content, expected_base)
+    })
+    .await
+    .map_err(|e| DanbiError::Other(format!("write_doc join: {e}")))?
+}
+
+pub fn write_doc_blocking(
     vault_path: String,
     project: String,
     domain: String,
@@ -613,10 +632,11 @@ pub fn write_doc(
     // Commit failure must not surface as a failed save — the file is on
     // disk; the next successful snapshot carries it.
     if let Err(e) = vcs::ensure_repo(&vault).and_then(|_| {
-        vcs::snapshot_as(
+        vcs::snapshot_coalesce(
             &vault,
             &format!("danbi: save · {project}/{domain}"),
             vcs::CLIENT_HUMAN,
+            SAVE_COALESCE_SECS,
         )
     }) {
         eprintln!("[vcs] save commit deferred for {project}/{domain}: {e}");

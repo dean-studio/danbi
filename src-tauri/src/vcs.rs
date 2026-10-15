@@ -107,6 +107,65 @@ pub fn split_client(summary: &str) -> (&str, Option<&str>) {
     (s, None)
 }
 
+/// Like `snapshot_as`, but when HEAD is the same message (the same doc
+/// saved by the same writer) from less than `window_secs` ago, HEAD is
+/// replaced instead of stacked. Autosave fires every couple of seconds
+/// while typing; one commit per editing burst keeps undo, the activity
+/// feed and the doc history readable.
+pub fn snapshot_coalesce(
+    vault: &Path,
+    msg: &str,
+    client: &str,
+    window_secs: i64,
+) -> DanbiResult<Option<String>> {
+    let msg = with_client(msg, client);
+    let repo = open_or_init(vault)?;
+    let head = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+    let Some(head) = head.filter(|h| {
+        h.summary() == Some(msg.as_str())
+            && chrono::Utc::now().timestamp() - h.time().seconds() < window_secs
+            && h.parent_count() == 1
+    }) else {
+        return snapshot(vault, &msg);
+    };
+    let parent = head
+        .parent(0)
+        .map_err(|e| DanbiError::Other(format!("git parent: {e}")))?;
+    let mut index = repo
+        .index()
+        .map_err(|e| DanbiError::Other(format!("git index: {e}")))?;
+    index
+        .add_all(["*"].iter(), IndexAddOption::DEFAULT, None)
+        .map_err(|e| DanbiError::Other(format!("git add: {e}")))?;
+    index
+        .update_all(["*"].iter(), None)
+        .map_err(|e| DanbiError::Other(format!("git update: {e}")))?;
+    index
+        .write()
+        .map_err(|e| DanbiError::Other(format!("git index write: {e}")))?;
+    let tree_id = index
+        .write_tree()
+        .map_err(|e| DanbiError::Other(format!("git write tree: {e}")))?;
+    if tree_id == head.tree_id() {
+        return Ok(None);
+    }
+    let tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| DanbiError::Other(format!("git find tree: {e}")))?;
+    let sig = signature()?;
+    let oid = repo
+        .commit(None, &sig, &sig, &msg, &tree, &[&parent])
+        .map_err(|e| DanbiError::Other(format!("git commit: {e}")))?;
+    // Move HEAD's branch onto the replacement commit.
+    let head_ref = repo
+        .head()
+        .map_err(|e| DanbiError::Other(format!("git head: {e}")))?;
+    let name = head_ref.name().unwrap_or("HEAD").to_string();
+    repo.reference(&name, oid, true, "danbi: coalesce save")
+        .map_err(|e| DanbiError::Other(format!("git update ref: {e}")))?;
+    Ok(Some(oid.to_string()))
+}
+
 /// `snapshot` with the origin token on the message.
 pub fn snapshot_as(vault: &Path, msg: &str, client: &str) -> DanbiResult<Option<String>> {
     snapshot(vault, &with_client(msg, client))
@@ -1452,12 +1511,35 @@ mod tests {
         let vault = temp_vault("save");
         ensure_repo(&vault).unwrap();
         let vp = vault.to_string_lossy().to_string();
-        crate::commands::write_doc(vp.clone(), "p".into(), "ui.md".into(), "# v1\n".into(), None).unwrap();
+        crate::commands::write_doc_blocking(vp.clone(), "p".into(), "ui.md".into(), "# v1\n".into(), None).unwrap();
         let head = recent_commits(&vault, 1).unwrap().remove(0);
         assert_eq!(head.summary, "danbi: save · p/ui.md [human]");
         // Unchanged content → no new commit.
-        crate::commands::write_doc(vp, "p".into(), "ui.md".into(), "# v1\n".into(), None).unwrap();
+        crate::commands::write_doc_blocking(vp, "p".into(), "ui.md".into(), "# v1\n".into(), None).unwrap();
         assert_eq!(recent_commits(&vault, 1).unwrap().remove(0).id, head.id);
+    }
+
+    #[test]
+    fn consecutive_saves_of_one_doc_coalesce_into_one_commit() {
+        let vault = temp_vault("coalesce");
+        ensure_repo(&vault).unwrap();
+        let vp = vault.to_string_lossy().to_string();
+        let n0 = recent_commits(&vault, 50).unwrap().len();
+        for body in ["# v1\n", "# v2\n", "# v3\n"] {
+            crate::commands::write_doc_blocking(vp.clone(), "p".into(), "ui.md".into(), body.into(), None).unwrap();
+        }
+        let commits = recent_commits(&vault, 50).unwrap();
+        assert_eq!(commits.len(), n0 + 1, "one save commit for the burst");
+        assert_eq!(commits[0].summary, "danbi: save · p/ui.md [human]");
+        // Another doc (or another writer) in between starts a new commit.
+        crate::commands::write_doc_blocking(vp.clone(), "p".into(), "other.md".into(), "x\n".into(), None).unwrap();
+        crate::commands::write_doc_blocking(vp, "p".into(), "ui.md".into(), "# v4\n".into(), None).unwrap();
+        assert_eq!(recent_commits(&vault, 50).unwrap().len(), n0 + 3);
+        // Undo of the coalesced commit goes back to before the whole burst.
+        undo_last(&vault).unwrap();
+        undo_last(&vault).unwrap();
+        undo_last(&vault).unwrap();
+        assert!(!vault.join("Projects/p/ui.md").exists() || read(&vault, "Projects/p/ui.md").unwrap().is_empty());
     }
 
     #[test]
@@ -1465,10 +1547,10 @@ mod tests {
         let vault = temp_vault("save-conflict");
         ensure_repo(&vault).unwrap();
         let vp = vault.to_string_lossy().to_string();
-        crate::commands::write_doc(vp.clone(), "p".into(), "ui.md".into(), "# v1\n".into(), None).unwrap();
+        crate::commands::write_doc_blocking(vp.clone(), "p".into(), "ui.md".into(), "# v1\n".into(), None).unwrap();
         // An agent appends while the editor still holds "# v1\n".
         crate::vault::write_doc(&vault, "p", "ui.md", "# v1\n- agent note\n").unwrap();
-        let err = crate::commands::write_doc(
+        let err = crate::commands::write_doc_blocking(
             vp.clone(),
             "p".into(),
             "ui.md".into(),
@@ -1483,7 +1565,7 @@ mod tests {
             "agent text must survive"
         );
         // With the current disk text as base the save goes through.
-        crate::commands::write_doc(
+        crate::commands::write_doc_blocking(
             vp,
             "p".into(),
             "ui.md".into(),
