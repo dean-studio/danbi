@@ -19,6 +19,7 @@ import {
   type ProjectJournalView,
   type ProjectNode,
   type TriggerKind,
+  type ProjectGroup,
 } from "@/lib/ipc";
 import { ActivityFeed } from "@/main/ActivityFeed";
 import { ConnectStatusBand } from "@/main/ConnectSheet";
@@ -28,6 +29,9 @@ import { ReindexProgressCard } from "@/main/Settings";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 import { McpInboundProjectMini } from "./McpInboundProjectMini";
+
+/** 그룹이 없을 때 매번 새 배열을 만들지 않도록(zustand 선택자 안정성). */
+const NO_GROUPS: ProjectGroup[] = [];
 
 /** 프로젝트 홈. 헤더(이름 · [+ 새 노트] 흰 CTA 1개) → 히어로(아이콘·
  *  이름·목표 한 줄) → 에이전트 상태 띠(연결 시트 입구) → 이 프로젝트
@@ -270,7 +274,7 @@ function Collapsible({
 /** 히어로 — 그룹 라벨(소문자 대문자) + 아이콘 + 프로젝트명 + 목표 한 줄.
  *  Goals 의 노란 카드는 폐지하고 inline edit 한 줄로(UI 검토 #8). */
 function ProjectHero({ project }: { project: string }) {
-  const groups = useApp((s) => s.cfg?.project_groups ?? []);
+  const groups = useApp((s) => s.cfg?.project_groups) ?? NO_GROUPS;
   const iconName = useApp((s) => s.cfg?.project_icons?.[project] ?? null);
   const Icon = projectIconOf(iconName);
   const groupLabel = useMemo(() => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Check,
   ChevronDown,
@@ -884,7 +884,10 @@ function AdvancedCommands({
 
 /** 홈 SkillSetupCard 의 "전체 설치" 를 버튼 하나로. */
 function AllSkillsButton() {
-  const projects = useApp((s) => s.tree?.projects.map((p) => p.name) ?? []);
+  // 선택자는 store 의 값을 그대로 돌려줘야 한다 — 매번 새 배열을 만들면
+  // zustand v5 가 변경으로 보고 무한 렌더(React #185)에 빠진다.
+  const tree = useApp((s) => s.tree);
+  const projects = useMemo(() => tree?.projects.map((p) => p.name) ?? [], [tree]);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [flash, setFlash] = useState<Flash>(null);
 

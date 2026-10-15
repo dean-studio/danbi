@@ -22,6 +22,9 @@ import {
   projectColorVars,
 } from "@/components/ProjectColorPicker";
 
+/** 색이 없을 때 매번 새 객체를 만들지 않도록(zustand 선택자 안정성). */
+const NO_COLORS: Record<string, string> = {};
+
 /**
  * 사용량 화면 — 홈 첫 화면을 차지하던 사용량·집계 카드를 그대로 옮긴
  * 곳. 카드 컴포넌트는 변경 없음: Claude Code 사용량 · 단비 LLM 사용량 ·
@@ -312,7 +315,7 @@ function ProjectActivityCard() {
   const [days, setDays] = useState(30);
   const [data, setData] = useState<ActivityOverview | null>(null);
   const [loading, setLoading] = useState(false);
-  const projectColors = useApp((s) => s.cfg?.project_colors ?? {});
+  const projectColors = useApp((s) => s.cfg?.project_colors) ?? NO_COLORS;
   const selectProject = useApp((s) => s.selectProject);
 
   useEffect(() => {
