@@ -160,8 +160,8 @@ function CurrentTab({
         <Stat label="cache read" value={totals.cache_read_tokens} />
       </div>
 
-      {/* 일별 sparkline */}
-      <Sparkline daily={summary.daily} className="mt-4" />
+      {/* 일별 sparkline — 하루치(오늘)면 시간대별 막대 */}
+      <Sparkline daily={summary.daily} hourly={summary.hourly} className="mt-4" />
 
       {/* 계정별 — ~/.claude-<계정> 이 둘 이상일 때만 */}
       {summary.by_account.length > 1 && (
@@ -510,12 +510,19 @@ function BreakdownPanel({
 
 function Sparkline({
   daily,
+  hourly,
   className,
 }: {
   daily: CcDailyPoint[];
+  /** 하루치만 있을 때(기간 "오늘") 막대 하나가 폭 전체를 채우지 않게
+   *  그날의 시간대별 막대 24개로 대신 그린다. */
+  hourly?: { dow: number; hour: number; tokens: number }[];
   className?: string;
 }) {
   if (daily.length === 0) return null;
+  if (daily.length === 1 && hourly && hourly.length > 0) {
+    return <HourlyBars date={daily[0].date} hourly={hourly} className={className} />;
+  }
   const max = Math.max(1, ...daily.map((d) => d.totals.total_tokens));
   return (
     <div className={cn("rounded-md border border-hairline bg-surface-elevated p-3", className)}>
@@ -535,6 +542,53 @@ function Sparkline({
       <div className="mt-1 flex justify-between font-mono text-[10px] text-stone">
         <span>{daily[0]?.date}</span>
         <span>{daily[daily.length - 1]?.date}</span>
+      </div>
+    </div>
+  );
+}
+
+function HourlyBars({
+  date,
+  hourly,
+  className,
+}: {
+  date: string;
+  hourly: { dow: number; hour: number; tokens: number }[];
+  className?: string;
+}) {
+  const [y, m, d] = date.split("-").map(Number);
+  const dow = new Date(y, (m ?? 1) - 1, d ?? 1).getDay();
+  const hours: number[] = Array(24).fill(0);
+  for (const h of hourly) {
+    if (h.dow === dow) hours[h.hour] += h.tokens;
+  }
+  const max = Math.max(1, ...hours);
+  const now = new Date();
+  const isToday =
+    now.getFullYear() === y && now.getMonth() + 1 === m && now.getDate() === d;
+  return (
+    <div className={cn("rounded-md border border-hairline bg-surface-elevated p-3", className)}>
+      <div className="flex h-16 items-end gap-[2px]">
+        {hours.map((v, hour) => (
+          <div
+            key={hour}
+            className={cn(
+              "flex-1 rounded-[1px]",
+              v === 0
+                ? "bg-hairline"
+                : isToday && hour === now.getHours()
+                  ? "bg-on-dark"
+                  : "bg-on-dark/60",
+            )}
+            style={{ height: `${v === 0 ? 2 : Math.max(4, (v / max) * 100)}%` }}
+            title={`${date} ${hour.toString().padStart(2, "0")}:00 — ${fmtTokens(v)} tokens`}
+          />
+        ))}
+      </div>
+      <div className="mt-1 flex justify-between font-mono text-[10px] text-stone">
+        <span>{date} 00시</span>
+        <span>12시</span>
+        <span>23시</span>
       </div>
     </div>
   );
