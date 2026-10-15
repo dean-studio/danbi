@@ -545,13 +545,11 @@ function SkillSetupCard() {
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const next: Record<string, boolean> = {};
-      for (const p of projects) {
-        try {
-          next[p] = await ipc.skillStatus(p);
-        } catch {
-          next[p] = false;
-        }
+      let next: Record<string, boolean> = {};
+      try {
+        next = await ipc.skillStatusAll(projects);
+      } catch {
+        for (const p of projects) next[p] = false;
       }
       if (!cancelled) setInstalled(next);
     })();

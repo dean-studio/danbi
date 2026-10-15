@@ -309,6 +309,14 @@ export type VaultTree = {
 export type VaultChangedPayload = {
   vault: string;
   count: number;
+  /** vault-relative paths that changed (`/` separated), capped — see
+   *  `truncated`. Only tree-relevant paths (no `.git`/`.danbi`/assets). */
+  paths: string[];
+  /** Project folders those paths live in. */
+  projects: string[];
+  /** true when the list was capped or a path sits outside `Projects/<name>/`
+   *  (new/renamed project folder) — refresh the whole tree in that case. */
+  truncated: boolean;
 };
 
 export type RoutingContext = {
@@ -761,6 +769,14 @@ export function onVaultChanged(
   return listen<VaultChangedPayload>(VAULT_CHANGED_EVENT, (e) => cb(e.payload));
 }
 
+/** Fired by the backend when a review item is enqueued (`.danbi/` is not
+ *  watched, so the sidebar badge can't rely on `vault:changed`). */
+export const REVIEWS_CHANGED_EVENT = "reviews:changed";
+
+export function onReviewsChanged(cb: () => void): Promise<UnlistenFn> {
+  return listen(REVIEWS_CHANGED_EVENT, () => cb());
+}
+
 export type TrashEntry = {
   id: string;
   project: string;
@@ -900,6 +916,9 @@ export const ipc = {
 
   initVault: (vaultPath: string) => invoke<void>("init_vault", { vaultPath }),
   listTree: (vaultPath: string) => invoke<VaultTree>("list_tree", { vaultPath }),
+  /** Rescan one project only. `null` when its folder is gone. */
+  listProjectNode: (vaultPath: string, project: string) =>
+    invoke<ProjectNode | null>("list_project_node", { vaultPath, project }),
   createProject: (
     vaultPath: string,
     name: string,
@@ -970,6 +989,9 @@ export const ipc = {
   installSkill: (project: string, agent: AgentTarget = "claude") =>
     invoke<string>("install_skill", { project, agent }),
   /** True if THIS project's skill file exists for the given agent. */
+  /** `skillStatus` for many projects in one round-trip. */
+  skillStatusAll: (projects: string[], agent: AgentTarget = "claude") =>
+    invoke<Record<string, boolean>>("skill_status_all", { projects, agent }),
   skillStatus: (project: string, agent: AgentTarget = "claude") =>
     invoke<boolean>("skill_status", { project, agent }),
   /** Write (or refresh) the Danbi MCP block into the selected code

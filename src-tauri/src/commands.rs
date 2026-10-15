@@ -355,6 +355,21 @@ pub async fn list_tree(vault_path: String) -> DanbiResult<VaultTree> {
         .map_err(|e| DanbiError::Other(format!("join: {e}")))?
 }
 
+/// Per-project rescan for the watcher-driven sidebar refresh — the
+/// frontend swaps just this node into its tree instead of re-listing
+/// the whole vault. `None` means the project folder no longer exists.
+#[tauri::command]
+pub async fn list_project_node(
+    vault_path: String,
+    project: String,
+) -> DanbiResult<Option<vault::ProjectNode>> {
+    tokio::task::spawn_blocking(move || {
+        vault::list_project_node(&PathBuf::from(vault_path), &project)
+    })
+    .await
+    .map_err(|e| DanbiError::Other(format!("join: {e}")))?
+}
+
 #[tauri::command]
 pub async fn create_project(
     vault_path: String,
@@ -765,6 +780,7 @@ pub async fn embed_query_for_search(cfg: &DanbiConfig, query: &str) -> Option<Ve
 
 #[tauri::command]
 pub async fn route_message(
+    app: AppHandle,
     message: String,
     ctx: RoutingContext,
     attachments: Option<Vec<Attachment>>,
@@ -814,6 +830,9 @@ pub async fn route_message(
                     route.summary.clone()
                 ),
             );
+            // 사이드바 리뷰 배지는 폴링 대신 이 이벤트로 갱신된다.
+            use tauri::Emitter;
+            let _ = app.emit(crate::reviews::REVIEWS_CHANGED_EVENT, ());
         }
     }
 
@@ -3836,10 +3855,34 @@ pub fn skill_status(project: String, agent: Option<String>) -> DanbiResult<bool>
         Some(p) => p,
         None => return Ok(false),
     };
-    let dir = skill_dir_for(&project);
-    Ok(agent_skill_dirs(&home, agent.as_deref())
+    Ok(skill_installed_in(&agent_skill_dirs(&home, agent.as_deref()), &project))
+}
+
+/// `skill_status` for many projects in one IPC round-trip — the home
+/// screen used to call it once per project, serially.
+#[tauri::command]
+pub fn skill_status_all(
+    projects: Vec<String>,
+    agent: Option<String>,
+) -> DanbiResult<std::collections::HashMap<String, bool>> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(projects.into_iter().map(|p| (p, false)).collect());
+    };
+    let roots = agent_skill_dirs(&home, agent.as_deref());
+    Ok(projects
+        .into_iter()
+        .map(|p| {
+            let installed = skill_installed_in(&roots, &p);
+            (p, installed)
+        })
+        .collect())
+}
+
+fn skill_installed_in(roots: &[std::path::PathBuf], project: &str) -> bool {
+    let dir = skill_dir_for(project);
+    roots
         .iter()
-        .any(|root| root.join(&dir).join("SKILL.md").exists()))
+        .any(|root| root.join(&dir).join("SKILL.md").exists())
 }
 
 #[derive(Serialize)]

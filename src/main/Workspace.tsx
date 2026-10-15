@@ -30,7 +30,13 @@ import { ProjectSwitcher } from "@/main/ProjectSwitcher";
 import { Settings } from "@/main/Settings";
 import { TrashPanel } from "@/main/TrashPanel";
 import { Sidebar } from "@/main/Sidebar";
-import { ipc, onVaultChanged, type VaultTemplate } from "@/lib/ipc";
+import {
+  ipc,
+  onReviewsChanged,
+  onVaultChanged,
+  type VaultChangedPayload,
+  type VaultTemplate,
+} from "@/lib/ipc";
 import { useApp } from "@/state/store";
 import { cn } from "@/lib/utils";
 
@@ -49,6 +55,7 @@ type DialogState =
 export function Workspace() {
   const cfg = useApp((s) => s.cfg);
   const setTree = useApp((s) => s.setTree);
+  const patchTreeProject = useApp((s) => s.patchTreeProject);
   const selection = useApp((s) => s.selection);
   const clearSelection = useApp((s) => s.clearSelection);
   const selectDomain = useApp((s) => s.selectDomain);
@@ -111,11 +118,12 @@ export function Workspace() {
     }
   }, []);
 
-  // Poll the review count so the sidebar badge stays roughly in sync.
-  // 15s is a comfortable balance between UI freshness and not hammering
-  // the vault on idle sessions.
+  // 리뷰 배지 — 백엔드가 항목을 넣을 때 `reviews:changed` 를 쏜다
+  // (`.danbi/` 는 워처 대상이 아니라 vault:changed 로는 못 받음). 15초
+  // 폴링 대신 시작 시 한 번 + 이벤트.
   useEffect(() => {
     let active = true;
+    let unlisten: UnlistenFn | null = null;
     async function pull() {
       try {
         const s = await ipc.reviewsList();
@@ -129,10 +137,13 @@ export function Workspace() {
       }
     }
     pull();
-    const id = setInterval(pull, 15_000);
+    onReviewsChanged(pull).then((fn) => {
+      if (active) unlisten = fn;
+      else fn();
+    });
     return () => {
       active = false;
-      clearInterval(id);
+      if (unlisten) unlisten();
     };
   }, []);
 
@@ -494,51 +505,83 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
 
   const vault = cfg?.vault_path ?? null;
 
-  const refresh = useCallback(async () => {
-    if (!vault) return;
-    try {
-      const t = await ipc.listTree(vault);
-      // 큰 vault 에선 setTree → Sidebar/Workspace 전체 재렌더가 16ms 를
-      // 가볍게 넘어 input/click event 가 막힌다. startTransition 안에
-      // 넣으면 React 가 이 업데이트를 interruptible 로 표시해 사용자
-      // 입력에 우선권을 준다 (concurrent rendering).
-      startTransition(() => {
-        setTree(t);
-        setRefreshKey((k) => k + 1);
-      });
-      ipc
-        .buildLinkIndex()
-        .then((idx) => startTransition(() => setLinkIndex(idx)))
-        .catch(() => {});
-      // Sidebar grouping + update badges — both are cheap enough to
-      // refresh on every tree change (git revwalk with a recent cutoff).
-      ipc
-        .loadConfig()
-        .then((cfg) =>
-          startTransition(() => setGroups(cfg?.project_groups ?? [])),
-        )
-        .catch(() => {});
-      ipc
-        .projectUpdates()
-        .then((u) => startTransition(() => setProjectUpdates(u)))
-        .catch(() => {});
-      ipc
-        .domainUpdates()
-        .then((u) => startTransition(() => setDomainUpdates(u)))
-        .catch(() => {});
-      refreshTrashCount();
-    } catch (e) {
-      console.error(e);
-    }
-  }, [
-    vault,
-    setTree,
-    setLinkIndex,
-    setGroups,
-    setProjectUpdates,
-    setDomainUpdates,
-    refreshTrashCount,
-  ]);
+  /** vault 상태 재조회. `scope` 가 있으면(워처 이벤트) 그 프로젝트만
+   *  다시 긁고 config/휴지통처럼 워처 이벤트로는 바뀌지 않는 것은 건너뛴다.
+   *  없으면(초기 로드·사용자 액션) 전체. */
+  const refresh = useCallback(
+    async (scope?: { projects: string[] }) => {
+      if (!vault) return;
+      try {
+        if (scope) {
+          // 바뀐 프로젝트만 교체. 트리가 아직 없으면 전체로 폴백.
+          const hasTree = !!useApp.getState().tree;
+          if (hasTree) {
+            const nodes = await Promise.all(
+              scope.projects.map((p) =>
+                ipc.listProjectNode(vault, p).then((n) => [p, n] as const),
+              ),
+            );
+            startTransition(() => {
+              for (const [p, n] of nodes) patchTreeProject(p, n);
+              setRefreshKey((k) => k + 1);
+            });
+          } else {
+            const t = await ipc.listTree(vault);
+            startTransition(() => {
+              setTree(t);
+              setRefreshKey((k) => k + 1);
+            });
+          }
+        } else {
+          const t = await ipc.listTree(vault);
+          // 큰 vault 에선 setTree → Sidebar/Workspace 전체 재렌더가 16ms 를
+          // 가볍게 넘어 input/click event 가 막힌다. startTransition 안에
+          // 넣으면 React 가 이 업데이트를 interruptible 로 표시해 사용자
+          // 입력에 우선권을 준다 (concurrent rendering).
+          startTransition(() => {
+            setTree(t);
+            setRefreshKey((k) => k + 1);
+          });
+        }
+        ipc
+          .buildLinkIndex()
+          .then((idx) => startTransition(() => setLinkIndex(idx)))
+          .catch(() => {});
+        // Update badges — cheap enough to refresh on every tree change
+        // (git revwalk with a recent cutoff).
+        ipc
+          .projectUpdates()
+          .then((u) => startTransition(() => setProjectUpdates(u)))
+          .catch(() => {});
+        ipc
+          .domainUpdates()
+          .then((u) => startTransition(() => setDomainUpdates(u)))
+          .catch(() => {});
+        if (scope) return;
+        // 그룹(config.json)·휴지통은 워처가 보고하는 경로에 없다 — 사용자
+        // 액션 뒤의 전체 refresh 에서만.
+        ipc
+          .loadConfig()
+          .then((cfg) =>
+            startTransition(() => setGroups(cfg?.project_groups ?? [])),
+          )
+          .catch(() => {});
+        refreshTrashCount();
+      } catch (e) {
+        console.error(e);
+      }
+    },
+    [
+      vault,
+      setTree,
+      patchTreeProject,
+      setLinkIndex,
+      setGroups,
+      setProjectUpdates,
+      setDomainUpdates,
+      refreshTrashCount,
+    ],
+  );
 
   // Initial load + start watcher
   useEffect(() => {
@@ -550,10 +593,20 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
     // tree + linkIndex + groups + updates IPC was visible as sidebar
     // lag. 200ms is short enough to feel "live" but eats most bursts.
     let pending: ReturnType<typeof setTimeout> | null = null;
-    const scheduleRefresh = () => {
+    // 디바운스 창 안에 들어온 이벤트의 프로젝트를 합친다. 하나라도
+    // truncated(프로젝트 폴더 생성/삭제, 대량 변경)면 전체 refresh.
+    let batchProjects = new Set<string>();
+    let batchFull = false;
+    const scheduleRefresh = (p: VaultChangedPayload) => {
+      if (p.truncated || p.projects.length === 0) batchFull = true;
+      for (const name of p.projects) batchProjects.add(name);
       if (pending) clearTimeout(pending);
       pending = setTimeout(() => {
         pending = null;
+        const projects = [...batchProjects];
+        const full = batchFull;
+        batchProjects = new Set();
+        batchFull = false;
         // 사용자가 방금 직접 저장한 거면 watcher refresh 를 한 번 건너뛴다.
         // (writeDoc 직후 이미 우리가 정확한 상태를 알고 있어서 listTree
         // + buildLinkIndex + projectUpdates + domainUpdates 를 또 돌릴
@@ -563,7 +616,7 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
         if (since < 1500) {
           return;
         }
-        refresh();
+        refresh(full ? undefined : { projects });
       }, 200);
     };
     // 첫 paint 가 끝난 다음 tick 에 무거운 IPC 시작. webview 가 splash
@@ -575,9 +628,7 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
           await ipc.initVault(vault);
           await refresh();
           await ipc.startWatching(vault);
-          unlisten = await onVaultChanged(() => {
-            scheduleRefresh();
-          });
+          unlisten = await onVaultChanged(scheduleRefresh);
         })();
       });
     });
