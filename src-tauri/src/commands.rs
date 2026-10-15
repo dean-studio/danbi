@@ -1269,7 +1269,7 @@ pub async fn build_link_index() -> DanbiResult<crate::links::LinkIndex> {
             Some(p) => PathBuf::from(p),
             None => return Ok(crate::links::LinkIndex::default()),
         };
-        crate::links::build_index(&vault_path)
+        crate::links::build_index_cached(&vault_path).map(|idx| (*idx).clone())
     })
     .await
     .map_err(|e| DanbiError::Other(format!("join: {e}")))?
@@ -3750,7 +3750,7 @@ pub fn build_graph(project: Option<String>) -> DanbiResult<crate::graph::GraphDa
     let cfg = config::load_config(&vault)?
         .ok_or_else(|| DanbiError::Config("config not found".into()))?;
     let vault_path = require_vault(&cfg)?;
-    crate::graph::build_graph(&vault_path, project.as_deref())
+    crate::graph::build_graph_cached(&vault_path, project.as_deref()).map(|g| (*g).clone())
 }
 
 #[tauri::command]

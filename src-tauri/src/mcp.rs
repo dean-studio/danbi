@@ -1433,8 +1433,8 @@ async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
         .iter()
         .map(|h| format!("{}/{}", h.project, h.domain))
         .collect();
-    let index = crate::links::build_index(&vault_path)?;
-    let existing = crate::graph::existing_doc_ids(&vault_path)?;
+    let index = crate::links::build_index_cached(&vault_path)?;
+    let existing = crate::graph::existing_doc_ids_cached(&vault_path)?;
     let mut seen = hit_keys.clone();
     let mut linked = Vec::new();
     'outer: for key in hits.iter().map(|h| format!("{}/{}", h.project, h.domain)) {

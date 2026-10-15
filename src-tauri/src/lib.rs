@@ -46,6 +46,8 @@ mod vault;
 mod vcs;
 mod vector;
 mod watcher;
+#[cfg(test)]
+mod perf_bench;
 
 use capture::toggle_capture_window;
 use popover::{hide_popover_window, toggle_popover_window};

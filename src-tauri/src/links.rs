@@ -2,7 +2,8 @@ use crate::error::DanbiResult;
 use crate::vault::PROJECTS_DIRNAME;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct WikiLink {
@@ -188,6 +189,36 @@ fn walk_md_for_links(
     Ok(())
 }
 
+/// `build_index` result shared until any `.md` in the vault changes
+/// (`search::fingerprint_vault`). `danbi_context`, `danbi_related`, the
+/// graph and the sidebar's link index all ask for the same thing within
+/// seconds of each other.
+static CACHE: Mutex<Option<(PathBuf, String, Arc<LinkIndex>)>> = Mutex::new(None);
+
+pub fn build_index_cached(vault: &Path) -> DanbiResult<Arc<LinkIndex>> {
+    let fp = crate::search::fingerprint_vault(vault)?;
+    build_index_cached_with(vault, &fp)
+}
+
+/// Same as `build_index_cached` with a fingerprint the caller already
+/// computed, so one request doesn't stat the vault three times.
+pub(crate) fn build_index_cached_with(vault: &Path, fingerprint: &str) -> DanbiResult<Arc<LinkIndex>> {
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((v, fp, idx)) = guard.as_ref() {
+            if v == vault && fp == fingerprint {
+                return Ok(idx.clone());
+            }
+        }
+    }
+    // Build outside the lock — a slow walk must not stall other readers
+    // that still have a valid entry.
+    let idx = Arc::new(build_index(vault)?);
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((vault.to_path_buf(), fingerprint.to_string(), idx.clone()));
+    }
+    Ok(idx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +244,22 @@ mod tests {
     }
 
     #[test]
+    fn cached_index_refreshes_when_a_file_changes() {
+        let v = temp_vault("cache");
+        write(&v, "A/a.md", "[[b.md]]");
+        write(&v, "A/b.md", "");
+        let first = build_index_cached(&v).unwrap();
+        assert_eq!(first.outgoing["A/a.md"].len(), 1);
+        assert!(Arc::ptr_eq(&first, &build_index_cached(&v).unwrap()));
+
+        write(&v, "A/b.md", "[[a.md]] back-link");
+        let second = build_index_cached(&v).unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.incoming["A/a.md"].len(), 1);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
     fn subfolder_link_resolves_to_linking_project() {
         let v = temp_vault("subfolder");
         write(&v, "A/index.md", "[[notes/x.md]] and [[B/y.md]]");
@@ -230,3 +277,4 @@ mod tests {
         std::fs::remove_dir_all(v).ok();
     }
 }
+
