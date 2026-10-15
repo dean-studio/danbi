@@ -19,6 +19,7 @@ use crate::vault::PROJECTS_DIRNAME;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 const INDEX_FILE: &str = ".danbi/vectors.json";
 /// Hard cap on chunk size fed into the embedding model. Most providers
@@ -49,6 +50,8 @@ fn index_path(vault: &Path) -> PathBuf {
     vault.join(INDEX_FILE)
 }
 
+/// Reads the index from disk every time. Reindexing wants an owned copy
+/// it can mutate; everything on the search path should use `load_cached`.
 pub fn load(vault: &Path) -> DanbiResult<VectorIndex> {
     let path = index_path(vault);
     if !path.exists() {
@@ -62,12 +65,67 @@ pub fn load(vault: &Path) -> DanbiResult<VectorIndex> {
     Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
 
+/// (path, mtime, size) of vectors.json — what the in-memory copy was
+/// parsed from. A reindex (or a sync tool replacing the file) changes
+/// the mtime/size, so the next `load_cached` re-reads.
+type IndexFileKey = (PathBuf, Option<std::time::SystemTime>, u64);
+
+fn index_file_key(vault: &Path) -> IndexFileKey {
+    let path = index_path(vault);
+    let meta = std::fs::metadata(&path).ok();
+    (
+        path,
+        meta.as_ref().and_then(|m| m.modified().ok()),
+        meta.as_ref().map(|m| m.len()).unwrap_or(0),
+    )
+}
+
+static INDEX_CACHE: Mutex<Option<(IndexFileKey, Arc<VectorIndex>)>> = Mutex::new(None);
+
+/// The index parsed once and shared until vectors.json changes on disk.
+/// Parsing a 23MB file costs ~30ms (release) / hundreds of ms (debug) —
+/// too much to pay on every keystroke-driven search.
+pub fn load_cached(vault: &Path) -> DanbiResult<Arc<VectorIndex>> {
+    let key = index_file_key(vault);
+    if let Ok(guard) = INDEX_CACHE.lock() {
+        if let Some((k, idx)) = guard.as_ref() {
+            if *k == key {
+                return Ok(idx.clone());
+            }
+        }
+    }
+    let idx = Arc::new(load(vault)?);
+    // Re-stat after the read: if the file changed underneath us, cache
+    // under the key we actually parsed so the next call re-reads.
+    let key = if index_file_key(vault) == key { key } else { (key.0, None, 0) };
+    if let Ok(mut guard) = INDEX_CACHE.lock() {
+        *guard = Some((key, idx.clone()));
+    }
+    Ok(idx)
+}
+
+fn invalidate_cache(vault: &Path) {
+    let path = index_path(vault);
+    if let Ok(mut guard) = INDEX_CACHE.lock() {
+        if guard.as_ref().map(|(k, _)| k.0 == path).unwrap_or(false) {
+            *guard = None;
+        }
+    }
+}
+
+/// Compact JSON (pretty was 3× the bytes for a file nobody reads by
+/// hand), written to a temp file and renamed so a crash mid-write can't
+/// leave a truncated index — and so the mtime-keyed caches never see a
+/// half-written file.
 pub fn save(vault: &Path, index: &VectorIndex) -> DanbiResult<()> {
     let path = index_path(vault);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, serde_json::to_string_pretty(index)?)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string(index)?)?;
+    std::fs::rename(&tmp, &path)?;
+    invalidate_cache(vault);
     Ok(())
 }
 
@@ -76,7 +134,69 @@ pub fn clear(vault: &Path) -> DanbiResult<()> {
     if path.exists() {
         let _ = std::fs::remove_file(&path);
     }
+    invalidate_cache(vault);
     Ok(())
+}
+
+// ---------- Query embedding LRU ----------
+//
+// The same query gets embedded again and again: every keystroke-debounced
+// app search, every `danbi_context` retry, every agent that re-asks the
+// question it just asked. Keying on provider + model keeps a model switch
+// from serving vectors of the wrong dimension.
+
+const QUERY_CACHE_CAP: usize = 256;
+
+#[derive(Default)]
+struct QueryLru {
+    map: HashMap<String, Vec<f32>>,
+    /// Least recently used at the front.
+    order: std::collections::VecDeque<String>,
+}
+
+impl QueryLru {
+    fn touch(&mut self, key: &str) {
+        if let Some(pos) = self.order.iter().position(|k| k == key) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(key.to_string());
+    }
+
+    fn get(&mut self, key: &str) -> Option<Vec<f32>> {
+        let hit = self.map.get(key).cloned()?;
+        self.touch(key);
+        Some(hit)
+    }
+
+    fn put(&mut self, key: String, emb: Vec<f32>) {
+        if self.map.insert(key.clone(), emb).is_none() {
+            while self.map.len() > QUERY_CACHE_CAP {
+                let Some(evicted) = self.order.pop_front() else { break };
+                self.map.remove(&evicted);
+            }
+        }
+        self.touch(&key);
+    }
+}
+
+static QUERY_CACHE: Mutex<Option<QueryLru>> = Mutex::new(None);
+
+pub fn query_cache_key(provider_kind: &str, model: &str, query: &str) -> String {
+    format!("{provider_kind}\u{1}{model}\u{1}{}", query.trim())
+}
+
+pub fn query_cache_get(key: &str) -> Option<Vec<f32>> {
+    QUERY_CACHE
+        .lock()
+        .ok()?
+        .get_or_insert_with(QueryLru::default)
+        .get(key)
+}
+
+pub fn query_cache_put(key: String, embedding: Vec<f32>) {
+    if let Ok(mut guard) = QUERY_CACHE.lock() {
+        guard.get_or_insert_with(QueryLru::default).put(key, embedding);
+    }
 }
 
 /// Simple stats shown in Settings so the user knows how fresh / big
@@ -231,7 +351,7 @@ pub fn cached_model_counts(vault: &Path) -> HashMap<String, usize> {
             }
         }
     }
-    let counts = load(vault).map(|i| model_counts(&i)).unwrap_or_default();
+    let counts = load_cached(vault).map(|i| model_counts(&i)).unwrap_or_default();
     if let Ok(mut guard) = cache.lock() {
         *guard = Some((key, counts.clone()));
     }
@@ -780,6 +900,81 @@ mod tests {
         index
     }
 
+    fn temp_vault(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "danbi-vector-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn load_cached_follows_save_clear_and_external_writes() {
+        let v = temp_vault("cache");
+        assert_eq!(load_cached(&v).unwrap().entries.len(), 0);
+
+        save(&v, &index_with(&[("m1", 3)])).unwrap();
+        let a = load_cached(&v).unwrap();
+        assert_eq!(a.entries.len(), 3);
+        assert!(Arc::ptr_eq(&a, &load_cached(&v).unwrap()), "same Arc while unchanged");
+
+        // Another process replacing the file (sync tool, older build) must
+        // be picked up too — key is mtime + size, not just our own save().
+        let mut pretty = index_with(&[("m1", 3), ("m2", 2)]);
+        pretty.entries.values_mut().for_each(|e| e.embedding = vec![0.5; 4]);
+        std::fs::write(index_path(&v), serde_json::to_string_pretty(&pretty).unwrap()).unwrap();
+        let b = load_cached(&v).unwrap();
+        assert_eq!(b.entries.len(), 5, "pretty (legacy) file still parses");
+        assert_eq!(b.entries.values().next().unwrap().embedding.len(), 4);
+
+        clear(&v).unwrap();
+        assert_eq!(load_cached(&v).unwrap().entries.len(), 0);
+        assert!(!index_path(&v).with_extension("json.tmp").exists(), "no temp file left behind");
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn save_is_compact_and_round_trips() {
+        let v = temp_vault("compact");
+        let idx = index_with(&[("m", 2)]);
+        save(&v, &idx).unwrap();
+        let raw = std::fs::read_to_string(index_path(&v)).unwrap();
+        assert!(!raw.contains('\n'), "compact JSON");
+        assert_eq!(load(&v).unwrap().entries.len(), 2);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn query_lru_evicts_least_recently_used() {
+        let mut lru = QueryLru::default();
+        for i in 0..QUERY_CACHE_CAP {
+            lru.put(format!("k{i}"), vec![i as f32]);
+        }
+        assert!(lru.get("k0").is_some(), "touch k0 so k1 is the oldest");
+        lru.put("fresh".into(), vec![9.0]);
+        assert!(lru.get("k1").is_none(), "k1 evicted");
+        assert!(lru.get("k0").is_some());
+        assert!(lru.get("fresh").is_some());
+        assert_eq!(lru.map.len(), QUERY_CACHE_CAP);
+        assert_eq!(lru.order.len(), QUERY_CACHE_CAP);
+        // Re-putting an existing key updates in place, no growth.
+        lru.put("k0".into(), vec![1.0]);
+        assert_eq!(lru.map.len(), QUERY_CACHE_CAP);
+        assert_eq!(lru.get("k0"), Some(vec![1.0]));
+    }
+
+    #[test]
+    fn query_cache_key_separates_provider_model_and_trims() {
+        assert_eq!(query_cache_key("a", "m", " q "), query_cache_key("a", "m", "q"));
+        assert_ne!(query_cache_key("a", "m1", "q"), query_cache_key("a", "m2", "q"));
+        assert_ne!(query_cache_key("a", "m", "q"), query_cache_key("b", "m", "q"));
+    }
+
     #[test]
     fn single_model_index_is_not_mixed() {
         let counts = model_counts(&index_with(&[("m1", 4)]));
@@ -826,3 +1021,4 @@ mod tests {
         assert!(!model_status(&HashMap::new(), Some("a")).mixed, "empty index");
     }
 }
+

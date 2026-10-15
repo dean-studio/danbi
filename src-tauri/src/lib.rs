@@ -442,6 +442,22 @@ pub fn run() {
                 }
             });
 
+            // 검색 코퍼스 사전 빌드 — 1.5k 파일 vault 는 첫 빌드에 ~2.5초가
+            // 걸려서 첫 ⌘K 가 멈춘 것처럼 보였다. 이후 검색은 바뀐 파일만
+            // 증분 반영하므로 여기서 한 번만 비용을 낸다. 실패해도 무시.
+            if let Ok(default_vault) = config::default_vault_path() {
+                if let Ok(Some(cfg)) = config::load_config(&default_vault) {
+                    if let Some(vp) = cfg.vault_path.as_ref() {
+                        let vault = std::path::PathBuf::from(vp);
+                        tauri::async_runtime::spawn_blocking(move || {
+                            if let Err(e) = search::warm_corpus(&vault) {
+                                eprintln!("[search] corpus prebuild failed: {e}");
+                            }
+                        });
+                    }
+                }
+            }
+
             // Reset any crash-queue records that were marked Running when
             // the previous process exited. Converts them to Pending so the
             // next UI interaction (or the user directly) can resume them.
@@ -516,6 +532,7 @@ pub fn run() {
             commands::usage_set_tray_options,
             commands::dashboard_danbi_llm,
             commands::build_graph,
+            commands::search_hybrid,
             commands::backup_now,
             commands::backup_validate_path,
             commands::project_context_status,

@@ -982,7 +982,8 @@ fn tool_catalog() -> Vec<Value> {
                 "properties": {
                     "query": { "type": "string", "description": "검색어 (키워드 또는 자연어 질문)" },
                     "limit": { "type": "integer", "default": 8 },
-                    "project": { "type": "string", "description": "이 프로젝트 안에서만. 생략하면 vault 전체" }
+                    "project": { "type": "string", "description": "이 프로젝트 안에서만. 생략하면 vault 전체" },
+                    "mode": { "type": "string", "enum": ["hybrid", "keyword", "semantic"], "default": "hybrid", "description": "hybrid=키워드+벡터 RRF 병합(기본), keyword=BM25만(정확한 용어·파일명 찾기, 임베딩 호출 없음), semantic=벡터만(풀어 쓴 질문). 임베딩이 1.5초 안에 안 오면 키워드 결과만 주고 semantic 필드에 timeout 으로 표시" }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -1215,7 +1216,9 @@ fn identify_projects_for_banner(
     // For search/recent results, the top hit's project is a strong
     // signal — the user is clearly working in that area right now.
     if matches!(name, "danbi_search" | "danbi_recent") {
-        if let Some(arr) = parsed_result.and_then(|v| v.as_array()) {
+        // `danbi_search` is an object with a `hits` array; `danbi_recent` a bare array.
+        let arr = parsed_result.and_then(|v| v.as_array().or_else(|| v.get("hits").and_then(|h| h.as_array())));
+        if let Some(arr) = arr {
             if let Some(first) = arr.first() {
                 if let Some(p) = first.get("project").and_then(|v| v.as_str()) {
                     push(p);
@@ -1301,26 +1304,37 @@ async fn search_hybrid_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
     if let Some(p) = project.as_deref() {
         require_project(&vault_path, p)?;
     }
+    let mode = search::SearchMode::parse(args.get("mode").and_then(|v| v.as_str()))?;
 
-    let embedding = query_embedding(&vault_path, &query).await?;
+    let q = query_embedding(&vault_path, &query, mode).await?;
     // A project filter is applied after fusion, so ask for more.
     let depth = if project.is_some() { limit.saturating_mul(4) } else { limit };
     let mut hits =
-        search::full_search_hybrid(&vault_path, &query, depth, embedding.as_deref())?;
+        search::full_search_mode(&vault_path, &query, depth, q.embedding.as_deref(), mode)?;
     if let Some(p) = project.as_deref() {
         hits.retain(|h| h.project == p);
         hits.truncate(limit);
     }
+    // 배열 → 객체: 벡터 arm 이 돌았는지(used/cached/off/timeout/error) 와
+    // 혼재 경고를 같이 줘야 에이전트가 "키워드 결과만" 임을 알고 재시도를
+    // 판단한다.
+    let mut out = json!({ "hits": hits, "mode": mode, "semantic": q.semantic });
+    if let Some(note) = q.note {
+        out["note"] = json!(note);
+    }
+    if let Some(w) = semantic_arm_warning(&vault_path, q.embedding.is_some()) {
+        out["warning"] = json!(w);
+    }
     Ok(Dispatched {
-        text: serde_json::to_string_pretty(&hits)?,
-        warning: semantic_arm_warning(&vault_path, embedding.is_some()),
+        text: serde_json::to_string_pretty(&out)?,
+        warning: None,
     })
 }
 
 /// A tool result plus an optional warning that travels outside the
-/// result body: `danbi_search` returns a bare array (clients index into
-/// it), so the mixed-model notice goes out as a second MCP content block
-/// / a top-level REST field instead of changing the array's shape.
+/// result body (second MCP content block / top-level REST field) for
+/// tools whose result shape can't carry one. `danbi_search` now returns
+/// an object and puts the notice in its own `warning` key instead.
 struct Dispatched {
     text: String,
     warning: Option<String>,
@@ -1360,15 +1374,17 @@ async fn dispatch_any(name: &str, args: Value) -> Result<Dispatched, DanbiError>
     }
 }
 
-/// cfg 의 embed provider 로 query 를 임베딩한다. 키 없거나 호출 실패
-/// 면 None — `full_search_hybrid` 가 BM25 only 로 graceful fallback.
+/// cfg 의 embed provider 로 query 를 임베딩한다. 키 없거나 호출 실패·
+/// 1.5초 타임아웃이면 `embedding: None` + 사유 — `full_search_mode` 가
+/// BM25 only 로 graceful fallback.
 async fn query_embedding(
     vault_path: &std::path::Path,
     query: &str,
-) -> Result<Option<Vec<f32>>, DanbiError> {
+    mode: search::SearchMode,
+) -> Result<crate::commands::QueryEmbedding, DanbiError> {
     Ok(match crate::config::load_config(vault_path)? {
-        Some(c) => crate::commands::embed_query_for_search(&c, query).await,
-        None => None,
+        Some(c) => crate::commands::embed_query(&c, query, mode).await,
+        None => crate::commands::QueryEmbedding { embedding: None, semantic: "off", note: None },
     })
 }
 
@@ -1391,9 +1407,9 @@ async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
         .unwrap_or(8000)
         .clamp(1000, 40000) as usize;
 
-    let embedding = query_embedding(&vault_path, &query).await?;
+    let q = query_embedding(&vault_path, &query, search::SearchMode::Hybrid).await?;
     let hits =
-        search::full_search_hybrid(&vault_path, &query, limit, embedding.as_deref())?;
+        search::full_search_hybrid(&vault_path, &query, limit, q.embedding.as_deref())?;
 
     let per_doc = budget / hits.len().max(1);
     let mut used = 0usize;
@@ -1449,7 +1465,7 @@ async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
         "hint": "전체 본문은 danbi_read, 한 문서의 주변 연결은 danbi_related",
     });
     // Object result → the warning fits inside it.
-    if let Some(w) = semantic_arm_warning(&vault_path, embedding.is_some()) {
+    if let Some(w) = semantic_arm_warning(&vault_path, q.embedding.is_some()) {
         out["warning"] = Value::String(w);
     }
     Ok(Dispatched {
