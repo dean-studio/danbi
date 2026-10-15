@@ -1074,6 +1074,7 @@ pub fn apply_plan(
     vcs::ensure_repo(&vault_path)?;
     edit_ops::validate(&op)?;
 
+    let _write_guard = vcs::write_guard();
     let before = vault::read_doc(&vault_path, &project, &domain)?;
     let after = edit_ops::apply(&before, &op)?;
 
@@ -1906,19 +1907,24 @@ pub async fn quick_capture(
     edit_ops::validate(&op)?;
 
     vcs::ensure_repo(&vault_path)?;
-    let before = vault::read_doc(&vault_path, &proj, &dom)?;
-    let after = edit_ops::apply(&before, &op)?;
-
-    let commit_before = vcs::snapshot(
-        &vault_path,
-        &format!("danbi: quick-capture pre · {}/{}", proj, dom),
-    )?;
-    vault::write_doc(&vault_path, &proj, &dom, &after)?;
-    let commit_after = vcs::snapshot_as(
-        &vault_path,
-        &format!("danbi: quick-capture · {}/{} · {}", proj, dom, plan.summary),
-        vcs::CLIENT_HUMAN,
-    )?;
+    // LLM 응답을 받은 뒤 다시 읽어 적용하고, read → write → commit 은
+    // 다른 쓰기 경로와 같은 락 안에서 (await 없음).
+    let (commit_before, commit_after) = {
+        let _write_guard = vcs::write_guard();
+        let before = vault::read_doc(&vault_path, &proj, &dom)?;
+        let after = edit_ops::apply(&before, &op)?;
+        let commit_before = vcs::snapshot(
+            &vault_path,
+            &format!("danbi: quick-capture pre · {}/{}", proj, dom),
+        )?;
+        vault::write_doc(&vault_path, &proj, &dom, &after)?;
+        let commit_after = vcs::snapshot_as(
+            &vault_path,
+            &format!("danbi: quick-capture · {}/{} · {}", proj, dom, plan.summary),
+            vcs::CLIENT_HUMAN,
+        )?;
+        (commit_before, commit_after)
+    };
 
     let _ = journal::append_log(
         &vault_path,
@@ -1979,29 +1985,45 @@ async fn capture_append_no_llm(
     cfg: &config::DanbiConfig,
 ) -> DanbiResult<QuickCaptureResult> {
     vcs::ensure_repo(vault_path)?;
-    // 파일이 없으면 자동 생성 후 append 한다 — daily 노트는 일자별로
-    // 매번 새로 만들어지는 게 정상 동작.
-    let before = match vault::read_doc(vault_path, project, domain) {
-        Ok(s) => s,
-        Err(_) => {
-            vault::write_doc(vault_path, project, domain, "")?;
-            String::new()
-        }
-    };
     let op = EditOp::Append {
         content: message.to_string(),
     };
-    let after = edit_ops::apply(&before, &op)?;
-    let commit_before = vcs::snapshot(
-        vault_path,
-        &format!("danbi: capture pre · {}/{}", project, domain),
-    )?;
-    vault::write_doc(vault_path, project, domain, &after)?;
-    let commit_after = vcs::snapshot_as(
-        vault_path,
-        &format!("danbi: capture · {}/{}", project, domain),
-        vcs::CLIENT_HUMAN,
-    )?;
+    // read → append → write → commit 을 MCP·REST·팝오버와 같은 락 안에서.
+    // 에이전트가 같은 daily 노트에 동시에 쓰면 한쪽이 사라지던 경로.
+    let (commit_before, commit_after) = {
+        let _write_guard = vcs::write_guard();
+        // 파일이 없으면 자동 생성 후 append 한다 — daily 노트는 일자별로
+        // 매번 새로 만들어지는 게 정상 동작.
+        let before = match vault::read_doc(vault_path, project, domain) {
+            Ok(s) => s,
+            Err(_) => {
+                vault::write_doc(vault_path, project, domain, "")?;
+                String::new()
+            }
+        };
+        let after = edit_ops::apply(&before, &op)?;
+        let commit_before = vcs::snapshot(
+            vault_path,
+            &format!("danbi: capture pre · {}/{}", project, domain),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("[vcs] capture pre-snapshot skipped: {e}");
+            None
+        });
+        vault::write_doc(vault_path, project, domain, &after)?;
+        // 파일은 이미 저장됐다 — 커밋 실패를 오류로 돌려주면 재시도가
+        // 같은 메모를 두 번 붙인다. 다음 스냅샷이 이 변경을 담는다.
+        let commit_after = vcs::snapshot_as(
+            vault_path,
+            &format!("danbi: capture · {}/{}", project, domain),
+            vcs::CLIENT_HUMAN,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("[vcs] capture commit deferred for {project}/{domain}: {e}");
+            None
+        });
+        (commit_before, commit_after)
+    };
 
     // summary: 메시지의 첫 줄만 잘라서 알림에 쓴다.
     let summary = message
@@ -2218,6 +2240,7 @@ pub fn compound_apply(
     let vault_path = require_vault(&cfg)?;
 
     vcs::ensure_repo(&vault_path)?;
+    let _write_guard = vcs::write_guard();
 
     // Target may be a new file — ensure project exists, then decide whether we're
     // creating or overwriting.
@@ -2507,10 +2530,6 @@ pub async fn summarize_weekly(
     let _ = crate::vault::create_domain(&vault_path, &project, &domain);
 
     crate::vcs::ensure_repo(&vault_path)?;
-    let _ = crate::vcs::snapshot(
-        &vault_path,
-        &format!("danbi: weekly summary · {project}/{domain} (pre)"),
-    );
     let header = format!(
         "# 주간 회고 — {} W{:02}\n\n_{}_\n\n",
         iso.year(),
@@ -2518,12 +2537,19 @@ pub async fn summarize_weekly(
         kind,
     );
     let final_body = format!("{header}{summary_md}\n");
-    crate::vault::write_doc(&vault_path, &project, &domain, &final_body)?;
-    let commit = crate::vcs::snapshot_as(
-        &vault_path,
-        &format!("danbi: weekly summary · {project}/{domain}"),
-        crate::vcs::CLIENT_DANBI,
-    )?;
+    let commit = {
+        let _write_guard = crate::vcs::write_guard();
+        let _ = crate::vcs::snapshot(
+            &vault_path,
+            &format!("danbi: weekly summary · {project}/{domain} (pre)"),
+        );
+        crate::vault::write_doc(&vault_path, &project, &domain, &final_body)?;
+        crate::vcs::snapshot_as(
+            &vault_path,
+            &format!("danbi: weekly summary · {project}/{domain}"),
+            crate::vcs::CLIENT_DANBI,
+        )?
+    };
 
     Ok(serde_json::json!({
         "project": project,
@@ -3343,6 +3369,9 @@ pub fn ghost_accept(project: String, id: String) -> DanbiResult<GhostStore> {
     let vault_path = require_vault(&cfg)?;
 
     vcs::ensure_repo(&vault_path)?;
+    // accept 는 소스 문서를 읽고 링크를 붙여 다시 쓴다 — 에이전트 쓰기와
+    // 같은 락 안에서.
+    let _write_guard = vcs::write_guard();
     let commit_before = vcs::snapshot(
         &vault_path,
         &format!("danbi: pre-ghost-accept · {project}"),
