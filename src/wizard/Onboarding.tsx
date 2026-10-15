@@ -53,6 +53,9 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
   // Template 단계에서 만든 cfg 를 마지막 "연결" 안내 스텝까지 넘겨,
   // 사용자가 "단비 시작하기" 를 누르면 그때 onDone(cfg) 로 마무리한다.
   const [pendingCfg, setPendingCfg] = useState<DanbiConfig | null>(null);
+  // 마지막 스텝의 저장 실패 (Gemini 키 Keychain 저장 등). 삼키지 않고
+  // 템플릿 스텝 아래에 보여준다.
+  const [finishError, setFinishError] = useState<string | null>(null);
 
   useEffect(() => {
     ipc.defaultVault().then(setVaultPath).catch(() => {});
@@ -393,10 +396,12 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
               disabled={!vaultPath || !sel}
               onClick={async () => {
                 if (!sel) return;
+                setFinishError(null);
                 // 사용자가 embed step 에서 Gemini 키를 입력했으면 Keychain
                 // 에 저장하고 cfg.embed_* 를 채운다. 키 저장은 cfg 쓰기 전에
                 // 끝나야 — config 안의 keychain ref 가 빈 키를 가리키지
-                // 않게.
+                // 않게. 실패하면 여기서 멈추고 사용자에게 보여준다 (조용히
+                // 임베딩 없이 진행하면 왜 검색이 안 되는지 알 수 없다).
                 let embedProvider: DanbiConfig["embed_provider"] = null;
                 let embedModel: string | null = null;
                 if (embedKind === "gemini" && geminiKey.trim()) {
@@ -409,6 +414,10 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
                     embedModel = "gemini-embedding-001";
                   } catch (e) {
                     console.error("[danbi] gemini key store failed", e);
+                    setFinishError(
+                      `Gemini 키를 Keychain 에 저장하지 못했어요: ${String(e).slice(0, 160)} — 뒤로 가서 키를 비우거나 다시 시도하세요.`,
+                    );
+                    return;
                   }
                 } else if (embedKind === "bedrock" && bedrockRegion.trim()) {
                   // AWS 자격증명은 SDK 가 ~/.aws/credentials 또는 환경변수
@@ -425,7 +434,10 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
                 }
 
                 // 재실행 시 기존 cfg 의 theme/shortcuts/MCP token/backup 등
-                // vault-무관 prefs 는 보존 — spread + LLM/embed 필드만 패치.
+                // vault-무관 prefs 는 보존 — spread 후 embed 필드만 패치.
+                // LLM provider·모델도 vault 와 무관하므로 그대로 둔다 (예전엔
+                // null 로 밀어 재실행마다 Bedrock 설정이 날아갔다). 임베딩은
+                // 이 위저드에서 "없음" 을 고르면 기존 값을 유지한다.
                 //
                 // 단, *다른* vault 로 전환하는 경우엔 이전 vault 의 그룹·
                 // 프로젝트·아이콘·last-seen 같은 vault-종속 상태를 물려받으면
@@ -447,11 +459,13 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
                   ? {
                       ...existing,
                       vault_path: vaultPath,
-                      provider: null,
-                      models: { routing: null, writer: null },
-                      embed_provider: embedProvider,
-                      embed_model: embedModel,
-                      preset: "claude_code",
+                      embed_provider:
+                        embedKind === "none"
+                          ? existing.embed_provider
+                          : embedProvider,
+                      embed_model:
+                        embedKind === "none" ? existing.embed_model : embedModel,
+                      preset: existing.preset ?? "claude_code",
                       default_domains:
                         sel.default_domains.length > 0
                           ? sel.default_domains
@@ -565,6 +579,11 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
             );
           })}
         </div>
+        {finishError && (
+          <div className="mt-3 rounded-md border border-hairline bg-surface-elevated p-3 text-[12px] leading-[1.5] text-accent-red">
+            {finishError}
+          </div>
+        )}
       </WizardShell>
     );
   }
