@@ -429,6 +429,12 @@ pub fn run() {
                                 // miss the first time but that's a user-
                                 // initiated click.
                                 let _ = dashboard::warm_activity_cache(&vault, 30);
+                                // Same idea for the embedding-model census
+                                // danbi_briefing / search report: parsing a
+                                // multi-MB vectors.json belongs here, not in
+                                // the first MCP call of a session. Cached by
+                                // mtime, so later cycles are a stat.
+                                let _ = vector::cached_model_counts(&vault);
                             }
                         }
                     }

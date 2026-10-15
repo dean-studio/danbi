@@ -31,7 +31,8 @@ const HOOK_TIMEOUT_SECS: u64 = 5;
 /// Builds the SessionStart brief. `project` = None → short vault-wide
 /// brief. Output never exceeds `max_chars` characters.
 pub fn session_brief(vault: &Path, project: Option<&str>, max_chars: usize) -> DanbiResult<String> {
-    let tree = vault::list_tree(vault)?;
+    // Names and mtimes only — no per-file heading sniff.
+    let tree = vault::list_tree_with(vault, false)?;
     let now_ms = chrono::Local::now().timestamp_millis() as u128;
     let today = chrono::Local::now().date_naive();
     let yesterday = today - chrono::Duration::days(1);
@@ -97,6 +98,7 @@ pub fn session_brief(vault: &Path, project: Option<&str>, max_chars: usize) -> D
                 lines.push("## 열린 할 일".into());
                 lines.extend(todos);
             }
+            lines.extend(activity_lines(vault, Some(name)));
         }
         None => {
             lines.push("# 단비 브리핑 (전체)".into());
@@ -127,6 +129,7 @@ pub fn session_brief(vault: &Path, project: Option<&str>, max_chars: usize) -> D
                 lines.push("## 오늘 daily 노트".into());
                 lines.extend(daily_lines);
             }
+            lines.extend(activity_lines(vault, None));
         }
     }
 
@@ -138,6 +141,45 @@ pub fn session_brief(vault: &Path, project: Option<&str>, max_chars: usize) -> D
         .join("\n");
     let budget = max_chars.saturating_sub(hint.chars().count() + 1);
     Ok(format!("{}{hint}\n", clip_lines(&body, budget)))
+}
+
+/// Last-7-day activity and healing counts from the same dieted source as
+/// `danbi_briefing` (`(pre)` snapshots excluded, scaffolding files not
+/// counted as orphans), so the hook's short brief carries signal, not
+/// noise. Empty when there is nothing to say.
+fn activity_lines(vault: &Path, project: Option<&str>) -> Vec<String> {
+    let Ok(b) = crate::dashboard::briefing(vault, project) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    if b.activity.commit_count > 0 {
+        out.push(String::new());
+        out.push(format!("## 최근 7일 활동 · 기록 {}건", b.activity.commit_count));
+        for s in b.activity.recent_summaries.iter().take(3) {
+            out.push(format!("- {}", s.trim_start_matches("danbi: ")));
+        }
+    }
+    let h = &b.healing;
+    if h.empty_projects + h.empty + h.oversized + h.orphans > 0 {
+        let mut parts = Vec::new();
+        if h.empty > 0 {
+            parts.push(format!("빈 파일 {}", h.empty));
+        }
+        if h.oversized > 0 {
+            parts.push(format!("너무 큰 문서 {}", h.oversized));
+        }
+        if h.orphans > 0 {
+            parts.push(format!("링크 없는 문서 {}", h.orphans));
+        }
+        if h.empty_projects > 0 {
+            parts.push(format!("빈 프로젝트 {}", h.empty_projects));
+        }
+        out.push(format!("정리 제안: {} (자세히: danbi_briefing)", parts.join(" · ")));
+    }
+    if b.ghost_total > 0 {
+        out.push(format!("미확정 링크 제안 {}건 (danbi_briefing 의 ghost_suggestions)", b.ghost_total));
+    }
+    out
 }
 
 /// Every markdown file of a project, top-level and nested subfolders.

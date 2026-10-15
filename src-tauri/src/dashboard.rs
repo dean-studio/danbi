@@ -362,6 +362,147 @@ fn compute_project_activity_overview(
     })
 }
 
+// ---------- MCP briefing (dieted) ------------------------------------------
+//
+// `snapshot` above is the UI payload and may carry every healing row. The
+// MCP `danbi_briefing` and the SessionStart brief need the same facts in a
+// few kilobytes: counts plus a short top list, optionally one project.
+
+pub const BRIEFING_TOP: usize = 10;
+/// Vault-wide ghost rows are the longest items (free-text reasons) — keep
+/// fewer unless a project is in scope.
+pub const BRIEFING_GHOSTS_VAULT_WIDE: usize = 5;
+pub const BRIEFING_SUMMARIES: usize = 6;
+
+/// Today's notes in full; the reminiscence lists as counts (the full
+/// refs are one `danbi_daily` call away).
+#[derive(Debug, Serialize, Clone)]
+pub struct BriefingDaily {
+    pub today: String,
+    pub today_notes: Vec<crate::daily::DailyNoteRef>,
+    pub one_week_ago: usize,
+    pub one_month_ago: usize,
+    pub one_year_ago: usize,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+pub struct HealingSummary {
+    pub total: usize,
+    pub orphans: usize,
+    pub empty: usize,
+    pub oversized: usize,
+    pub empty_projects: usize,
+    /// Highest-priority rows (empty projects/files, oversized, then orphans).
+    pub top: Vec<Suggestion>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct BriefingSnapshot {
+    pub generated_at: String,
+    /// Scope, when the caller asked for one project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub ghost_total: usize,
+    /// Newest pending ghost links, capped.
+    pub ghost_suggestions: Vec<GhostSuggestion>,
+    pub healing: HealingSummary,
+    pub daily: BriefingDaily,
+    pub activity: ActivityWindow,
+    /// Set by the MCP layer when the vector index mixes embedding models.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_warning: Option<String>,
+    pub hint: &'static str,
+}
+
+/// Does a commit summary (`danbi: mcp log · <project>/<domain> …`) belong
+/// to `project`?
+fn summary_is_project(summary: &str, project: &str) -> bool {
+    summary.contains(&format!("· {project}/"))
+}
+
+pub fn briefing(vault: &Path, project: Option<&str>) -> DanbiResult<BriefingSnapshot> {
+    let generated_at = Local::now().format("%Y-%m-%d").to_string();
+    let in_scope = |p: &str| project.map(|want| want == p).unwrap_or(true);
+
+    let ghosts: Vec<GhostSuggestion> = collect_ghost_suggestions(vault)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|g| in_scope(&g.project))
+        .collect();
+    let ghost_total = ghosts.len();
+    let ghost_cap = if project.is_some() { BRIEFING_TOP } else { BRIEFING_GHOSTS_VAULT_WIDE };
+    let ghost_suggestions = ghosts.into_iter().take(ghost_cap).collect();
+
+    let mut rows: Vec<Suggestion> = crate::healing::scan(vault)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|s| in_scope(s.project()))
+        .collect();
+    let mut healing = HealingSummary {
+        total: rows.len(),
+        ..Default::default()
+    };
+    for s in &rows {
+        match s {
+            Suggestion::Orphan { .. } => healing.orphans += 1,
+            Suggestion::Empty { .. } => healing.empty += 1,
+            Suggestion::Oversized { .. } => healing.oversized += 1,
+            Suggestion::EmptyProject { .. } => healing.empty_projects += 1,
+        }
+    }
+    rows.sort_by_key(|s| s.priority());
+    rows.truncate(BRIEFING_TOP);
+    healing.top = rows;
+
+    let mut full = crate::daily::snapshot(vault)?;
+    if let Some(p) = project {
+        for list in [
+            &mut full.today_notes,
+            &mut full.one_week_ago,
+            &mut full.one_month_ago,
+            &mut full.one_year_ago,
+        ] {
+            list.retain(|n| n.project == p);
+        }
+    }
+    let daily = BriefingDaily {
+        today: full.today,
+        today_notes: full.today_notes,
+        one_week_ago: full.one_week_ago.len(),
+        one_month_ago: full.one_month_ago.len(),
+        one_year_ago: full.one_year_ago.len(),
+    };
+
+    let since = Local::now().timestamp() - 7 * 86_400;
+    let commits: Vec<_> = vcs::commits_since(vault, since)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|c| project.map(|p| summary_is_project(&c.summary, p)).unwrap_or(true))
+        .collect();
+    let activity = ActivityWindow {
+        days: 7,
+        commit_count: commits.len(),
+        changed_files: Vec::new(),
+        recent_summaries: commits
+            .iter()
+            .take(BRIEFING_SUMMARIES)
+            .map(|c| c.summary.clone())
+            .collect(),
+    };
+
+    Ok(BriefingSnapshot {
+        generated_at,
+        project: project.map(str::to_string),
+        ghost_total,
+        ghost_suggestions,
+        healing,
+        daily,
+        activity,
+        vector_warning: None,
+        hint: "질문은 danbi_context, 문서 전체는 danbi_read, 기록은 danbi_log",
+    })
+}
+
 pub fn snapshot(vault: &Path) -> DanbiResult<DashboardSnapshot> {
     let generated_at = Local::now().format("%Y-%m-%d").to_string();
     let ghost_suggestions = collect_ghost_suggestions(vault).unwrap_or_default();

@@ -316,7 +316,9 @@ pub fn related(
     let id = format!("{project}/{domain}");
     let graph = build_graph(vault, Some(project))?;
     let Some(me) = graph.nodes.iter().find(|n| n.id == id) else {
-        return Err(DanbiError::Config(format!("document not found: {id}")));
+        return Err(DanbiError::Config(format!(
+            "document not found: {id}. 파일명은 danbi_list_projects(project=\"{project}\") 로 확인하세요 (하위 폴더면 notes/x.md 형태)."
+        )));
     };
 
     // Only report links that resolve to a real file — guides full of
