@@ -2098,20 +2098,6 @@ async fn capture_append_no_llm(
     })
 }
 
-#[tauri::command]
-pub fn toggle_capture(app: AppHandle) -> DanbiResult<()> {
-    crate::capture::toggle_capture_window(&app)
-        .map_err(|e| DanbiError::Other(format!("capture toggle: {e}")))
-}
-
-#[derive(Debug, Serialize, Clone)]
-pub struct CaptureContext {
-    pub projects: Vec<String>,
-    pub domains: std::collections::HashMap<String, Vec<String>>,
-    pub last_project: Option<String>,
-    pub last_domain: Option<String>,
-}
-
 #[tauri::command(async)]
 pub fn search_local(query: String, limit: Option<usize>) -> DanbiResult<Vec<crate::search::SearchHit>> {
     let vault = default_vault_path()?;
@@ -2333,57 +2319,6 @@ pub async fn search_vault(query: String) -> DanbiResult<crate::search::SearchRes
     let provider = resolve_provider(&cfg)?;
 
     crate::search::search(provider.as_ref(), &model, &query, &index).await
-}
-
-#[tauri::command(async)]
-pub fn capture_context() -> DanbiResult<CaptureContext> {
-    let vault = default_vault_path()?;
-    let cfg = config::load_config(&vault)?
-        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
-    let vault_path = require_vault(&cfg)?;
-    let tree = vault::list_tree(&vault_path)?;
-    let projects: Vec<String> = tree.projects.iter().map(|p| p.name.clone()).collect();
-    let mut domains = std::collections::HashMap::new();
-    for p in &tree.projects {
-        domains.insert(
-            p.name.clone(),
-            p.domains.iter().map(|d| d.name.clone()).collect(),
-        );
-    }
-    Ok(CaptureContext {
-        projects,
-        domains,
-        last_project: cfg.capture.last_project,
-        last_domain: cfg.capture.last_domain,
-    })
-}
-
-#[tauri::command]
-pub fn apply_capture_shortcut(app: AppHandle, accelerator: String) -> DanbiResult<()> {
-    use tauri_plugin_global_shortcut::GlobalShortcutExt;
-    crate::shortcuts::apply_capture_shortcut(&app.global_shortcut(), &accelerator)
-}
-
-#[tauri::command]
-pub fn validate_shortcut(accelerator: String) -> DanbiResult<()> {
-    crate::shortcuts::validate_accelerator(&accelerator)
-}
-
-#[tauri::command]
-pub fn hide_capture(app: AppHandle) -> DanbiResult<()> {
-    if let Some(win) = app.get_webview_window(crate::capture::CAPTURE_LABEL) {
-        let _ = win.hide();
-    }
-    Ok(())
-}
-
-/// Quick Capture popup 의 높이만 동적으로 조정한다. 검색 결과 list /
-/// 스니펫 미리보기를 펼칠 때 사용. 화면 위치는 capture.rs 의 reposition
-/// 함수가 보정한다 (높이가 늘어나도 화면 하단에서 같은 거리 유지).
-#[tauri::command]
-pub fn resize_capture(app: AppHandle, height: f64) -> DanbiResult<()> {
-    crate::capture::resize_capture_window(&app, height)
-        .map_err(|e| DanbiError::Other(format!("capture resize: {e}")))
 }
 
 /// AI 연동 (cfg.embed_provider) 이 켜져있을 때, 자동화 (요약·purpose 작성·
@@ -3284,30 +3219,6 @@ pub fn open_project_in_main(app: AppHandle, project: String) -> DanbiResult<()> 
     let _ = app.emit(
         "danbi:select-project",
         serde_json::json!({ "project": project }),
-    );
-    Ok(())
-}
-
-/// Quick Capture 검색 결과를 클릭했을 때 메인 윈도우로 selection 을
-/// 전달하고 vault 화면을 띄운다. capture popup 은 호출자가 별도로
-/// 닫는다 (UI 분기 분리).
-#[tauri::command]
-pub fn capture_open_hit(
-    app: AppHandle,
-    project: String,
-    domain: String,
-) -> DanbiResult<()> {
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.set_focus();
-        let _ = main.unminimize();
-    }
-    // 메인 윈도우 React 가 listen 해서 selectDomain 호출. payload 형식은
-    // 단비 store 의 selection 과 동일.
-    use tauri::Emitter;
-    let _ = app.emit(
-        "danbi:open-doc",
-        serde_json::json!({ "project": project, "domain": domain }),
     );
     Ok(())
 }

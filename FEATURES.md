@@ -59,22 +59,9 @@
 
 각 기능은 **구체적 사용자 시나리오 + 구현 방식 + 경쟁 도구 대비 뾰족한 지점**으로 설명합니다.
 
-### 3.1. 🪄 Quick Capture (전역 핫키 + 백그라운드)
+### 3.1. ✍️ 빠른 메모 (홈)
 
-**시나리오**
-> Cursor에서 코딩하다가 "로그인 토큰 만료가 24시간이면 너무 짧은가?" 궁금해짐. `⌃Space` 한 번 → "보니 로그인 토큰 24h vs 7d 고민. JWT + refresh token 고려" 타이핑 후 Enter. 팝업이 **즉시 사라지고** 코딩 계속. 3초 뒤 "단비 · 보니/backend.md" 시스템 알림. 에이전트가 `보니/backend.md`에 알아서 append.
-
-**기술**
-- Tauri global shortcut (기본 `⌃Space`, 설정에서 변경 가능)
-- Enter → UI 즉시 hide + 백그라운드에서 Haiku 라우팅 + Writer 플래닝 + 자동 커밋
-- macOS 트레이바 아이콘 상주 — 앱 창 닫혀도 동작
-- 한 번 사용한 프로젝트는 "sticky chip"으로 기억 → 다음 캡처에 미리 박혀 있음
-- 입력 중 프로젝트명 매칭되면 `Tab`으로 자동 칩 고정
-
-**왜 Alfred/Raycast가 못하는가**
-- Alfred는 런처 + 단순 AI. 내 vault 구조를 모름.
-- Raycast AI는 클립보드만 다룸. 파일을 안 건드림.
-- 단비는 **vault 스키마를 라우터에 주입**해서 "보니 프로젝트의 backend.md"까지 파일 경로 단위로 판단.
+v0.8.9 에서 전역 핫키 팝업(⌃Space Quick Capture)은 제거했습니다. 대신 홈("오늘") 맨 위 입력창에서 바로 적습니다(⌘J 로 포커스). 프로젝트 칩은 마지막에 쓴 프로젝트, 도메인은 daily 가 기본이고, Enter 하면 LLM 없이 그대로 append + 자동 커밋됩니다. 기록은 곧바로 활동 피드에 나타납니다.
 
 ### 3.2. 🔍 3단계 검색 (비용 0원 우선)
 
@@ -198,7 +185,7 @@ Andrej Karpathy가 제시한 개인 지식 관리 원칙 4가지를 단비가 �
 | plain markdown, 파일 단위 격리 | `Projects/<proj>/<domain>.md` 강제 |
 | 주제 중심 폴더 | 프로젝트 × 도메인 스키마 |
 | LLM이 파일 통째로 읽게 | 라우팅/플래닝 시 `current_document` 전체 전달 |
-| 즉시 적기 (outsource memory) | **Quick Capture** |
+| 즉시 적기 (outsource memory) | **홈 빠른 메모** |
 | 쓰기를 통한 사고 (compound over time) | **Compound intent** |
 | "어디 적었더라?" 검색 | **3단 검색** |
 | git으로 버전 관리 | **vault = git repo, 자동 커밋** |
@@ -217,7 +204,6 @@ Andrej Karpathy가 제시한 개인 지식 관리 원칙 4가지를 단비가 �
 |---|---|---|---|
 | 채팅 라우팅 | Haiku 4.5 | 매 메시지 | ~$0.001 |
 | 채팅 플래닝 | Sonnet 4.6 | 매 메시지 | ~$0.01 |
-| Quick Capture | Haiku + Sonnet | 매 캡처 | ~$0.011 |
 | 검색 Tier 1·2 | — | 매 키 입력 | **$0** |
 | 검색 Tier 3 (AI 재정렬) | Haiku | 버튼 누를 때만 | ~$0.002 |
 | **Compound** | Sonnet | 버튼 누를 때만 | ~$0.03 ~ $0.15 |

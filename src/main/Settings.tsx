@@ -5,7 +5,6 @@ import {
   FolderOpen,
   HardDrive,
   Info,
-  Keyboard,
   Loader2,
   Moon,
   Palette,
@@ -32,7 +31,6 @@ import appIconUrl from "@/assets/danbi-app-icon.png";
 
 type Section =
   | "appearance"
-  | "shortcuts"
   | "vault"
   | "editor"
   | "mcp"
@@ -43,7 +41,6 @@ type Section =
 const SECTIONS_ALL: { id: Section; label: string; icon: typeof Moon }[] = [
   { id: "appearance", label: "외관", icon: Palette },
   { id: "vector", label: "AI 연동", icon: Sparkles },
-  { id: "shortcuts", label: "단축키", icon: Keyboard },
   { id: "vault", label: "Vault", icon: FolderOpen },
   { id: "editor", label: "편집", icon: Pencil },
   { id: "mcp", label: "MCP", icon: Plug },
@@ -155,7 +152,6 @@ export function Settings({
           </header>
           <div className="flex-1 min-h-0 overflow-auto px-7 py-6">
             {section === "appearance" && <AppearancePanel cfg={cfg} />}
-            {section === "shortcuts" && <ShortcutsPanel cfg={cfg} />}
             {section === "vault" && <VaultPanel cfg={cfg} />}
             {section === "editor" && <EditorPanel cfg={cfg} />}
             {section === "mcp" && <McpPanel />}
@@ -484,301 +480,6 @@ function EditorPanel({ cfg }: { cfg: DanbiConfig }) {
       </Row>
     </>
   );
-}
-
-function ShortcutsPanel({ cfg }: { cfg: DanbiConfig }) {
-  const current = cfg.shortcuts.quick_capture;
-  const isOn = current.trim() !== "";
-  const [draft, setDraft] = useState<string>(current);
-  const [recording, setRecording] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    setDraft(current);
-  }, [current]);
-
-  useEffect(() => {
-    if (!recording) return;
-    function onKey(e: KeyboardEvent) {
-      e.preventDefault();
-      e.stopPropagation();
-      const mods: string[] = [];
-      if (e.metaKey) mods.push("Command");
-      if (e.ctrlKey) mods.push("Control");
-      if (e.altKey) mods.push("Alt");
-      if (e.shiftKey) mods.push("Shift");
-
-      const keyName = keyFromEvent(e);
-      if (!keyName) return;
-      const accelerator = [...mods, keyName].join("+");
-      setDraft(accelerator);
-      setRecording(false);
-      setErr(null);
-    }
-    window.addEventListener("keydown", onKey, { capture: true });
-    return () =>
-      window.removeEventListener("keydown", onKey, {
-        capture: true,
-      } as EventListenerOptions);
-  }, [recording]);
-
-  const changed = draft !== current;
-
-  // 적용 + 저장. 빈 문자열은 비활성으로 해석돼 keybinding 만 해제.
-  async function apply(next: string) {
-    setSaving(true);
-    setErr(null);
-    try {
-      if (next.trim()) await ipc.validateShortcut(next);
-      await ipc.applyCaptureShortcut(next);
-      await saveCfg(
-        patchCfg(cfg, {
-          shortcuts: { ...cfg.shortcuts, quick_capture: next },
-        }),
-      );
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <>
-      <SectionTitle
-        title="단축키"
-        hint="Quick Capture 글로벌 단축키. 처음 설치 시 시스템 단축키 충돌 방지를 위해 OFF 입니다."
-      />
-
-      {/* 상단 큰 ON/OFF 카드 — 한 번 누르면 바로 적용된다.
-          OFF 일 때는 이 카드 하나만 보이고, ON 으로 켜야 키 녹화 UI 가
-          나타난다. UI 가 두 단으로 갈라지는 게 가장 명확. */}
-      <div className="mb-5 flex items-center justify-between gap-4 rounded-lg border border-hairline bg-surface-card p-4">
-        <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-2 text-[14px] font-medium text-on-dark">
-            <Keyboard size={14} className="text-accent-blue" />
-            Quick Capture 단축키
-          </div>
-          <div className="text-caption-sm leading-[1.5] text-mute">
-            {isOn
-              ? "어느 앱에서든 아래 조합을 누르면 단비 팝업이 뜹니다."
-              : "비활성 상태입니다. 켜면 글로벌 키 조합을 등록할 수 있어요."}
-          </div>
-        </div>
-        <button
-          type="button"
-          disabled={saving}
-          onClick={() => {
-            // ON → OFF: 즉시 비활성. 저장된 조합은 잊는다.
-            // OFF → ON: 일단 Control+Space 로 켠 뒤, 사용자가 녹화로 변경.
-            apply(isOn ? "" : "Control+Space");
-          }}
-          aria-pressed={isOn}
-          className={cn(
-            "relative inline-flex h-9 w-[88px] shrink-0 items-center rounded-full border px-1 transition-colors",
-            isOn
-              ? "border-accent-blue bg-accent-blue"
-              : "border-hairline bg-surface-elevated",
-            saving && "opacity-60",
-          )}
-        >
-          <span
-            className={cn(
-              "inline-block h-7 w-7 rounded-full bg-white shadow-sm transition-transform",
-              isOn ? "translate-x-[52px]" : "translate-x-0",
-            )}
-          />
-          <span
-            className={cn(
-              "absolute text-[12px] font-medium",
-              isOn ? "left-3 text-on-primary" : "right-3 text-stone",
-            )}
-          >
-            {isOn ? "ON" : "OFF"}
-          </span>
-        </button>
-      </div>
-
-      {isOn && (
-        <>
-          <Row
-            label="키 조합"
-            hint="녹화 버튼을 누른 뒤 원하는 키 조합을 누르세요. 저장 버튼으로 적용됩니다."
-          >
-            <div className="flex items-center gap-2">
-              <div
-                className={cn(
-                  "inline-flex h-8 min-w-[140px] items-center justify-center rounded-md border px-3 font-mono text-[13px]",
-                  recording
-                    ? "border-accent-blue bg-accent-blue-soft text-accent-blue"
-                    : "border-hairline bg-surface-elevated text-ink",
-                )}
-              >
-                {recording
-                  ? "키 조합을 눌러주세요…"
-                  : prettyAccelerator(draft || current)}
-              </div>
-              <button
-                onClick={() => setRecording(true)}
-                disabled={recording}
-                className="inline-flex h-8 items-center gap-1 rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
-              >
-                <Keyboard size={12} /> 녹화
-              </button>
-              <button
-                disabled={!changed || recording || saving}
-                onClick={() => apply(draft)}
-                className={cn(
-                  "inline-flex h-8 items-center rounded-md px-3 text-[12px] font-medium transition-colors",
-                  changed && !recording && !saving
-                    ? "bg-primary text-on-primary hover:bg-primary-pressed"
-                    : "bg-surface-elevated text-ash",
-                )}
-              >
-                {saving ? "저장 중…" : "저장"}
-              </button>
-              {changed && !recording && (
-                <button
-                  onClick={() => {
-                    setDraft(current);
-                    setErr(null);
-                  }}
-                  className="inline-flex h-8 items-center rounded-md px-2 text-[12px] text-stone hover:text-on-dark"
-                >
-                  취소
-                </button>
-              )}
-            </div>
-          </Row>
-
-          <Row
-            label="빠른 초기화"
-            hint="자주 쓰는 조합으로 입력란을 채워줍니다. 저장 버튼을 눌러야 적용됩니다."
-          >
-            <button
-              onClick={() => setDraft("Control+Space")}
-              className="inline-flex h-8 items-center rounded-md border border-hairline bg-surface-elevated px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
-            >
-              Control+Space 사용
-            </button>
-          </Row>
-
-          {err && (
-            <div className="mt-3 rounded-md border border-hairline bg-surface-elevated p-2 font-mono text-[12px] text-accent-red">
-              {err}
-            </div>
-          )}
-
-          <div className="mt-4 rounded-md border border-hairline bg-surface-elevated p-3 text-caption-sm leading-[1.6] text-mute">
-            <div className="mb-1 text-body">규칙</div>
-            <ul className="list-disc space-y-0.5 pl-4">
-              <li>
-                수식어(Modifier) 한 개 이상 + 일반 키 한 개 — 예:{" "}
-                <code className="text-on-dark">Control+Space</code>
-              </li>
-              <li>
-                다른 앱이 선점한 조합은 등록되지 않아요. 에러가 나면 다른
-                조합으로 시도하세요.
-              </li>
-              <li>
-                macOS는 <code>Command</code>, 다른 OS는 <code>Control</code> 가
-                주 수식어로 쓰여요.
-              </li>
-            </ul>
-          </div>
-        </>
-      )}
-    </>
-  );
-}
-
-function prettyAccelerator(s: string): string {
-  return s
-    .split("+")
-    .map((p) => {
-      const t = p.trim();
-      const lower = t.toLowerCase();
-      if (lower === "command" || lower === "cmd" || lower === "super" || lower === "meta")
-        return "⌘";
-      if (lower === "control" || lower === "ctrl") return "⌃";
-      if (lower === "shift") return "⇧";
-      if (lower === "alt" || lower === "option" || lower === "opt") return "⌥";
-      if (lower === "space" || lower === "spacebar") return "Space";
-      return t.length === 1 ? t.toUpperCase() : t;
-    })
-    .join(" ");
-}
-
-function keyFromEvent(e: KeyboardEvent): string | null {
-  // Ignore pure modifier presses.
-  if (
-    e.key === "Meta" ||
-    e.key === "Control" ||
-    e.key === "Alt" ||
-    e.key === "Shift"
-  ) {
-    return null;
-  }
-  // Use `code` for stable physical keys where possible.
-  const code = e.code;
-  if (!code) return mapKey(e.key);
-  // Normalize "KeyA" → "A", "Digit1" → "1", others pass through.
-  if (code.startsWith("Key")) return code.slice(3);
-  if (code.startsWith("Digit")) return code.slice(5);
-  switch (code) {
-    case "Space":
-      return "Space";
-    case "Enter":
-      return "Enter";
-    case "Escape":
-      return "Escape";
-    case "Tab":
-      return "Tab";
-    case "Backspace":
-      return "Backspace";
-    case "Delete":
-      return "Delete";
-    case "ArrowUp":
-      return "Up";
-    case "ArrowDown":
-      return "Down";
-    case "ArrowLeft":
-      return "Left";
-    case "ArrowRight":
-      return "Right";
-    case "Comma":
-      return ",";
-    case "Period":
-      return ".";
-    case "Slash":
-      return "/";
-    case "Semicolon":
-      return ";";
-    case "Quote":
-      return "'";
-    case "BracketLeft":
-      return "[";
-    case "BracketRight":
-      return "]";
-    case "Backslash":
-      return "\\";
-    case "Backquote":
-      return "`";
-    case "Minus":
-      return "-";
-    case "Equal":
-      return "=";
-    default:
-      if (code.startsWith("F") && /^F\d+$/.test(code)) return code;
-      return mapKey(e.key);
-  }
-}
-
-function mapKey(k: string): string | null {
-  if (!k || k.length === 0) return null;
-  if (k === " ") return "Space";
-  return k.length === 1 ? k.toUpperCase() : k;
 }
 
 function McpPanel() {

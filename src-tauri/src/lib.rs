@@ -2,7 +2,6 @@ mod agent_connect;
 mod aws_profiles;
 mod backup;
 mod bedrock;
-mod capture;
 mod claude_code_usage;
 mod commands;
 mod compound;
@@ -37,7 +36,6 @@ mod routing;
 mod search;
 mod secrets;
 mod session_hooks;
-mod shortcuts;
 mod skill;
 mod pricing;
 mod templates;
@@ -51,28 +49,13 @@ mod watcher;
 #[cfg(test)]
 mod perf_bench;
 
-use capture::toggle_capture_window;
 use popover::{hide_popover_window, toggle_popover_window};
-
-fn default_capture_accelerator() -> std::io::Result<String> {
-    let vault = config::default_vault_path()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    let loaded = config::load_config(&vault)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
-    // 사용자가 설정한 값을 그대로. 빈 문자열이면 단축키 비활성 의도이므로
-    // 그대로 전달 → 호출부에서 register 스킵. fresh install (config 없음)
-    // 도 비활성으로 시작.
-    Ok(loaded
-        .map(|c| c.shortcuts.quick_capture)
-        .unwrap_or_default())
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
     use tauri::{Emitter, Manager, WindowEvent};
-    use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -85,17 +68,6 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        if let Err(e) = toggle_capture_window(app) {
-                            eprintln!("capture toggle failed: {e}");
-                        }
-                    }
-                })
-                .build(),
-        )
         .setup(|app| {
             let handle = app.handle().clone();
 
@@ -254,32 +226,11 @@ pub fn run() {
                 });
             }
 
-            // --- Global shortcut registration ---
-            // 빈 문자열 = 사용자가 의도적으로 비활성화. fresh install 도
-            // 같은 경로 (config 가 없으면 default 가 빈 문자열). 명시적으로
-            // 등록한 키만 register 시도.
-            let accelerator = default_capture_accelerator().unwrap_or_default();
-            if !accelerator.trim().is_empty() {
-                if let Err(e) = shortcuts::apply_capture_shortcut(
-                    &handle.global_shortcut(),
-                    &accelerator,
-                ) {
-                    eprintln!("register shortcut '{accelerator}' failed: {e}");
-                }
-            }
-
             // --- Menu-bar tray ---
             let open_item =
                 MenuItem::with_id(&handle, "open", "단비 열기", true, None::<&str>)?;
             let popover_item =
                 MenuItem::with_id(&handle, "popover", "팝오버 열기", true, None::<&str>)?;
-            let capture_item = MenuItem::with_id(
-                &handle,
-                "capture",
-                "Quick Capture",
-                true,
-                None::<&str>,
-            )?;
             let tray_settings_item = MenuItem::with_id(
                 &handle,
                 "tray:settings",
@@ -296,7 +247,6 @@ pub fn run() {
                 &[
                     &open_item,
                     &popover_item,
-                    &capture_item,
                     &sep_settings,
                     &tray_settings_item,
                     &sep,
@@ -317,7 +267,7 @@ pub fn run() {
                 // render as-is. The white droplet reads fine on the
                 // (always dark) macOS menu bar.
                 .icon_as_template(false)
-                .tooltip("단비 — Quick Capture")
+                .tooltip("단비")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -334,11 +284,6 @@ pub fn run() {
                             eprintln!("tray popover toggle failed: {e}");
                         }
                         tray_badge::clear_and_sync(app);
-                    }
-                    "capture" => {
-                        if let Err(e) = toggle_capture_window(app) {
-                            eprintln!("tray capture toggle failed: {e}");
-                        }
                     }
                     "tray:settings" => {
                         // Surface the main window first, then emit the
@@ -608,10 +553,6 @@ pub fn run() {
             commands::mcp_rotate_token,
             commands::mcp_project_endpoint,
             commands::quick_capture,
-            commands::toggle_capture,
-            commands::hide_capture,
-            commands::resize_capture,
-            commands::capture_open_hit,
             commands::summarize_daily,
             commands::export_doc_html,
             commands::open_html_preview,
@@ -626,9 +567,6 @@ pub fn run() {
             commands::tray_badge_count,
             commands::tray_badge_reset,
             commands::tray_badge_set_enabled,
-            commands::apply_capture_shortcut,
-            commands::validate_shortcut,
-            commands::capture_context,
             commands::search_vault,
             commands::search_local,
             commands::search_full,

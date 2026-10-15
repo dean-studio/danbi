@@ -42,7 +42,6 @@ const GROUPS: { title: string; rows: { keys: string[]; label: string }[] }[] = [
     rows: [
       { keys: ["⌘", ","], label: "설정" },
       { keys: ["⌘", "/"], label: "이 표" },
-      { keys: ["⌃", "Space"], label: "Quick Capture (전역)" },
     ],
   },
 ];

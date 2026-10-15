@@ -220,13 +220,6 @@ export type McpStatus = {
   projects: McpProjectEndpoint[];
 };
 
-export type CaptureContext = {
-  projects: string[];
-  domains: Record<string, string[]>;
-  last_project: string | null;
-  last_domain: string | null;
-};
-
 export type SearchHit = {
   project: string;
   domain: string;
@@ -1245,12 +1238,6 @@ export const ipc = {
       project: project ?? null,
       domain: domain ?? null,
     }),
-  toggleCapture: () => invoke<void>("toggle_capture"),
-  hideCapture: () => invoke<void>("hide_capture"),
-  resizeCapture: (height: number) =>
-    invoke<void>("resize_capture", { height }),
-  captureOpenHit: (project: string, domain: string) =>
-    invoke<void>("capture_open_hit", { project, domain }),
   summarizeDaily: (project: string, domain: string) =>
     invoke<{
       summary_md: string;
@@ -1279,11 +1266,6 @@ export const ipc = {
       "compose_purpose_schema",
       { project, kind },
     ),
-  applyCaptureShortcut: (accelerator: string) =>
-    invoke<void>("apply_capture_shortcut", { accelerator }),
-  validateShortcut: (accelerator: string) =>
-    invoke<void>("validate_shortcut", { accelerator }),
-  captureContext: () => invoke<CaptureContext>("capture_context"),
   searchVault: (query: string) =>
     invoke<SearchResponse>("search_vault", { query }),
   searchLocal: (query: string, limit?: number) =>

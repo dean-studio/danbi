@@ -175,15 +175,6 @@ body {
   letter-spacing: 0.1px;
 }
 
-/* Quick Capture runs in its own transparent window — let the OS show through. */
-html[data-window="capture"],
-html[data-window="capture"] body,
-html[data-window="capture"] #root {
-  background: transparent;
-  overflow: hidden;
-}
-
-
 /* BlockNote — Raycast-tinted dark theme overrides */
 .danbi-editor {
   height: 100%;

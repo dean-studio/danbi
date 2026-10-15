@@ -176,7 +176,7 @@ function ScopeSelect({
   );
 }
 
-/** 빠른 메모 — ⌃Space 팝업과 같은 백엔드(quick_capture, LLM 없음)의
+/** 빠른 메모 — 백엔드 quick_capture(LLM 없음)의
  *  메인 윈도우 입구. 프로젝트 칩 기본 = 마지막 사용 프로젝트, 도메인 칩
  *  기본 = daily(오늘 노트, 백엔드가 자동 라우팅). ↵ 전송, ⇧↵ 줄바꿈,
  *  ⌘J 포커스. 흰 CTA 는 이 [기록] 하나. */

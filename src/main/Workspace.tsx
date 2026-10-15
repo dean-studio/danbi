@@ -75,7 +75,7 @@ export function Workspace() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitial, setSettingsInitial] = useState<
-    "appearance" | "shortcuts" | "vault" | "editor" | "mcp" | "vector" | "backup" | "about" | undefined
+    "appearance" | "vault" | "editor" | "mcp" | "vector" | "backup" | "about" | undefined
   >(undefined);
   // ⌘K 통합 팔레트 — SearchPalette + ProjectSwitcher 를 흡수. ⌘P 는
   // 같은 팔레트를 "@" 프로젝트 모드로 연다.
@@ -163,25 +163,11 @@ export function Workspace() {
   useEffect(() => {
     let unlistenAbout: UnlistenFn | null = null;
     let unlistenSettings: UnlistenFn | null = null;
-    let unlistenOpenDoc: UnlistenFn | null = null;
     let unlistenSelectProject: UnlistenFn | null = null;
     (async () => {
       unlistenAbout = await listen("about:show", () => setAboutOpen(true));
       unlistenSettings = await listen("settings:show", () =>
         setSettingsOpen(true),
-      );
-      // Quick Capture popup 의 검색 결과 클릭이 emit 하는 이벤트.
-      // payload = { project, domain }. selection 만 바꾸고 메인 앱은
-      // 알아서 그 도메인 화면으로 라우팅한다.
-      unlistenOpenDoc = await listen<{ project: string; domain: string }>(
-        "danbi:open-doc",
-        (e) => {
-          const p = e.payload?.project;
-          const d = e.payload?.domain;
-          if (typeof p === "string" && typeof d === "string") {
-            useApp.getState().selectDomain(p, d);
-          }
-        },
       );
       // Popover 의 프로젝트 퀵셔트 클릭이 emit. payload = { project }.
       unlistenSelectProject = await listen<{ project: string }>(
@@ -197,7 +183,6 @@ export function Workspace() {
     return () => {
       if (unlistenAbout) unlistenAbout();
       if (unlistenSettings) unlistenSettings();
-      if (unlistenOpenDoc) unlistenOpenDoc();
       if (unlistenSelectProject) unlistenSelectProject();
     };
   }, []);
@@ -1473,7 +1458,7 @@ export function NoLlmBanner({
           <span className="inline-flex items-center gap-1.5 text-accent-red">
             <X size={11} className="shrink-0" strokeWidth={2.5} />
             <span className="text-on-dark-mute">
-              비활성: Quick Capture · Compound · Ghost 스캔
+              비활성: Compound · Ghost 스캔
             </span>
           </span>
         </div>

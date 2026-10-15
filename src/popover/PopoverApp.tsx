@@ -16,7 +16,7 @@ import { projectIconOf } from "@/components/ProjectIconPicker";
 // 구성: (1) 컴팩트 "단비 열기" CTA, (2) Claude Code 사용량 mini,
 // (3) 최근 활동 프로젝트 top 4 퀵셔트, (4) MCP 상태 + 종료 footer.
 // 빠른 메모 입력은 v0.7.0 에서 제거 — popover 는 글랜스 + 본체 진입점에
-// 집중. 본격 입력은 본체나 Quick Capture 단축키로.
+// 집중. 본격 입력은 본체 홈의 빠른 메모로.
 export function PopoverApp() {
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [activity, setActivity] = useState<ActivityOverview | null>(null);

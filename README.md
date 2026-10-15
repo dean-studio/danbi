@@ -285,7 +285,7 @@ LLM 의 컨텍스트 윈도우는 새 세션마다 비워집니다. 단비 vault
 - BM25 + 한국어 n-gram 키워드 검색
 - 그래프 뷰 (Louvain community + ghost suggestions)
 - Wiki-link 클릭 (`[[notes/foo.md]]` ↔ 다른 도메인)
-- Quick Capture (⌃Space) — 글로벌 단축키로 어디서든 메모
+- 홈 빠른 메모 (⌘J) — 열어 둔 단비에서 바로 daily 에 기록
 - 프로젝트별 MCP endpoint + SKILL 파일 자동 생성
 - Git 자동 커밋 (저장 = 커밋)
 - 휴지통 (30일 자동 만료)
@@ -324,7 +324,7 @@ LLM 자동화는 모두 사용자 명시 트리거만 — 백그라운드 자동
 
 | 단축키 | 동작 |
 |---|---|
-| ⌃Space | Quick Capture |
+| ⌘J | 홈 빠른 메모 |
 | ⌘K | 검색 |
 | ⌘G | 그래프 |
 | ⌘, | 설정 |
