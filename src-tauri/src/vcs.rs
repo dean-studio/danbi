@@ -7,10 +7,22 @@ const DEFAULT_AUTHOR_NAME: &str = "danbi";
 const DEFAULT_AUTHOR_EMAIL: &str = "danbi@local";
 
 /// Paths that are working state, not knowledge: the vector index, caches,
-/// ghost/goal stores under `.danbi/` and the app config that saves itself
-/// on every click. Keeping them out of snapshots halves the commit count
-/// and stops multi-MB index blobs piling up in `.git`.
-const IGNORED_PATTERNS: [&str; 2] = [".danbi/", "/config.json"];
+/// the crash-recovery queue and the app config that saves itself on every
+/// click. Keeping them out of snapshots halves the commit count and stops
+/// multi-MB index blobs piling up in `.git`. Everything else under
+/// `.danbi/` — goals, reviews, ghost decisions, exports, trash — is the
+/// user's data and stays versioned (and in undo).
+const IGNORED_PATTERNS: [&str; 5] = [
+    "/.danbi/vectors.json",
+    "/.danbi/cache/",
+    "/.danbi/queue/",
+    "/.danbi/session-end-seen.json",
+    "/config.json",
+];
+
+/// Patterns earlier builds wrote that are now too broad. `ensure_gitignore`
+/// drops them so the files they hid are tracked again.
+const RETIRED_PATTERNS: [&str; 1] = [".danbi/"];
 
 /// One process-wide lock for every path that mutates the vault — MCP write
 /// tools, the REST PUT, the popover quick log, undo. A file-level lock is
@@ -135,12 +147,22 @@ fn ensure_gitignore(vault: &Path) -> DanbiResult<()> {
     } else {
         "# managed by danbi\n.DS_Store\n*.tmp\n".to_string()
     };
+    let retired = text
+        .lines()
+        .any(|l| RETIRED_PATTERNS.contains(&l.trim()));
+    if retired {
+        text = text
+            .lines()
+            .filter(|l| !RETIRED_PATTERNS.contains(&l.trim()))
+            .map(|l| format!("{l}\n"))
+            .collect();
+    }
     let missing: Vec<&str> = IGNORED_PATTERNS
         .iter()
         .copied()
         .filter(|p| !text.lines().any(|l| l.trim() == *p))
         .collect();
-    if missing.is_empty() && gitignore_path.exists() {
+    if missing.is_empty() && !retired && gitignore_path.exists() {
         return Ok(());
     }
     if !text.ends_with('\n') && !text.is_empty() {
@@ -181,14 +203,16 @@ fn untrack_ignored(repo: &Repository) -> DanbiResult<()> {
     index
         .write()
         .map_err(|e| DanbiError::Other(format!("git index write: {e}")))?;
-    commit_index(repo, &mut index, "danbi: 스냅샷 범위 정리 · .danbi/ · config.json 추적 해제")?;
+    commit_index(repo, &mut index, "danbi: 스냅샷 범위 정리 · 작업 상태 파일 추적 해제")?;
     Ok(())
 }
 
 fn is_ignored_index_path(path: &[u8]) -> bool {
     path == b"config.json"
-        || path.starts_with(b".danbi/")
-        || path.windows(8).any(|w| w == b"/.danbi/")
+        || path == b".danbi/vectors.json"
+        || path == b".danbi/session-end-seen.json"
+        || path.starts_with(b".danbi/cache/")
+        || path.starts_with(b".danbi/queue/")
 }
 
 fn signature<'a>() -> DanbiResult<Signature<'a>> {
@@ -622,10 +646,73 @@ pub fn undo_last(vault: &Path) -> DanbiResult<Option<String>> {
             Err(_) => return Ok(None),
         }
     }
-    let Ok(parent) = target.parent(0) else {
-        // Initial commit — nothing before it to go back to.
-        return Ok(None);
-    };
+
+    // Walk back to the first commit that changed a note. Pre-edit
+    // snapshots, the untrack migration and commits that only touched
+    // vault-level files (log.md, history.jsonl, .gitignore) are not steps
+    // the user took — reverting them would roll back the timeline or
+    // re-track ignored state instead of undoing the last edit.
+    for _ in 0..UNDO_SKIP_LIMIT {
+        let Ok(parent) = target.parent(0) else {
+            // Initial commit — nothing before it to go back to.
+            return Ok(None);
+        };
+        let summary = target.summary().unwrap_or("").to_string();
+        let skippable = is_pre_snapshot(&summary)
+            || undo_target_of(&summary).is_some()
+            || matches!(feed_op(&summary, summary_head(&summary)).as_str(), "migration" | "init");
+        let paths = if skippable {
+            Vec::new()
+        } else {
+            undoable_paths(&repo, &parent, &target)?
+        };
+        if paths.is_empty() {
+            target = parent;
+            continue;
+        }
+
+        let parent_tree = parent
+            .tree()
+            .map_err(|e| DanbiError::Other(format!("git tree: {e}")))?;
+        for path in &paths {
+            let abs = vault.join(path);
+            match parent_tree.get_path(path) {
+                Ok(entry) => {
+                    let blob = repo
+                        .find_blob(entry.id())
+                        .map_err(|e| DanbiError::Other(format!("git blob: {e}")))?;
+                    if let Some(dir) = abs.parent() {
+                        std::fs::create_dir_all(dir)?;
+                    }
+                    std::fs::write(&abs, blob.content())?;
+                }
+                Err(_) => {
+                    // Added by the target commit → remove it again.
+                    if abs.exists() {
+                        std::fs::remove_file(&abs)?;
+                    }
+                }
+            }
+        }
+        let msg = with_client(
+            &format!("{UNDO_PREFIX}{} · {}", target.id(), summary),
+            CLIENT_HUMAN,
+        );
+        return Ok(commit_all(&repo, &msg)?.map(|o| o.to_string()));
+    }
+    Ok(None)
+}
+
+/// How many non-note commits undo walks past before giving up.
+const UNDO_SKIP_LIMIT: usize = 200;
+
+/// Note paths (`Projects/…`, not ignored) that `target` changed relative
+/// to `parent` — the only files undo ever rewrites.
+fn undoable_paths(
+    repo: &Repository,
+    parent: &Commit,
+    target: &Commit,
+) -> DanbiResult<Vec<std::path::PathBuf>> {
     let target_tree = target
         .tree()
         .map_err(|e| DanbiError::Other(format!("git tree: {e}")))?;
@@ -635,45 +722,24 @@ pub fn undo_last(vault: &Path) -> DanbiResult<Option<String>> {
     let diff = repo
         .diff_tree_to_tree(Some(&parent_tree), Some(&target_tree), None)
         .map_err(|e| DanbiError::Other(format!("git diff: {e}")))?;
-
-    let mut restored = 0usize;
+    let mut out = Vec::new();
     for delta in diff.deltas() {
         let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) else {
             continue;
         };
-        // Paths that are ignored now (config.json, .danbi/) may still sit in
-        // old commits; restoring them would resurrect stale state.
-        if repo.is_path_ignored(path).unwrap_or(false) {
+        if !path.starts_with("Projects") {
             continue;
         }
-        let abs = vault.join(path);
-        match parent_tree.get_path(path) {
-            Ok(entry) => {
-                let blob = repo
-                    .find_blob(entry.id())
-                    .map_err(|e| DanbiError::Other(format!("git blob: {e}")))?;
-                if let Some(dir) = abs.parent() {
-                    std::fs::create_dir_all(dir)?;
-                }
-                std::fs::write(&abs, blob.content())?;
-            }
-            Err(_) => {
-                // Added by the target commit → remove it again.
-                if abs.exists() {
-                    std::fs::remove_file(&abs)?;
-                }
-            }
+        // Ignored paths may still sit in old commits; restoring them would
+        // resurrect stale state.
+        if is_ignored_index_path(path.to_string_lossy().as_bytes())
+            || repo.is_path_ignored(path).unwrap_or(false)
+        {
+            continue;
         }
-        restored += 1;
+        out.push(path.to_path_buf());
     }
-    if restored == 0 {
-        return Ok(None);
-    }
-    let msg = with_client(
-        &format!("{UNDO_PREFIX}{} · {}", target.id(), target.summary().unwrap_or("")),
-        CLIENT_HUMAN,
-    );
-    Ok(commit_all(&repo, &msg)?.map(|o| o.to_string()))
+    Ok(out)
 }
 
 // ---------- Activity feed ----------------------------------------------------
@@ -1063,7 +1129,7 @@ mod tests {
         ensure_repo(&vault).unwrap();
         let text = read(&vault, ".gitignore").unwrap();
         assert!(text.contains("scratch/"));
-        assert!(text.lines().any(|l| l == ".danbi/"));
+        assert!(text.lines().any(|l| l == "/.danbi/vectors.json"));
         assert!(text.lines().any(|l| l == "/config.json"));
         // Second run leaves the file alone.
         let before = std::fs::metadata(vault.join(".gitignore")).unwrap().modified().unwrap();
@@ -1097,7 +1163,11 @@ mod tests {
         ensure_repo(&vault).unwrap();
         let repo = Repository::open(&vault).unwrap();
         let now = tracked(&repo);
-        assert_eq!(now, vec![".gitignore", "Projects/p/a.md"]);
+        // Project-level .danbi/ (ghost decisions, goals) is user data and stays.
+        assert_eq!(
+            now,
+            vec![".gitignore", "Projects/p/.danbi/ghost-links.json", "Projects/p/a.md"]
+        );
         let head = repo.head().unwrap().peel_to_commit().unwrap();
         assert!(head.summary().unwrap().contains("추적 해제"));
         // Files stay on disk, history is untouched (old commit still parent).
@@ -1112,6 +1182,60 @@ mod tests {
         ensure_repo(&vault).unwrap();
         assert_eq!(snapshot(&vault, "danbi: noop").unwrap(), None);
         assert_eq!(recent_commits(&vault, 50).unwrap().len(), n_before);
+    }
+
+    #[test]
+    fn retired_broad_danbi_pattern_is_dropped_and_user_data_tracked_again() {
+        let vault = temp_vault("retire");
+        let repo = Repository::init(&vault).unwrap();
+        // What the first 0.8.8 build wrote.
+        write(&vault, ".gitignore", "# managed by danbi\n.DS_Store\n*.tmp\n.danbi/\n/config.json\n");
+        write(&vault, "Projects/p/a.md", "# a\n");
+        commit_all(&repo, "old").unwrap();
+        write(&vault, "Projects/p/.danbi/goals.json", "[]");
+        write(&vault, ".danbi/exports/x.md", "export");
+        write(&vault, ".danbi/vectors.json", "{}");
+        ensure_repo(&vault).unwrap();
+        let gi = read(&vault, ".gitignore").unwrap();
+        assert!(!gi.lines().any(|l| l.trim() == ".danbi/"), "{gi}");
+        assert!(gi.lines().any(|l| l.trim() == "/.danbi/vectors.json"));
+        snapshot(&vault, "danbi: next").unwrap();
+        let repo = Repository::open(&vault).unwrap();
+        let idx = repo.index().unwrap();
+        let tracked: Vec<String> = idx.iter().map(|e| String::from_utf8(e.path).unwrap()).collect();
+        assert!(tracked.contains(&"Projects/p/.danbi/goals.json".to_string()));
+        assert!(tracked.contains(&".danbi/exports/x.md".to_string()));
+        assert!(!tracked.contains(&".danbi/vectors.json".to_string()));
+    }
+
+    #[test]
+    fn undo_walks_past_migration_pre_snapshots_and_vault_files() {
+        let vault = temp_vault("undo-walk");
+        let repo = Repository::init(&vault).unwrap();
+        write(&vault, ".gitignore", "# managed by danbi\n.DS_Store\n*.tmp\n");
+        write(&vault, "config.json", "{\"token\":\"old\"}");
+        write(&vault, "Projects/p/a.md", "a1\n");
+        write(&vault, "log.md", "- e1\n");
+        commit_all(&repo, "danbi: initialize vault").unwrap();
+        write(&vault, "Projects/p/a.md", "a2\n");
+        commit_all(&repo, "danbi: mcp log · p/a.md [claude-code]").unwrap();
+        // UI work appends to log.md after its commit → lands in a (pre).
+        write(&vault, "log.md", "- e1\n- e2\n");
+        commit_all(&repo, "danbi: mcp log · p/a.md (pre)").unwrap();
+        // The untrack migration becomes HEAD on upgrade.
+        ensure_repo(&vault).unwrap();
+        write(&vault, "config.json", "{\"token\":\"new\"}");
+
+        let undo = undo_last(&vault).unwrap().expect("undo commit");
+        assert_eq!(read(&vault, "Projects/p/a.md").unwrap(), "a1\n", "reaches the note edit");
+        assert_eq!(read(&vault, "log.md").unwrap(), "- e1\n- e2\n", "timeline untouched");
+        assert_eq!(read(&vault, "config.json").unwrap(), "{\"token\":\"new\"}", "config untouched");
+        let repo = Repository::open(&vault).unwrap();
+        let tracked: Vec<String> = repo.index().unwrap().iter().map(|e| String::from_utf8(e.path).unwrap()).collect();
+        assert!(!tracked.contains(&"config.json".to_string()), "no re-tracking");
+        assert_eq!(recent_commits(&vault, 1).unwrap()[0].id, undo);
+        // Nothing older is a note edit → undo stops cleanly.
+        assert_eq!(undo_last(&vault).unwrap(), None);
     }
 
     #[test]
