@@ -103,7 +103,12 @@ if [[ "${1:-}" != "--skip-build" ]]; then
     echo "→ re-creating .app.tar.gz from stapled .app + re-signing"
     TARGZ="$BUNDLE/macos/단비.app.tar.gz"
     rm -f "$TARGZ" "$TARGZ.sig"
-    /usr/bin/tar -czf "$TARGZ" -C "$BUNDLE/macos" "단비.app"
+    # macOS tar 는 확장 속성(com.apple.provenance 등)을 `._단비.app` 같은
+    # AppleDouble 항목으로 함께 넣는다. Tauri updater 가 이걸 풀다가
+    # "failed to unpack `._단비.app`" 로 실패한다 (0.8.11·0.8.12 첫 업로드).
+    # 메타데이터 없이 묶고, 아래에서 들어갔는지 검사한다.
+    COPYFILE_DISABLE=1 /usr/bin/tar --no-mac-metadata --no-xattrs \
+      -czf "$TARGZ" -C "$BUNDLE/macos" "단비.app"
     npx tauri signer sign \
       --private-key-path "$KEY_PATH" \
       --password "" \
@@ -132,6 +137,14 @@ if [[ -z "$DMG_SRC" || -z "$TARGZ_SRC" || -z "$SIG_SRC" ]]; then
   echo "  dmg=$DMG_SRC" >&2
   echo "  targz=$TARGZ_SRC" >&2
   echo "  sig=$SIG_SRC" >&2
+  exit 1
+fi
+
+# updater 가 못 푸는 AppleDouble(`._*`) 항목이 섞이면 배포 중단.
+if python3 -I -c 'import sys,tarfile; sys.exit(any(n.rsplit("/",1)[-1].startswith("._") for n in tarfile.open(sys.argv[1]).getnames()))' "$TARGZ_SRC"; then
+  echo "  ✓ no AppleDouble entries in $(basename "$TARGZ_SRC")"
+else
+  echo "✗ $(basename "$TARGZ_SRC") contains AppleDouble (._*) entries — updater would fail to unpack" >&2
   exit 1
 fi
 
