@@ -3,7 +3,9 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { useApp } from "@/state/store";
 
 const LAST_CHECK_KEY = "danbi.lastUpdateCheck";
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// 자동 체크 최소 간격. 예전 24h 는 앱을 껐다 켜도 하루 동안 체크를 건너뛰어
+// 같은 날 나온 핫픽스를 놓쳤다.
+const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 let pendingUpdate: Update | null = null;
 
@@ -13,6 +15,9 @@ let pendingUpdate: Update | null = null;
  *  every relaunch during heavy debugging. Manual checks (Settings →
  *  업데이트 확인) pass force=true. */
 export async function runUpdateCheck(force: boolean): Promise<void> {
+  // 다운로드·설치 중이면 새 체크가 진행 상태를 덮어쓰지 않게.
+  const cur = useApp.getState().updateInfo;
+  if (cur && (cur.status === "downloading" || cur.status === "ready")) return;
   if (!force) {
     const last = Number(localStorage.getItem(LAST_CHECK_KEY));
     if (Number.isFinite(last) && Date.now() - last < CHECK_INTERVAL_MS) {

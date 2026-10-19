@@ -89,14 +89,21 @@ export default function App() {
   useEffect(() => installTheme(themeChoice), [themeChoice]);
 
   // Vault 가 열린 뒤 3초 정도 idle 한 다음 GitHub Releases 에 업데이트
-  // 체크. 첫 paint·tree load 등이 끝난 시점에서 한 번만 — 24h 스로틀은
-  // runUpdateCheck 내부에서 처리하므로 dev 재시작에서도 부담 없음.
+  // 체크. 단비는 창을 닫아도 트레이에 며칠씩 떠 있으므로 실행 시 한 번만
+  // 보면 새 릴리스를 영영 못 본다 — 1시간마다, 그리고 창이 다시 앞에 올
+  // 때도 확인한다. 실제 네트워크 호출 간격은 runUpdateCheck 의 스로틀이
+  // 정한다.
   useEffect(() => {
     if (state !== "ready") return;
-    const t = window.setTimeout(() => {
-      void runUpdateCheck(false);
-    }, 3_000);
-    return () => window.clearTimeout(t);
+    const check = () => void runUpdateCheck(false);
+    const t = window.setTimeout(check, 3_000);
+    const iv = window.setInterval(check, 60 * 60 * 1000);
+    window.addEventListener("focus", check);
+    return () => {
+      window.clearTimeout(t);
+      window.clearInterval(iv);
+      window.removeEventListener("focus", check);
+    };
   }, [state]);
 
   return (
