@@ -1328,6 +1328,9 @@ async fn search_hybrid_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
     // 혼재 경고를 같이 줘야 에이전트가 "키워드 결과만" 임을 알고 재시도를
     // 판단한다.
     let mut out = json!({ "hits": hits, "mode": mode, "semantic": q.semantic });
+    if hits.is_empty() {
+        out["hint"] = json!(EMPTY_SEARCH_HINT);
+    }
     if let Some(note) = q.note {
         out["note"] = json!(note);
     }
@@ -1339,6 +1342,11 @@ async fn search_hybrid_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
         warning: None,
     })
 }
+
+/// 0건일 때 에이전트에게 주는 재검색 안내. 임베딩이 꺼진 vault 는 키워드
+/// 일치에만 기대므로, 뜻이 같은 다른 표현으로 다시 찾게 하면 의미 검색의
+/// 상당 부분을 에이전트가 대신한다.
+const EMPTY_SEARCH_HINT: &str = "결과 0건 — 단비 검색은 문서에 같은 단어가 있어야 잘 잡혀요. 동의어·영문/한글 표기·더 짧은 핵심어로 2~3번 다시 검색해 보세요 (예: '로그인 유지 기간' → 'JWT', 'refresh', '세션 만료').";
 
 /// A tool result plus an optional warning that travels outside the
 /// result body (second MCP content block / top-level REST field) for
@@ -1480,7 +1488,11 @@ async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
         "used_chars": used,
         "docs": docs,
         "linked": linked,
-        "hint": "전체 본문은 danbi_read, 한 문서의 주변 연결은 danbi_related",
+        "hint": if docs.is_empty() {
+            EMPTY_SEARCH_HINT
+        } else {
+            "전체 본문은 danbi_read, 한 문서의 주변 연결은 danbi_related"
+        },
     });
     // Object result → the warning fits inside it.
     if let Some(w) = semantic_arm_warning(&vault_path, q.embedding.is_some()) {
