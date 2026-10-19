@@ -1,8 +1,10 @@
 //! Google Gemini API provider.
 //!
 //! Shape: `POST
-//! https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent?key=<KEY>`
-//! with a `contents` array. The system prompt becomes `systemInstruction`.
+//! https://generativelanguage.googleapis.com/v1beta/models/<model>:generateContent`
+//! with a `contents` array. The key goes in the `x-goog-api-key` header, never
+//! the URL — reqwest errors print the URL, so a key query param would leak into error
+//! strings that reach the UI and MCP responses. The system prompt becomes `systemInstruction`.
 
 use crate::error::{DanbiError, DanbiResult};
 use crate::providers::{ModelInfo, Provider, TestResult};
@@ -11,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const USER_AGENT: &str = "danbi/0.1";
+const API_KEY_HEADER: &str = "x-goog-api-key";
 
 pub struct GoogleProvider {
     pub api_key: String,
@@ -97,9 +100,8 @@ impl Provider for GoogleProvider {
         };
 
         let url = format!(
-            "{BASE_URL}/models/{model}:generateContent?key={key}",
+            "{BASE_URL}/models/{model}:generateContent",
             model = model_id,
-            key = self.api_key
         );
 
         let client = reqwest::Client::builder()
@@ -109,10 +111,11 @@ impl Provider for GoogleProvider {
 
         let resp = client
             .post(&url)
+            .header(API_KEY_HEADER, &self.api_key)
             .json(&body)
             .send()
             .await
-            .map_err(|e| DanbiError::Other(format!("gemini request: {e}")))?;
+            .map_err(|e| DanbiError::Other(format!("gemini request: {}", e.without_url())))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -192,8 +195,7 @@ impl Provider for GoogleProvider {
         };
 
         let url = format!(
-            "{BASE_URL}/{qualified}:batchEmbedContents?key={key}",
-            key = self.api_key
+            "{BASE_URL}/{qualified}:batchEmbedContents",
         );
 
         let client = reqwest::Client::builder()
@@ -210,10 +212,13 @@ impl Provider for GoogleProvider {
         loop {
             let resp = client
                 .post(&url)
+                .header(API_KEY_HEADER, &self.api_key)
                 .json(&body)
                 .send()
                 .await
-                .map_err(|e| DanbiError::Other(format!("gemini embed request: {e}")))?;
+                .map_err(|e| {
+                    DanbiError::Other(format!("gemini embed request: {}", e.without_url()))
+                })?;
 
             let status = resp.status();
             if status.is_success() {
@@ -295,4 +300,16 @@ pub fn catalog() -> Vec<ModelInfo> {
         mk("gemini-2.5-flash", "Gemini 2.5 Flash"),
         mk("gemini-2.5-pro", "Gemini 2.5 Pro"),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    /// 키를 URL 쿼리로 되돌리면 reqwest 오류 문자열(→ UI·MCP 응답)에 키가
+    /// 찍힌다. 헤더 전송을 지키는 회귀 가드.
+    #[test]
+    fn api_key_never_goes_in_the_url() {
+        let src = include_str!("google.rs");
+        let needle = ["?key", "="].concat();
+        assert!(!src.contains(&needle), "Gemini 키는 x-goog-api-key 헤더로만 보낸다");
+    }
 }
