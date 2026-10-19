@@ -2401,26 +2401,33 @@ function UpdatePill() {
   if (!info) return null;
 
   if (info.status === "available") {
+    // 작은 링크("설치 →")는 사이드바 하단에서 묻혀 아무도 안 눌렀다 —
+    // 전폭 흰 CTA(button-primary)로 키운다.
     return (
-      <div className="mb-2 rounded-md border border-accent-blue/40 bg-accent-blue-soft/40 px-2.5 py-2">
-        <div className="flex items-center gap-2">
-          <span className="grid h-4 w-4 shrink-0 place-items-center rounded-full bg-accent-blue text-on-primary">
-            <ArrowUpCircle size={11} />
+      <div className="mb-2 rounded-lg border border-hairline-strong bg-surface-card p-3">
+        <div className="flex items-start gap-2.5">
+          <span className="mt-0.5 grid h-6 w-6 shrink-0 place-items-center rounded-md bg-surface-elevated text-on-dark">
+            <ArrowUpCircle size={14} />
           </span>
-          <span className="flex-1 truncate text-[11px] text-accent-blue">
-            v{info.version} 사용 가능
-          </span>
-          <button
-            type="button"
-            onClick={() => {
-              void applyPendingUpdate();
-            }}
-            className="text-[10px] text-stone hover:text-on-dark"
-          >
-            설치 →
-          </button>
+          <div className="min-w-0 flex-1">
+            <div className="text-[13px] font-semibold text-ink">
+              새 버전 v{info.version}
+            </div>
+            <div className="mt-0.5 text-[11px] text-mute">
+              지금 v{info.currentVersion} · 설치하면 바로 다시 시작돼요
+            </div>
+          </div>
         </div>
-        <div className="mt-1 flex items-center gap-2 pl-6 text-[10px] text-stone">
+        <button
+          type="button"
+          onClick={() => {
+            void applyPendingUpdate();
+          }}
+          className="mt-3 inline-flex h-9 w-full items-center justify-center rounded-md bg-primary text-[13px] font-semibold text-on-primary transition-colors hover:bg-primary-pressed"
+        >
+          지금 업데이트
+        </button>
+        <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-mute">
           <button
             type="button"
             onClick={async () => {
@@ -2435,7 +2442,7 @@ function UpdatePill() {
             }}
             className="hover:text-on-dark"
           >
-            업데이트 로그 ↗
+            변경 사항 ↗
           </button>
           <span aria-hidden>·</span>
           <button
