@@ -995,6 +995,8 @@ export const ipc = {
   storeGoogleApiKey: (apiKey: string) =>
     invoke<string>("store_google_api_key", { apiKey }),
   deleteGoogleApiKey: () => invoke<void>("delete_google_api_key"),
+  /** Last 4 chars of the saved Gemini key, or null if none — never the key. */
+  googleApiKeyHint: () => invoke<string | null>("google_api_key_hint"),
   listGoogleModels: () => invoke<ModelInfo[]>("list_google_models"),
   testGoogle: (apiKey?: string, modelId?: string) =>
     invoke<ProviderTestResult>("test_google", {

@@ -19,6 +19,7 @@ import {
 import { CommandBar } from "@/main/CommandBar";
 import { CommandPalette, type PaletteCommand, type PaletteMode } from "@/main/CommandPalette";
 import { ConnectSheet } from "@/main/ConnectSheet";
+import { McpSetupPrompt } from "@/main/McpSetupPrompt";
 import { DocView } from "@/main/DocView";
 import { GraphView } from "@/main/GraphView";
 import { FOCUS_MEMO_EVENT, Home } from "@/main/Home";
@@ -1258,6 +1259,8 @@ export function Workspace() {
         onClose={closeConnectSheet}
         onOpenDoc={(p, d) => useApp.getState().selectDomain(p, d)}
       />
+
+      <McpSetupPrompt />
 
       <ShortcutsHelp open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 

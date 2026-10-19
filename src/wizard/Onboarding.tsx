@@ -10,7 +10,7 @@ import {
   type DanbiConfig,
   type VaultTemplate,
 } from "@/lib/ipc";
-import { cn } from "@/lib/utils";
+import { cn, openExternal } from "@/lib/utils";
 import { Wordmark } from "@/components/Wordmark";
 import { CodexIcon, ClaudeIcon } from "@/components/AgentIcons";
 
@@ -298,6 +298,7 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
                 <a
                   href="https://aistudio.google.com/app/apikey"
                   target="_blank"
+                  onClick={openExternal}
                   rel="noreferrer"
                   className={cn(
                     "inline-flex h-10 items-center rounded-md border border-hairline bg-surface px-3 text-[12px] text-body",
@@ -602,8 +603,24 @@ export function Onboarding({ onDone }: { onDone: (cfg: DanbiConfig) => void }) {
               ← 뒤로
             </SecondaryButton>
             <PrimaryButton
-              onClick={() => {
-                if (pendingCfg) onDone(pendingCfg);
+              onClick={async () => {
+                if (!pendingCfg) return;
+                // MCP 서버는 앱 시작 시 config 가 있을 때만 뜬다 (lib.rs
+                // setup). 첫 설치는 위저드가 config 를 막 만든 상태라 서버가
+                // 안 떠 있음 → 여기서 켠다. mcp_enable 이 토큰을 생성해
+                // config 에 쓰므로 저장된 cfg 를 다시 읽어 넘긴다 (안 그러면
+                // 빈 토큰 cfg 가 store 에 남아 다음 저장 때 토큰을 지운다).
+                let cfg = pendingCfg;
+                if (cfg.mcp?.enabled !== false) {
+                  try {
+                    const status = await ipc.mcpStatus();
+                    if (!status.running) await ipc.mcpEnable();
+                    cfg = (await ipc.loadConfig()) ?? cfg;
+                  } catch (e) {
+                    console.error("[danbi] mcp start after onboarding failed", e);
+                  }
+                }
+                onDone(cfg);
               }}
             >
               단비 시작하기

@@ -23,7 +23,7 @@ import {
   type DanbiConfig,
   type McpStatus,
 } from "@/lib/ipc";
-import { cn } from "@/lib/utils";
+import { cn, openExternal } from "@/lib/utils";
 import { useApp } from "@/state/store";
 import { runUpdateCheck } from "@/lib/updater";
 import { useAppVersion } from "@/lib/useAppVersion";
@@ -2024,6 +2024,17 @@ function AiConnectCard({
 
   const [kind, setKind] = useState<Kind>(currentKind);
   const [geminiKey, setGeminiKey] = useState("");
+  // Keychain 에 저장된 Gemini 키의 마지막 4자리. 입력칸은 보안상 항상
+  // 비어 있어서, 이게 없으면 "키가 사라졌다" 로 보인다.
+  const [savedKeyTail, setSavedKeyTail] = useState<string | null>(null);
+  const refreshKeyHint = () =>
+    ipc
+      .googleApiKeyHint()
+      .then(setSavedKeyTail)
+      .catch(() => setSavedKeyTail(null));
+  useEffect(() => {
+    void refreshKeyHint();
+  }, []);
   const [bedrockRegion, setBedrockRegion] = useState(currentRegion);
   const [automation, setAutomation] = useState<string>(currentAutomation);
   const [saving, setSaving] = useState(false);
@@ -2066,12 +2077,11 @@ function AiConnectCard({
       if (kind === "google") {
         if (geminiKey.trim()) {
           await ipc.storeGoogleApiKey(geminiKey.trim());
-        } else if (currentKind !== "google") {
-          // kind 를 google 로 바꿨는데 키 입력은 비어있음 — 기존 keychain
-          // 키를 그대로 쓸 의도가 아니면 사용자에게 알리고 멈춤.
+        } else if (!savedKeyTail) {
+          // 입력도 없고 Keychain 에 저장된 키도 없음.
           setFlash({
             tone: "err",
-            text: "Gemini 키를 입력해주세요 (또는 기존 키 그대로 두려면 다른 provider 선택 후 다시 google).",
+            text: "Gemini 키를 입력해주세요.",
           });
           setSaving(false);
           return;
@@ -2107,6 +2117,7 @@ function AiConnectCard({
       await ipc.saveConfig(cfg.vault_path, next);
       await onSaved(next);
       setGeminiKey("");
+      void refreshKeyHint();
       setFlash({
         tone: "ok",
         text:
@@ -2167,8 +2178,8 @@ function AiConnectCard({
                 value={geminiKey}
                 onChange={(e) => setGeminiKey(e.target.value)}
                 placeholder={
-                  currentKind === "google"
-                    ? "기존 키 유지 — 새 키 입력 시 덮어씀"
+                  savedKeyTail
+                    ? "저장된 키 사용 중 — 새 키를 넣으면 교체돼요"
                     : "AI…"
                 }
                 className="h-9 flex-1 rounded-md border border-hairline bg-surface px-3 font-mono text-[12px] text-ink outline-none focus:border-hairline-strong"
@@ -2176,11 +2187,18 @@ function AiConnectCard({
               <a
                 href="https://aistudio.google.com/app/apikey"
                 target="_blank"
+                onClick={openExternal}
                 rel="noreferrer"
                 className="inline-flex h-9 items-center rounded-md border border-hairline bg-surface px-3 text-[12px] text-body hover:border-hairline-strong hover:text-on-dark"
               >
                 키 발급 ↗
               </a>
+            </div>
+          )}
+          {kind === "google" && savedKeyTail && (
+            <div className="mt-1.5 text-[11px] text-mute">
+              Keychain 에 저장됨 ·{" "}
+              <span className="font-mono text-body">••••{savedKeyTail}</span>
             </div>
           )}
         </AiKindRow>
@@ -2470,6 +2488,7 @@ function AboutPanel({ cfg }: { cfg: DanbiConfig }) {
         <a
           href="https://github.com/dean-studio/danbi"
           target="_blank"
+          onClick={openExternal}
           rel="noreferrer"
           className="rounded-sm border border-hairline bg-surface-elevated px-2 py-1 font-mono text-[11px] text-on-dark-mute hover:border-accent-blue/40 hover:text-on-dark"
         >

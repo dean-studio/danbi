@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { X } from "lucide-react";
 import appIconUrl from "@/assets/danbi-app-icon.png";
 import { useAppVersion } from "@/lib/useAppVersion";
+import { openExternal } from "@/lib/utils";
 
 /**
  * Custom "About Danbi" dialog shown when the macOS app menu "About" item
@@ -76,6 +77,7 @@ export function AboutDialog({
             <a
               href="https://github.com/dean-studio/danbi"
               target="_blank"
+              onClick={openExternal}
               rel="noreferrer"
               className="mt-1 text-mute hover:text-on-dark hover:underline"
             >
@@ -86,6 +88,7 @@ export function AboutDialog({
               <a
                 href="https://dean.kr"
                 target="_blank"
+                onClick={openExternal}
                 rel="noreferrer"
                 className="text-mute hover:text-on-dark hover:underline"
               >

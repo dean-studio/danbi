@@ -262,6 +262,18 @@ pub fn store_google_api_key(api_key: String) -> DanbiResult<String> {
 pub fn delete_google_api_key() -> DanbiResult<()> {
     secrets::delete_api_key(GOOGLE_KEY_REF)
 }
+/// Keychain 에 Gemini 키가 있으면 마지막 4자리만 돌려준다 (예: "abcd").
+/// 설정 화면이 "저장됨 · ••••abcd" 를 보여 입력칸이 비어 있어도 키가 살아
+/// 있음을 알 수 있게 — 키 원문은 프런트로 넘기지 않는다.
+#[tauri::command]
+pub fn google_api_key_hint() -> DanbiResult<Option<String>> {
+    Ok(secrets::get_api_key(GOOGLE_KEY_REF)?.map(|k| key_tail(&k)))
+}
+
+fn key_tail(key: &str) -> String {
+    let chars: Vec<char> = key.trim().chars().collect();
+    chars[chars.len().saturating_sub(4)..].iter().collect()
+}
 #[tauri::command(async)]
 pub fn list_google_models() -> DanbiResult<Vec<crate::providers::ModelInfo>> {
     Ok(crate::providers::google::catalog())
@@ -5106,5 +5118,17 @@ mod embed_query_tests {
         assert_eq!(other.semantic, "used");
         assert_ne!(other.embedding, first.embedding);
         assert_eq!(p.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(test)]
+mod key_tail_tests {
+    use super::key_tail;
+
+    #[test]
+    fn shows_only_last_four_chars() {
+        assert_eq!(key_tail("AIzaSyABCDEFG1234"), "1234");
+        assert_eq!(key_tail("  abc  "), "abc");
+        assert_eq!(key_tail(""), "");
     }
 }

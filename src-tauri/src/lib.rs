@@ -455,6 +455,7 @@ pub fn run() {
             commands::test_anthropic,
             commands::store_google_api_key,
             commands::delete_google_api_key,
+            commands::google_api_key_hint,
             commands::list_google_models,
             commands::test_google,
             commands::list_ollama_models,
