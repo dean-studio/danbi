@@ -94,7 +94,7 @@ export function AboutDialog({
               >
                 Dean Works inc.
               </a>{" "}
-              All rights reserved.
+              · MIT License
             </span>
           </div>
         </div>

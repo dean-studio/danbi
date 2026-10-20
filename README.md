@@ -365,7 +365,7 @@ pnpm bundle
 
 소스 코드는 [MIT 라이선스](LICENSE)로 공개합니다. 누구나 자유롭게 쓰고, 고치고, 다시 배포할 수 있어요.
 
-단, "Danbi"·"단비" 이름과 로고·앱 아이콘은 Dean Works inc.의 상표라서 MIT 라이선스에 포함되지 않습니다. 고쳐서 배포할 때는 다른 이름과 아이콘을 써 주세요.
+단, "Danbi"·"단비" 이름과 로고·앱 아이콘은 Dean Works inc.의 상표라서 MIT 라이선스에 포함되지 않습니다([TRADEMARKS.md](TRADEMARKS.md)). 고쳐서 배포할 때는 다른 이름과 아이콘을 써 주세요.
 
 버그 리포트 · 토론 · pull request 는 환영합니다.
 
