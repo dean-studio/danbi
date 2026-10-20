@@ -2,6 +2,7 @@
   "name": "danbi",
   "private": true,
   "version": "0.8.12",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

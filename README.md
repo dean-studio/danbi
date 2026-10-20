@@ -33,7 +33,7 @@
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
-  <img src="https://img.shields.io/badge/license-All%20rights%20reserved-lightgrey" alt="license" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license MIT" /></a>
   <img src="https://img.shields.io/badge/version-0.8.12-success" alt="version 0.8.12" />
 </p>
 
@@ -363,13 +363,10 @@ pnpm bundle
 
 ## 라이선스
 
-© 2026 [Dean Works inc.](https://dean.kr) — All rights reserved.
+소스 코드는 [MIT 라이선스](LICENSE)로 공개합니다. 누구나 자유롭게 쓰고, 고치고, 다시 배포할 수 있어요.
 
-소스 코드 열람 목적으로 공개합니다. 다음 행위는 허용되지 않습니다:
+단, "Danbi"·"단비" 이름과 로고·앱 아이콘은 Dean Works inc.의 상표라서 MIT 라이선스에 포함되지 않습니다. 고쳐서 배포할 때는 다른 이름과 아이콘을 써 주세요.
 
-- 코드 또는 자산의 복제 · 재배포 · 수정 후 배포
-- fork 후 자체 빌드물의 공개 배포
-- 상업적 사용 또는 파생 제품 제작
+버그 리포트 · 토론 · pull request 는 환영합니다.
 
-버그 리포트 · 토론 · pull request 는 환영합니다. 라이선스 정책은 향후
-별도 LICENSE 파일로 명시될 수 있습니다.
+© 2026 [Dean Works inc.](https://dean.kr)

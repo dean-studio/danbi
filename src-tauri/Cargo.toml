@@ -3,6 +3,7 @@ name = "danbi"
 version = "0.8.12"
 description = "Danbi — Intelligent Wiki Management Agent"
 authors = ["Dean Works inc. <hckim@dean.kr>"]
+license = "MIT"
 edition = "2021"
 
 [lib]
