@@ -2815,7 +2815,7 @@ pub async fn compose_purpose_schema(
             "위 발췌를 바탕으로 `purpose.md` 작성해줘.",
         ),
         "schema" => (
-            "당신은 한국어 마크다운 작성기입니다. 입력으로 받은 vault 발췌의 실제 사용 패턴을 보고 해당 프로젝트의 `schema.md` 를 작성합니다. 항상 다음 4개 H2 섹션을 사용하세요: '## 파일 네이밍', '## 문서 구조', '## 링크 정책', '## 스타일'. 각 섹션은 짧은 bullet. 발췌에서 실제로 보이는 패턴만 규칙으로 옮기고, 일반론은 피하세요. 출력은 markdown 만.",
+            "당신은 한국어 마크다운 작성기입니다. 입력으로 받은 vault 발췌의 실제 사용 패턴을 보고 해당 프로젝트의 `schema.md` 를 작성합니다. 항상 다음 4개 H2 섹션을 사용하세요: '## 파일 네이밍', '## 문서 구조', '## 링크 정책', '## 스타일'. 각 섹션은 짧은 bullet. 발췌에서 실제로 보이는 패턴만 규칙으로 옮기고, 일반론은 피하세요. '## 온톨로지' 섹션은 쓰지 마세요 (단비가 붙입니다). 출력은 markdown 만.",
             "위 발췌를 바탕으로 `schema.md` 작성해줘.",
         ),
         _ => return Err(DanbiError::Config("kind must be 'purpose' or 'schema'".into())),
@@ -2823,11 +2823,20 @@ pub async fn compose_purpose_schema(
 
     let user = format!("{ask}\n\n---\n발췌:\n{}", grounding.chars().take(20_000).collect::<String>());
 
-    let markdown = crate::usage::with_role(
+    let mut markdown = crate::usage::with_role(
         "compose",
         provider.converse_text(&model, Some(system), &user, 1200, 0.5),
     )
     .await?;
+    // The ontology block is a fixed format the parser reads — append the
+    // template ourselves rather than trust a model to write valid YAML.
+    if kind == "schema" && !markdown.contains("온톨로지") {
+        markdown = format!(
+            "{}\n\n{}",
+            markdown.trim_end(),
+            crate::ontology::schema_section_template()
+        );
+    }
 
     Ok(ComposePurposeSchemaResult {
         markdown,
@@ -3274,6 +3283,48 @@ pub fn tray_badge_set_enabled(app: AppHandle, enabled: bool) -> DanbiResult<()> 
         .set_enabled(enabled);
     crate::tray_badge::sync_tray_title(&app);
     Ok(())
+}
+
+// ---------- Ontology ----------
+
+/// Vocabulary + per-type counts of one project (the table view header and
+/// the graph legend).
+#[tauri::command(async)]
+pub fn ontology_schema(project: String) -> DanbiResult<serde_json::Value> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::ontology::schema_summary(&vault_path, &project)
+}
+
+/// Rows for the ontology table view: every non-daily document of the
+/// project with its type, status and typed relations, newest first.
+#[tauri::command(async)]
+pub fn ontology_docs(
+    project: String,
+    doc_type: Option<String>,
+    status: Option<String>,
+    relation: Option<String>,
+    limit: Option<usize>,
+) -> DanbiResult<serde_json::Value> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let (rows, total) = crate::ontology::query(
+        &vault_path,
+        &crate::ontology::QueryArgs {
+            project: Some(project),
+            doc_type,
+            status,
+            relation,
+            target: None,
+            include_daily: false,
+            limit: limit.unwrap_or(500).clamp(1, 2000),
+        },
+    )?;
+    Ok(serde_json::json!({ "total": total, "docs": rows }))
 }
 
 // ---------- Ghost Links ----------

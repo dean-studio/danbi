@@ -30,6 +30,8 @@ const HOOK_TIMEOUT_SECS: u64 = 5;
 
 /// Builds the SessionStart brief. `project` = None → short vault-wide
 /// brief. Output never exceeds `max_chars` characters.
+const BRIEF_DECISIONS: usize = 5;
+
 pub fn session_brief(vault: &Path, project: Option<&str>, max_chars: usize) -> DanbiResult<String> {
     // Names and mtimes only — no per-file heading sniff.
     let tree = vault::list_tree_with(vault, false)?;
@@ -97,6 +99,16 @@ pub fn session_brief(vault: &Path, project: Option<&str>, max_chars: usize) -> D
                 lines.push(String::new());
                 lines.push("## 열린 할 일".into());
                 lines.extend(todos);
+            }
+            // Decisions still in force — an agent should not contradict one
+            // without writing `대체:: [[…]]` on the new decision.
+            let decisions = crate::dashboard::active_decisions(vault, Some(name), BRIEF_DECISIONS);
+            if !decisions.is_empty() {
+                lines.push(String::new());
+                lines.push("## 지금 유효한 결정".into());
+                for d in &decisions {
+                    lines.push(format!("- {} · {}", d.domain, d.modified));
+                }
             }
             lines.extend(activity_lines(vault, Some(name)));
         }

@@ -8,6 +8,7 @@ import {
   Network,
   Plus,
   RefreshCw,
+  Shapes,
   Sparkles,
   Target,
   X,
@@ -41,10 +42,13 @@ export function ProjectHome({
   project,
   onAddDomain,
   onOpenGraph,
+  onOpenOntology,
 }: {
   project: string;
   onAddDomain: (project: string) => void;
   onOpenGraph: (project: string) => void;
+  /** 온톨로지 표(문서 종류·상태·관계) 열기. 없으면 버튼을 숨긴다. */
+  onOpenOntology?: (project: string) => void;
 }) {
   const tree = useApp((s) => s.tree);
   const selectDomain = useApp((s) => s.selectDomain);
@@ -122,6 +126,9 @@ export function ProjectHome({
             <ProjectActions
               project={project}
               onOpenGraph={() => onOpenGraph(project)}
+              onOpenOntology={
+                onOpenOntology ? () => onOpenOntology(project) : undefined
+              }
             />
           </div>
           <Collapsible id="journal" title="받아 적은 것" className="mt-6">
@@ -864,9 +871,11 @@ function EmptyJournal({ project }: { project: string }) {
 function ProjectActions({
   project,
   onOpenGraph,
+  onOpenOntology,
 }: {
   project: string;
   onOpenGraph: () => void;
+  onOpenOntology?: () => void;
 }) {
   const aiConnected = useApp((s) => !!s.cfg?.embed_provider);
   const setBgJob = useApp((s) => s.setBgJob);
@@ -951,6 +960,15 @@ function ProjectActions({
           >
             <Network size={16} /> 그래프
           </button>
+          {onOpenOntology && (
+            <button
+              onClick={onOpenOntology}
+              title={`${project} 문서를 종류·상태·관계로 보기`}
+              className="inline-flex h-10 items-center gap-2 rounded-md border border-hairline bg-surface px-4 text-[14px] font-medium text-body hover:border-hairline-strong hover:text-on-dark"
+            >
+              <Shapes size={16} /> 온톨로지
+            </button>
+          )}
           {/* Ghost links 자동 제안 — AI 연동 켰을 때만 활성. 결과는 그래프
               점선 + 검토함에서 승인/무시. */}
           <button

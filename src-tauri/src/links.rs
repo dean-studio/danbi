@@ -1,4 +1,5 @@
 use crate::error::DanbiResult;
+use crate::ontology::{self, DocMeta, Vocabulary};
 use crate::vault::PROJECTS_DIRNAME;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -9,6 +10,12 @@ use std::sync::{Arc, Mutex};
 pub struct WikiLink {
     pub project: String,
     pub domain: String,
+    /// Typed relation of this link (`affects`, `caused_by`, …) as the
+    /// *source* document states it — from `원인:: [[x]]`, a frontmatter list
+    /// or a `## 관련` section. None for a plain link. Incoming entries carry
+    /// the same source-side relation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, Default)]
@@ -17,6 +24,27 @@ pub struct LinkIndex {
     pub outgoing: HashMap<String, Vec<WikiLink>>,
     /// Reverse: "project/domain" -> incoming sources.
     pub incoming: HashMap<String, Vec<WikiLink>>,
+    /// "project/domain" -> type/status of every indexed document. Built in
+    /// the same walk, so the ontology costs no extra IO.
+    pub meta: HashMap<String, DocMeta>,
+    /// Vocabulary problems per document (only documents that have any) —
+    /// surfaced by `healing`.
+    #[serde(skip)]
+    pub issues: HashMap<String, ontology::DocIssues>,
+}
+
+impl LinkIndex {
+    /// Meta for a document, falling back to folder inference for files the
+    /// walk doesn't reach (deeper than one sub-folder).
+    pub fn meta_or_infer(&self, vocab: &Vocabulary, project: &str, domain: &str) -> DocMeta {
+        self.meta.get(&key(project, domain)).cloned().unwrap_or_else(|| DocMeta {
+            doc_type: ontology::infer_type(vocab, domain),
+            type_source: ontology::TypeSource::Folder,
+            type_known: true,
+            status: None,
+            effective_status: None,
+        })
+    }
 }
 
 fn key(project: &str, domain: &str) -> String {
@@ -27,7 +55,9 @@ fn key(project: &str, domain: &str) -> String {
 ///   [[Project/domain.md]]
 ///   [[Project/domain]]
 ///   [[domain.md]]        (within-project, uses fallback_project)
-pub fn extract_links(md: &str, fallback_project: &str) -> Vec<WikiLink> {
+/// Each link comes with its byte offset so the caller can look up the
+/// line's relation.
+pub fn extract_links_at(md: &str, fallback_project: &str) -> Vec<(usize, WikiLink)> {
     let mut out = Vec::new();
     let bytes = md.as_bytes();
     let mut i = 0;
@@ -37,7 +67,7 @@ pub fn extract_links(md: &str, fallback_project: &str) -> Vec<WikiLink> {
                 let inner_bytes = &bytes[i + 2..i + 2 + end];
                 if let Ok(inner) = std::str::from_utf8(inner_bytes) {
                     if let Some(link) = parse_link(inner, fallback_project) {
-                        out.push(link);
+                        out.push((i, link));
                     }
                 }
                 i += 2 + end + 2;
@@ -80,7 +110,7 @@ fn parse_link(inner: &str, fallback_project: &str) -> Option<WikiLink> {
     } else {
         format!("{domain}.md")
     };
-    Some(WikiLink { project, domain })
+    Some(WikiLink { project, domain, relation: None })
 }
 
 /// Walks the whole vault, extracts wiki links from every .md under every
@@ -108,6 +138,7 @@ pub fn build_index(vault: &Path) -> DanbiResult<LinkIndex> {
             Some(n) if !n.starts_with('.') => n.to_string(),
             _ => continue,
         };
+        let vocab = ontology::vocabulary_for(vault, &project);
         let mut md_entries: Vec<(String, std::path::PathBuf)> = Vec::new();
         walk_md_for_links(&p, None, &mut md_entries)?;
         for de in std::fs::read_dir(&p)? {
@@ -129,15 +160,18 @@ pub fn build_index(vault: &Path) -> DanbiResult<LinkIndex> {
             let Ok(md) = std::fs::read_to_string(&path) else {
                 continue;
             };
-            let outgoing: Vec<WikiLink> = extract_links(&md, &project)
+            let rels = ontology::line_relations(&vocab, &md);
+            let outgoing: Vec<WikiLink> = extract_links_at(&md, &project)
                 .into_iter()
-                .map(|l| {
+                .map(|(at, l)| {
+                    let relation = rels.at(at).map(str::to_string);
                     if project_names.contains(&l.project) {
-                        l
+                        WikiLink { relation, ..l }
                     } else {
                         WikiLink {
                             domain: format!("{}/{}", l.project, l.domain),
                             project: project.clone(),
+                            relation,
                         }
                     }
                 })
@@ -151,12 +185,42 @@ pub fn build_index(vault: &Path) -> DanbiResult<LinkIndex> {
                     .push(WikiLink {
                         project: project.clone(),
                         domain: fname.clone(),
+                        relation: target.relation.clone(),
                     });
+            }
+            index.meta.insert(src.clone(), ontology::doc_meta(&vocab, &fname, &md));
+            let issues = ontology::doc_issues(&vocab, &md);
+            if !issues.is_empty() {
+                index.issues.insert(src.clone(), issues);
             }
             index.outgoing.insert(src, outgoing);
         }
     }
+    apply_supersession(&mut index);
     Ok(index)
+}
+
+/// A document another one `supersedes` (or that names its own
+/// `superseded_by`) is effectively superseded, whatever it declares —
+/// unless it's already `done`.
+fn apply_supersession(index: &mut LinkIndex) {
+    let mut superseded: Vec<String> = Vec::new();
+    for (src, links) in &index.outgoing {
+        for l in links {
+            match l.relation.as_deref() {
+                Some("supersedes") => superseded.push(key(&l.project, &l.domain)),
+                Some("superseded_by") => superseded.push(src.clone()),
+                _ => {}
+            }
+        }
+    }
+    for k in superseded {
+        if let Some(m) = index.meta.get_mut(&k) {
+            if m.effective_status.as_deref() != Some("done") {
+                m.effective_status = Some("superseded".into());
+            }
+        }
+    }
 }
 
 fn walk_md_for_links(
@@ -274,6 +338,26 @@ mod tests {
         assert_eq!(out, vec!["A/notes/x.md", "B/y.md"]);
         assert!(idx.incoming.contains_key("A/notes/x.md"));
         assert!(!idx.incoming.contains_key("notes/x.md"));
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn index_carries_relations_types_and_supersession() {
+        let v = temp_vault("ontology");
+        write(&v, "A/decisions/new.md", "---\nstatus: active\n---\n대체:: [[decisions/old.md]]\n영향:: [[B/ui.md]]\n");
+        write(&v, "A/decisions/old.md", "---\nstatus: active\n---\n옛 결정");
+        write(&v, "B/ui.md", "## 관련\n- [[A/decisions/new.md]]\n");
+
+        let idx = build_index(&v).unwrap();
+        let out = &idx.outgoing["A/decisions/new.md"];
+        assert_eq!(out[0].relation.as_deref(), Some("supersedes"));
+        assert_eq!(out[1].relation.as_deref(), Some("affects"));
+        assert_eq!(idx.incoming["B/ui.md"][0].relation.as_deref(), Some("affects"));
+        assert_eq!(idx.incoming["A/decisions/new.md"][0].relation.as_deref(), Some("relates_to"));
+        assert_eq!(idx.meta["A/decisions/new.md"].doc_type, "decision");
+        assert_eq!(idx.meta["B/ui.md"].doc_type, "note");
+        assert_eq!(idx.meta["A/decisions/old.md"].effective_status.as_deref(), Some("superseded"));
+        assert_eq!(idx.meta["A/decisions/new.md"].effective_status.as_deref(), Some("active"));
         std::fs::remove_dir_all(v).ok();
     }
 }

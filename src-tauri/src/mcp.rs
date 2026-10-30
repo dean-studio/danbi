@@ -15,6 +15,7 @@ use crate::daily;
 use crate::dashboard;
 use crate::edit_ops::{self, EditOp};
 use crate::error::DanbiError;
+use crate::ontology;
 use crate::search;
 use crate::vault;
 use crate::vcs;
@@ -689,7 +690,8 @@ impl ToolScope {
 /// Read tools whose optional `project` defaults to the endpoint's project
 /// on a scoped server. Search stays vault-wide unless asked — cross-project
 /// lookups are the main reason to search from inside one project.
-const SCOPED_DEFAULT_PROJECT_TOOLS: [&str; 3] = ["danbi_briefing", "danbi_recent", "danbi_daily"];
+const SCOPED_DEFAULT_PROJECT_TOOLS: [&str; 5] =
+    ["danbi_briefing", "danbi_recent", "danbi_daily", "danbi_query", "danbi_schema"];
 
 /// Tool catalog for one endpoint. On a project-scoped server the write
 /// tools lose their `project` parameter (the server fills it in — the
@@ -736,6 +738,9 @@ fn server_instructions(scope: ToolScope, scoped_project: Option<&str>) -> String
             Some(p) => format!("새 세션: danbi_briefing 먼저 (project 생략 시 {p}). 질문 전: danbi_context(query) 로 관련 섹션부터, 문서 전체는 danbi_read (heading·max_chars 로 부분 읽기)."),
             None => "새 세션: danbi_briefing(project) 먼저. 질문 전: danbi_context(query) 로 관련 섹션부터, 문서 전체는 danbi_read (heading·max_chars 로 부분 읽기).".to_string(),
         });
+        if let Some(last) = lines.last_mut() {
+            last.push_str(" '지금 유효한 결정'·'같은 원인의 버그'·'이 결정에 영향받는 곳' 은 danbi_query(type/status/relation/target).");
+        }
     } else {
         lines.push("읽기 도구(briefing·context·read·search)는 읽기 연결 /mcp/read 에 있습니다.".to_string());
     }
@@ -745,6 +750,7 @@ fn server_instructions(scope: ToolScope, scoped_project: Option<&str>) -> String
             None => "기록: 결정·버그 원인·TODO 는 즉시 danbi_log(project, content) — 오늘 daily 에 `_시각 · 호출자_` 줄과 함께. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결.".to_string(),
         });
         lines.push("특정 문서 갱신은 danbi_append(누적) · danbi_replace_section(섹션 교체) · danbi_upsert_item(리스트 항목). 같은 내용을 두 번 보내지 말 것 — 응답에 deduped:true 또는 warning 이 오면 이미 저장된 것이니 재시도 금지.".to_string());
+        lines.push("관계는 링크 줄에 이름을 붙여 적으세요: `원인:: [[notes/x.md]]` · `영향:: [[release.md]]` · `대체:: [[decisions/old.md]]`. 단어 목록은 danbi_schema, 문서 종류·상태는 danbi_set_meta, 지난 문서의 관계 정리는 danbi_propose_link(사용자 승인 후 기록).".to_string());
     } else {
         lines.push("기록(danbi_log 등)은 프로젝트별 쓰기 연결 /mcp/<project-id>/write 에서 하세요.".to_string());
     }
@@ -992,6 +998,7 @@ fn tool_catalog() -> Vec<Value> {
                     "query": { "type": "string", "description": "검색어 (키워드 또는 자연어 질문)" },
                     "limit": { "type": "integer", "default": 8 },
                     "project": { "type": "string", "description": "이 프로젝트 안에서만. 생략하면 vault 전체" },
+                    "type": { "type": "string", "description": "이 문서 종류만 (decision·bug·feature·note·reference·person·daily·meta, 한글 결정·버그… 도 됨)" },
                     "mode": { "type": "string", "enum": ["hybrid", "keyword", "semantic"], "default": "hybrid", "description": "hybrid=키워드+벡터 RRF 병합(기본), keyword=BM25만(정확한 용어·파일명 찾기, 임베딩 호출 없음), semantic=벡터만(풀어 쓴 질문). 임베딩이 1.5초 안에 안 오면 키워드 결과만 주고 semantic 필드에 timeout 으로 표시" }
                 },
                 "required": ["query"],
@@ -1000,13 +1007,14 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "danbi_context",
-            "description": "질문 하나로 답에 필요한 맥락을 한 번에 가져옵니다. 하이브리드 검색 상위 문서에서 질문과 관련된 섹션만 글자 예산 안에서 잘라 주고, 그 문서들에 [[위키링크]]로 연결된 문서 목록도 같이 줍니다. search → read 를 여러 번 반복하는 대신 먼저 이걸 부르세요. 전체 본문이 필요하면 그다음 danbi_read.",
+            "description": "질문 하나로 답에 필요한 맥락을 한 번에 가져옵니다. 하이브리드 검색 상위 문서에서 질문과 관련된 섹션만 글자 예산 안에서 잘라 주고, 그 문서들에 [[위키링크]]로 연결된 문서 목록(관계 종류 포함)도 같이 줍니다. 문서마다 type·status 가 붙고, 다른 결정에 대체된(superseded) 문서는 뒤로 밀립니다. search → read 를 여러 번 반복하는 대신 먼저 이걸 부르세요. 전체 본문이 필요하면 그다음 danbi_read.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string", "description": "질문 또는 키워드" },
                     "limit": { "type": "integer", "default": 4, "description": "가져올 문서 수 (1~10)" },
-                    "max_chars": { "type": "integer", "default": 8000, "description": "본문 발췌 총 글자 예산 (1000~40000)" }
+                    "max_chars": { "type": "integer", "default": 8000, "description": "본문 발췌 총 글자 예산 (1000~40000)" },
+                    "type": { "type": "string", "description": "이 문서 종류만 (예: decision — '예전에 어떻게 정했지' 류 질문)" }
                 },
                 "required": ["query"],
                 "additionalProperties": false
@@ -1014,7 +1022,7 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "danbi_related",
-            "description": "문서 하나와 연결된 모든 것을 돌려줍니다: 이 문서가 거는 [[링크]], 이 문서를 거는 백링크(다른 프로젝트 포함), 링크는 없지만 내용상 가까운 문서(soft·ghost, 점수순), 같은 주제 묶음(community) 문서. 읽은 문서에서 맥락을 넓힐 때 쓰세요.",
+            "description": "문서 하나와 연결된 모든 것을 돌려줍니다: 이 문서가 거는 [[링크]], 이 문서를 거는 백링크(다른 프로젝트 포함), 관계 종류별 묶음(by_relation — 영향·원인·대체 등, 백링크는 반대 방향 이름으로), 링크는 없지만 내용상 가까운 문서(soft·ghost, 점수순), 같은 주제 묶음(community) 문서. 읽은 문서에서 맥락을 넓힐 때 쓰세요.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1028,7 +1036,7 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "danbi_read",
-            "description": "특정 프로젝트/도메인 파일의 markdown 본문. 첫 줄은 메타 주석(bytes·chars·modified·links_in). 큰 문서는 heading 으로 섹션만, 또는 max_chars/offset 으로 나눠 읽으세요 — 잘리면 메타 주석에 다음 offset 이 적혀 있습니다.",
+            "description": "특정 프로젝트/도메인 파일의 markdown 본문. 첫 줄은 메타 주석(type·status·관계·bytes·chars·modified·links_in). 큰 문서는 heading 으로 섹션만, 또는 max_chars/offset 으로 나눠 읽으세요 — 잘리면 메타 주석에 다음 offset 이 적혀 있습니다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1039,6 +1047,35 @@ fn tool_catalog() -> Vec<Value> {
                     "offset": { "type": "integer", "default": 0, "description": "본문 시작 글자 위치 — 이어 읽기용" }
                 },
                 "required": ["project", "domain"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_query",
+            "description": "문서 종류·상태·관계로 문서를 고릅니다 (검색어 없이, LLM 호출 없음). 예: type=decision status=active → 지금 유효한 결정만, relation=caused_by target=notes/x.md → 같은 원인의 버그들, relation=affected_by target=decisions/y.md → 그 결정에 영향받는 문서. 결과마다 관계 목록이 붙습니다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "이 프로젝트만. 생략하면 vault 전체" },
+                    "type": { "type": "string", "description": "decision·bug·feature·note·reference·person·daily·meta (한글도 됨)" },
+                    "status": { "type": "string", "description": "active·superseded·done — 아무것도 안 적힌 문서는 active 로 봄" },
+                    "relation": { "type": "string", "description": "이 관계를 가진 문서 (affects·affected_by·caused_by·causes·supersedes·superseded_by·relates_to·implements·blocks·part_of, 한글 영향·원인… 도 됨)" },
+                    "target": { "type": "string", "description": "관계 상대 문서 (\"notes/x.md\" 또는 \"프로젝트/x.md\")" },
+                    "include_daily": { "type": "boolean", "default": false, "description": "daily 노트도 포함" },
+                    "limit": { "type": "integer", "default": 30, "description": "최대 개수 (1~200), 최근 수정순" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_schema",
+            "description": "프로젝트의 온톨로지 단어 목록(문서 종류·관계·상태)과 종류별 문서 수, 표기법. 문서에 type 이나 관계를 적기 전에 한 번 보세요.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" }
+                },
+                "required": ["project"],
                 "additionalProperties": false
             }
         }),
@@ -1146,6 +1183,49 @@ fn tool_catalog() -> Vec<Value> {
                     }
                 },
                 "required": ["project", "domain", "heading", "key", "item"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_set_meta",
+            "description": "문서의 frontmatter 에 종류(type)·상태(status)·문서 단위 관계를 넣습니다. 본문과 다른 frontmatter 키는 그대로 둡니다. 값은 danbi_schema 의 단어 목록 안에서만 — 밖이면 거절하고 쓸 수 있는 값을 알려줍니다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "domain": { "type": "string", "description": ".md로 끝나는 파일명 (하위 폴더면 notes/x.md 형태)" },
+                    "type": { "type": "string", "description": "예: decision" },
+                    "status": { "type": "string", "description": "active · superseded · done" },
+                    "relations": {
+                        "type": "array",
+                        "description": "추가할 관계 (이미 있으면 건너뜀)",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "relation": { "type": "string", "description": "예: affects, caused_by, supersedes" },
+                                "target": { "type": "string", "description": "상대 문서 (notes/x.md 또는 프로젝트/x.md)" }
+                            },
+                            "required": ["relation", "target"]
+                        }
+                    }
+                },
+                "required": ["project", "domain"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_propose_link",
+            "description": "기존 문서 사이의 관계를 '제안'만 합니다 — markdown 은 바로 바꾸지 않고, 사용자가 단비 앱에서 승인하면 그때 source 문서에 `관계:: [[target]]` 이 들어갑니다. 지난 기록의 관계를 정리(백필)할 때 쓰세요. 같은 쌍을 다시 제안하면 기존 제안을 돌려줍니다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "source": { "type": "string", "description": "관계를 적을 문서 (예: decisions/x.md)" },
+                    "target": { "type": "string", "description": "같은 프로젝트의 상대 문서" },
+                    "relation": { "type": "string", "description": "affects · caused_by · supersedes · implements · blocks · part_of · relates_to (생략하면 단순 링크)" },
+                    "reason": { "type": "string", "description": "왜 이 관계인지 한 문장 (승인 화면에 보임)" }
+                },
+                "required": ["project", "source", "target", "reason"],
                 "additionalProperties": false
             }
         }),
@@ -1315,15 +1395,21 @@ async fn search_hybrid_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
     }
     let mode = search::SearchMode::parse(args.get("mode").and_then(|v| v.as_str()))?;
 
+    let doc_type = opt_string_arg(&args, "type");
+
     let q = query_embedding(&vault_path, &query, mode).await?;
-    // A project filter is applied after fusion, so ask for more.
-    let depth = if project.is_some() { limit.saturating_mul(4) } else { limit };
+    // Project / type filters apply after fusion, so ask for more.
+    let depth = if project.is_some() || doc_type.is_some() { limit.saturating_mul(4) } else { limit };
     let mut hits =
         search::full_search_mode(&vault_path, &query, depth, q.embedding.as_deref(), mode)?;
     if let Some(p) = project.as_deref() {
         hits.retain(|h| h.project == p);
-        hits.truncate(limit);
     }
+    if let Some(t) = doc_type.as_deref() {
+        let mut types = TypeLookup::new(&vault_path)?;
+        hits.retain(|h| types.is(&h.project, &h.domain, t));
+    }
+    hits.truncate(limit);
     // 배열 → 객체: 벡터 arm 이 돌았는지(used/cached/off/timeout/error) 와
     // 혼재 경고를 같이 줘야 에이전트가 "키워드 결과만" 임을 알고 재시도를
     // 판단한다.
@@ -1433,9 +1519,21 @@ async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
         .unwrap_or(8000)
         .clamp(1000, 40000) as usize;
 
+    let doc_type = opt_string_arg(&args, "type");
+
     let q = query_embedding(&vault_path, &query, search::SearchMode::Hybrid).await?;
-    let hits =
-        search::full_search_hybrid(&vault_path, &query, limit, q.embedding.as_deref())?;
+    // Over-fetch so a type filter and the superseded demotion still leave
+    // `limit` useful docs.
+    let mut hits =
+        search::full_search_hybrid(&vault_path, &query, limit.saturating_mul(3), q.embedding.as_deref())?;
+    let mut types = TypeLookup::new(&vault_path)?;
+    if let Some(t) = doc_type.as_deref() {
+        hits.retain(|h| types.is(&h.project, &h.domain, t));
+    }
+    // A decision another one replaced is still worth finding, but after the
+    // one that replaced it (stable: relevance order otherwise kept).
+    hits.sort_by_key(|h| types.meta(&h.project, &h.domain).effective_status.as_deref() == Some("superseded"));
+    hits.truncate(limit);
 
     let per_doc = budget / hits.len().max(1);
     let mut used = 0usize;
@@ -1444,9 +1542,12 @@ async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
         let md = vault::read_doc(&vault_path, &hit.project, &hit.domain)?;
         let (excerpt, complete) = search::focused_excerpt(&md, &query, per_doc);
         used += excerpt.chars().count();
+        let meta = types.meta(&hit.project, &hit.domain);
         docs.push(json!({
             "project": hit.project,
             "domain": hit.domain,
+            "type": meta.doc_type,
+            "status": meta.effective_status,
             "matched": hit.matched,
             "relevance": hit.relevance,
             "total_chars": md.chars().count(),
@@ -1459,11 +1560,13 @@ async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
         .iter()
         .map(|h| format!("{}/{}", h.project, h.domain))
         .collect();
-    let index = crate::links::build_index_cached(&vault_path)?;
+    let index = types.index.clone();
     let existing = crate::graph::existing_doc_ids_cached(&vault_path)?;
     let mut seen = hit_keys.clone();
     let mut linked = Vec::new();
-    'outer: for key in hits.iter().map(|h| format!("{}/{}", h.project, h.domain)) {
+    'outer: for hit in hits.iter() {
+        let key = format!("{}/{}", hit.project, hit.domain);
+        let vocab = types.vocab(&hit.project).clone();
         let out = index.outgoing.get(&key).into_iter().flatten();
         let inc = index.incoming.get(&key).into_iter().flatten();
         for (dir, l) in out.map(|l| ("links_to", l)).chain(inc.map(|l| ("linked_from", l))) {
@@ -1471,12 +1574,21 @@ async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
             if !existing.contains(&k) || !seen.insert(k) {
                 continue;
             }
-            linked.push(json!({
+            // Relation as seen from the hit (`via`): an incoming `affects`
+            // means the hit is `affected_by` that doc.
+            let relation = l.relation.as_deref().map(|r| {
+                if dir == "linked_from" { vocab.inverse(r) } else { r.to_string() }
+            });
+            let mut row = json!({
                 "project": l.project,
                 "domain": l.domain,
                 "via": key,
                 "direction": dir,
-            }));
+            });
+            if let Some(r) = relation {
+                row["relation"] = json!(r);
+            }
+            linked.push(row);
             if linked.len() >= CONTEXT_MAX_LINKED {
                 break 'outer;
             }
@@ -1535,7 +1647,14 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 .get("limit")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(8) as usize;
-            let hits = search::full_search(&vault_path, &query, limit)?;
+            let doc_type = opt_string_arg(&args, "type");
+            let depth = if doc_type.is_some() { limit.saturating_mul(4) } else { limit };
+            let mut hits = search::full_search(&vault_path, &query, depth)?;
+            if let Some(t) = doc_type.as_deref() {
+                let mut types = TypeLookup::new(&vault_path)?;
+                hits.retain(|h| types.is(&h.project, &h.domain, t));
+            }
+            hits.truncate(limit);
             Ok(serde_json::to_string_pretty(&hits)?)
         }
         "danbi_read" => {
@@ -1562,6 +1681,156 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 .clamp(1, 50) as usize;
             let out = crate::graph::related(&vault_path, &project, &domain, limit)?;
             Ok(serde_json::to_string_pretty(&out)?)
+        }
+        "danbi_query" => {
+            let project = opt_string_arg(&args, "project");
+            if let Some(p) = project.as_deref() {
+                require_project(&vault_path, p)?;
+            }
+            let q = ontology::QueryArgs {
+                project,
+                doc_type: opt_string_arg(&args, "type"),
+                status: opt_string_arg(&args, "status"),
+                relation: opt_string_arg(&args, "relation"),
+                target: opt_string_arg(&args, "target"),
+                include_daily: bool_arg(&args, "include_daily", false),
+                limit: args.get("limit").and_then(|v| v.as_u64()).unwrap_or(30).clamp(1, 200) as usize,
+            };
+            let (rows, total) = ontology::query(&vault_path, &q)?;
+            let mut out = json!({ "total": total, "returned": rows.len(), "docs": rows });
+            if total == 0 {
+                out["hint"] = json!("0건 — 관계는 문서에 `원인:: [[x]]` 처럼 적혀 있어야 잡혀요. danbi_schema 로 단어 목록과 종류별 문서 수를 보세요.");
+            }
+            Ok(serde_json::to_string_pretty(&out)?)
+        }
+        "danbi_schema" => {
+            let project = string_arg(&args, "project")?;
+            require_project(&vault_path, &project)?;
+            Ok(serde_json::to_string_pretty(&ontology::schema_summary(&vault_path, &project)?)?)
+        }
+        "danbi_set_meta" => {
+            let project = string_arg(&args, "project")?;
+            let domain = string_arg(&args, "domain")?;
+            require_project(&vault_path, &project)?;
+            let domain_norm = normalize_md(&domain);
+            let Some((current, _)) = vault::read_doc_opt(&vault_path, &project, &domain_norm)? else {
+                return Err(doc_not_found_error(&vault_path, &project, &domain_norm));
+            };
+            let vocab = ontology::vocabulary_for(&vault_path, &project);
+            let names = |v: Vec<&str>| v.join(", ");
+            let mut update = ontology::MetaUpdate::default();
+            if let Some(t) = opt_string_arg(&args, "type") {
+                let canon = vocab.canonical_type(&t).ok_or_else(|| {
+                    DanbiError::Config(format!(
+                        "모르는 type: {t}. 쓸 수 있는 값: {} (schema.md 의 ## 온톨로지 에서 추가 가능)",
+                        names(vocab.types.iter().map(|x| x.name.as_str()).collect())
+                    ))
+                })?;
+                update.set.push(("type".into(), canon));
+            }
+            if let Some(st) = opt_string_arg(&args, "status") {
+                let canon = vocab.canonical_status(&st).ok_or_else(|| {
+                    DanbiError::Config(format!(
+                        "모르는 status: {st}. 쓸 수 있는 값: {}",
+                        names(vocab.statuses.iter().map(|x| x.name.as_str()).collect())
+                    ))
+                })?;
+                update.set.push(("status".into(), canon));
+            }
+            for r in args.get("relations").and_then(|v| v.as_array()).into_iter().flatten() {
+                let rel = r.get("relation").and_then(|v| v.as_str()).unwrap_or("").trim();
+                // `x.md|별칭` / `x.md#헤딩` → the file itself.
+                let target = r
+                    .get("target")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .trim_start_matches("[[")
+                    .trim_end_matches("]]")
+                    .split(['|', '#'])
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if target.is_empty() {
+                    return Err(DanbiError::Config("relations[].target 이 비었어요.".into()));
+                }
+                let canon = vocab.canonical_relation(rel).ok_or_else(|| {
+                    DanbiError::Config(format!(
+                        "모르는 relation: {rel}. 쓸 수 있는 값: {}",
+                        names(vocab.relations.iter().map(|x| x.name.as_str()).collect())
+                    ))
+                })?;
+                update.add_items.push((canon, format!("[[{}]]", normalize_md(target))));
+            }
+            if update.set.is_empty() && update.add_items.is_empty() {
+                return Err(DanbiError::Config("type · status · relations 중 하나는 있어야 해요.".into()));
+            }
+            let next = ontology::set_frontmatter(&current, &update).map_err(DanbiError::Config)?;
+            if next == current {
+                return Ok(write_result(
+                    json!({ "project": project, "domain": domain_norm, "unchanged": true }),
+                    None,
+                    None,
+                ));
+            }
+            vcs::ensure_repo(&vault_path)?;
+            let _ = vcs::snapshot(&vault_path, &format!("danbi: mcp set_meta · {project}/{domain_norm} (pre)"));
+            vault::write_doc(&vault_path, &project, &domain_norm, &next)?;
+            let (commit, warning) = commit_or_warn(
+                &vault_path,
+                &format!("danbi: mcp set_meta · {project}/{domain_norm}"),
+                &client,
+            );
+            Ok(write_result(
+                json!({
+                    "project": project,
+                    "domain": domain_norm,
+                    "set": update.set.iter().map(|(k, v)| json!({ k: v })).collect::<Vec<_>>(),
+                    "added_relations": update.add_items.iter().map(|(k, v)| json!({ "relation": k, "target": v })).collect::<Vec<_>>(),
+                    "bytes": next.len(),
+                }),
+                commit,
+                warning,
+            ))
+        }
+        "danbi_propose_link" => {
+            let project = string_arg(&args, "project")?;
+            require_project(&vault_path, &project)?;
+            let source = normalize_md(&string_arg(&args, "source")?);
+            let target = normalize_md(
+                string_arg(&args, "target")?
+                    .trim_start_matches("[[")
+                    .trim_end_matches("]]"),
+            );
+            let target = target
+                .strip_prefix(&format!("{project}/"))
+                .map(str::to_string)
+                .unwrap_or(target);
+            let reason = string_arg(&args, "reason")?;
+            let relation = opt_string_arg(&args, "relation");
+            let (link, created) = crate::ghost_links::propose(
+                &vault_path,
+                &project,
+                &source,
+                &target,
+                relation.as_deref(),
+                &reason,
+                Some(client.as_str()).filter(|c| !c.is_empty()),
+            )?;
+            Ok(serde_json::to_string_pretty(&json!({
+                "project": project,
+                "id": link.id,
+                "source": link.source_domain,
+                "target": link.target_domain,
+                "relation": link.relation,
+                "status": link.status,
+                "created": created,
+                "note": if created {
+                    "제안을 올렸어요 — 사용자가 단비 앱에서 승인하면 source 문서에 기록됩니다."
+                } else {
+                    "이미 있는 제안이거나 이미 연결된 쌍이라 새로 올리지 않았어요."
+                },
+            }))?)
         }
         "danbi_log" => {
             let project = string_arg(&args, "project")?;
@@ -1922,13 +2191,15 @@ pub(crate) fn is_write_tool(name: &str) -> bool {
     WRITE_TOOLS.contains(&name)
 }
 
-pub(crate) const WRITE_TOOLS: [&str; 6] = [
+pub(crate) const WRITE_TOOLS: [&str; 8] = [
     "danbi_log",
     "danbi_append",
     "danbi_create_folder",
     "danbi_create_file",
     "danbi_replace_section",
     "danbi_upsert_item",
+    "danbi_set_meta",
+    "danbi_propose_link",
 ];
 
 /// Snapshot of a write-tool invocation that we'll need *after* dispatch
@@ -2215,6 +2486,42 @@ pub(crate) fn configured_embed_model(cfg: &DanbiConfig) -> Option<String> {
 /// `danbi_read`: metadata comment + (a section of) the document, cut to a
 /// character window. Missing files are an error with name suggestions
 /// rather than an empty string the agent would mistake for an empty doc.
+/// Type/status lookups for search hits, sharing one link index and one
+/// vocabulary per project across a request.
+struct TypeLookup {
+    index: std::sync::Arc<crate::links::LinkIndex>,
+    vault: PathBuf,
+    vocabs: std::collections::HashMap<String, ontology::Vocabulary>,
+}
+
+impl TypeLookup {
+    fn new(vault: &std::path::Path) -> Result<Self, DanbiError> {
+        Ok(Self {
+            index: crate::links::build_index_cached(vault)?,
+            vault: vault.to_path_buf(),
+            vocabs: Default::default(),
+        })
+    }
+
+    fn vocab(&mut self, project: &str) -> &ontology::Vocabulary {
+        let vault = self.vault.clone();
+        self.vocabs
+            .entry(project.to_string())
+            .or_insert_with(|| ontology::vocabulary_for(&vault, project))
+    }
+
+    fn meta(&mut self, project: &str, domain: &str) -> ontology::DocMeta {
+        let index = self.index.clone();
+        index.meta_or_infer(self.vocab(project), project, domain)
+    }
+
+    /// Whether the doc's type matches `want` (canonical or Korean name).
+    fn is(&mut self, project: &str, domain: &str, want: &str) -> bool {
+        let canon = self.vocab(project).canonical_type(want).unwrap_or_else(|| want.trim().to_lowercase());
+        self.meta(project, domain).doc_type == canon
+    }
+}
+
 fn read_doc_tool(
     vault_path: &std::path::Path,
     project: &str,
@@ -2276,16 +2583,30 @@ fn read_doc_tool(
         .ok()
         .map(|t| chrono::DateTime::<Local>::from(t).format("%Y-%m-%d %H:%M").to_string())
         .unwrap_or_else(|| "?".into());
-    let links_in = crate::links::build_index_cached(vault_path)
-        .map(|idx| {
-            idx.incoming
-                .get(&format!("{project}/{domain_norm}"))
-                .map(|v| v.len())
-                .unwrap_or(0)
-        })
-        .unwrap_or(0);
+    let id = format!("{project}/{domain_norm}");
+    let (links_in, onto_note) = match crate::links::build_index_cached(vault_path) {
+        Ok(idx) => {
+            let vocab = ontology::vocabulary_for(vault_path, project);
+            let meta = idx.meta_or_infer(&vocab, project, &domain_norm);
+            let mut note = format!(" · type {}", meta.doc_type);
+            if meta.type_source == ontology::TypeSource::Folder {
+                note.push_str("(폴더)");
+            }
+            if let Some(st) = &meta.effective_status {
+                note.push_str(&format!(" · status {st}"));
+            }
+            let rels = ontology::relations_of(&idx, &vocab, &id);
+            if !rels.is_empty() {
+                let shown: Vec<String> = rels.iter().take(8).map(|r| format!("{} {}", r.relation, r.doc)).collect();
+                let more = if rels.len() > 8 { format!(" 외 {}", rels.len() - 8) } else { String::new() };
+                note.push_str(&format!(" · 관계: {}{more}", shown.join(", ")));
+            }
+            (idx.incoming.get(&id).map(|v| v.len()).unwrap_or(0), note)
+        }
+        Err(_) => (0, String::new()),
+    };
     Ok(format!(
-        "<!-- danbi: {project}/{domain_norm} · {} bytes · {} chars · modified {modified} · links_in {links_in}{section_note}{range_note} -->\n{window}",
+        "<!-- danbi: {project}/{domain_norm}{onto_note} · {} bytes · {} chars · modified {modified} · links_in {links_in}{section_note}{range_note} -->\n{window}",
         meta.len(),
         md.chars().count(),
     ))
@@ -3028,6 +3349,130 @@ mod read_tests {
         assert_eq!(line_span(md, 0, 1), "a\n");
         assert_eq!(line_span(md, 1, 3), "b\nc");
         assert_eq!(line_span(md, 2, 9), "c");
+    }
+
+    fn ontology_vault() -> std::path::PathBuf {
+        let v = temp_vault("onto");
+        write(&v, "P", "decisions/new.md", "---\nstatus: active\n---\n# 새 결정\n대체:: [[decisions/old.md]]\n영향:: [[ui.md]]\n");
+        write(&v, "P", "decisions/old.md", "# 옛 결정\n");
+        write(&v, "P", "ui.md", "# UI\n");
+        write(&v, "P", "notes/bug-a.md", "---\ntype: bug\n---\n원인:: [[notes/cause.md]]\n");
+        write(&v, "P", "notes/bug-b.md", "---\ntype: 버그\n---\n- 원인:: [[notes/cause.md]]\n");
+        write(&v, "P", "notes/cause.md", "# 원인 노트\n");
+        v
+    }
+
+    #[test]
+    fn query_answers_type_status_and_relation_questions() {
+        let v = ontology_vault();
+        let q = |args: Value| -> Value {
+            serde_json::from_str(&dispatch_in(&v, "danbi_query", args).unwrap()).unwrap()
+        };
+        let names = |out: &Value| -> Vec<String> {
+            let mut n: Vec<String> = out["docs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|d| d["domain"].as_str().unwrap().to_string())
+                .collect();
+            n.sort();
+            n
+        };
+        // Only the replacing decision is still in force.
+        let active = q(json!({ "project": "P", "type": "decision", "status": "active" }));
+        assert_eq!(names(&active), vec!["decisions/new.md"]);
+        let gone = q(json!({ "project": "P", "type": "결정", "status": "superseded" }));
+        assert_eq!(names(&gone), vec!["decisions/old.md"]);
+        // Same-cause bugs, from either spelling of the type and the key.
+        let same = q(json!({ "project": "P", "relation": "원인", "target": "notes/cause.md" }));
+        assert_eq!(names(&same), vec!["notes/bug-a.md", "notes/bug-b.md"]);
+        // Inverse view: what the decision affects is `affected_by` it.
+        let hit = q(json!({ "project": "P", "relation": "affected_by", "target": "decisions/new.md" }));
+        assert_eq!(names(&hit), vec!["ui.md"]);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn read_meta_and_related_show_types_and_relations() {
+        let v = ontology_vault();
+        let out = dispatch_in(&v, "danbi_read", json!({ "project": "P", "domain": "decisions/new.md" })).unwrap();
+        let head = out.lines().next().unwrap();
+        assert!(head.contains("type decision(폴더)"), "{head}");
+        assert!(head.contains("status active"), "{head}");
+        assert!(head.contains("supersedes P/decisions/old.md"), "{head}");
+        let rel: Value = serde_json::from_str(
+            &dispatch_in(&v, "danbi_related", json!({ "project": "P", "domain": "ui.md" })).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rel["by_relation"]["affected_by"][0], "P/decisions/new.md");
+        assert_eq!(rel["links_in"][0]["relation"], "affected_by");
+        assert_eq!(rel["links_in"][0]["doc_type"], "decision");
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn set_meta_writes_frontmatter_and_rejects_unknown_values() {
+        let v = ontology_vault();
+        let out: Value = serde_json::from_str(
+            &dispatch_in(
+                &v,
+                "danbi_set_meta",
+                json!({ "project": "P", "domain": "ui.md", "type": "feature",
+                        "relations": [{ "relation": "구현", "target": "decisions/new.md" }] }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out["added_relations"][0]["relation"], "implements");
+        let md = std::fs::read_to_string(v.join("Projects/P/ui.md")).unwrap();
+        assert_eq!(md, "---\ntype: feature\nimplements:\n  - \"[[decisions/new.md]]\"\n---\n\n# UI\n");
+        let q: Value = serde_json::from_str(
+            &dispatch_in(&v, "danbi_query", json!({ "project": "P", "relation": "implemented_by" })).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(q["docs"][0]["domain"], "decisions/new.md");
+
+        let err = dispatch_in(&v, "danbi_set_meta", json!({ "project": "P", "domain": "ui.md", "type": "experiment" }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("decision"), "{err}");
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn propose_link_queues_a_typed_suggestion_and_accept_writes_it() {
+        let v = ontology_vault();
+        let out: Value = serde_json::from_str(
+            &dispatch_in(
+                &v,
+                "danbi_propose_link",
+                json!({ "project": "P", "source": "decisions/old.md", "target": "ui.md",
+                        "relation": "영향", "reason": "옛 결정도 UI 에 영향" }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(out["created"], true);
+        assert_eq!(out["relation"], "affects");
+        let again: Value = serde_json::from_str(
+            &dispatch_in(
+                &v,
+                "danbi_propose_link",
+                json!({ "project": "P", "source": "decisions/old.md", "target": "ui.md", "reason": "중복" }),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(again["created"], false);
+        // Nothing in markdown until the user accepts.
+        assert_eq!(std::fs::read_to_string(v.join("Projects/P/decisions/old.md")).unwrap(), "# 옛 결정\n");
+        let id = out["id"].as_str().unwrap();
+        crate::ghost_links::accept(&v, "P", id).unwrap();
+        let md = std::fs::read_to_string(v.join("Projects/P/decisions/old.md")).unwrap();
+        assert!(md.contains("- 영향:: [[P/ui.md]]"), "{md}");
+        let idx = crate::links::build_index(&v).unwrap();
+        assert_eq!(idx.outgoing["P/decisions/old.md"][0].relation.as_deref(), Some("affects"));
+        std::fs::remove_dir_all(v).ok();
     }
 }
 

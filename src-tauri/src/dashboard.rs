@@ -28,6 +28,10 @@ pub struct GhostSuggestion {
     pub target_domain: String,
     pub reason: String,
     pub created_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<String>,
 }
 
 /// Commit-level activity summary for the last N days — mirrors what
@@ -91,6 +95,8 @@ fn collect_ghost_suggestions(vault: &Path) -> DanbiResult<Vec<GhostSuggestion>> 
                 target_domain,
                 reason,
                 created_at,
+                relation,
+                proposed_by,
                 ..
             } = link;
             out.push(GhostSuggestion {
@@ -100,6 +106,8 @@ fn collect_ghost_suggestions(vault: &Path) -> DanbiResult<Vec<GhostSuggestion>> 
                 target_domain,
                 reason,
                 created_at,
+                relation,
+                proposed_by,
             });
         }
     }
@@ -391,6 +399,10 @@ pub struct HealingSummary {
     pub empty: usize,
     pub oversized: usize,
     pub empty_projects: usize,
+    /// Ontology vocabulary problems (unknown type/status/relation key,
+    /// typed link to a missing doc).
+    #[serde(default)]
+    pub ontology: usize,
     /// Highest-priority rows (empty projects/files, oversized, then orphans).
     pub top: Vec<Suggestion>,
 }
@@ -407,10 +419,48 @@ pub struct BriefingSnapshot {
     pub healing: HealingSummary,
     pub daily: BriefingDaily,
     pub activity: ActivityWindow,
+    /// Decisions still in force, most recently touched first — what an
+    /// agent should not contradict without saying so.
+    pub active_decisions: Vec<ActiveDecision>,
     /// Set by the MCP layer when the vector index mixes embedding models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector_warning: Option<String>,
     pub hint: &'static str,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ActiveDecision {
+    pub project: String,
+    pub domain: String,
+    /// "YYYY-MM-DD" of the last modification.
+    pub modified: String,
+}
+
+const BRIEFING_DECISIONS: usize = 8;
+
+/// Active (not superseded / done) decision documents, newest first.
+pub fn active_decisions(vault: &Path, project: Option<&str>, limit: usize) -> Vec<ActiveDecision> {
+    let args = crate::ontology::QueryArgs {
+        project: project.map(str::to_string),
+        doc_type: Some("decision".into()),
+        status: Some("active".into()),
+        limit,
+        ..Default::default()
+    };
+    let Ok((rows, _)) = crate::ontology::query(vault, &args) else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .map(|r| ActiveDecision {
+            modified: r
+                .modified_ms
+                .and_then(|ms| chrono::DateTime::from_timestamp_millis(ms as i64))
+                .map(|t| t.with_timezone(&Local).format("%Y-%m-%d").to_string())
+                .unwrap_or_default(),
+            project: r.project,
+            domain: r.domain,
+        })
+        .collect()
 }
 
 /// Does a commit summary (`danbi: mcp log · <project>/<domain> …`) belong
@@ -447,6 +497,10 @@ pub fn briefing(vault: &Path, project: Option<&str>) -> DanbiResult<BriefingSnap
             Suggestion::Empty { .. } => healing.empty += 1,
             Suggestion::Oversized { .. } => healing.oversized += 1,
             Suggestion::EmptyProject { .. } => healing.empty_projects += 1,
+            Suggestion::UnknownType { .. }
+            | Suggestion::UnknownStatus { .. }
+            | Suggestion::UnknownRelation { .. }
+            | Suggestion::DanglingTypedLink { .. } => healing.ontology += 1,
         }
     }
     rows.sort_by_key(|s| s.priority());
@@ -497,8 +551,9 @@ pub fn briefing(vault: &Path, project: Option<&str>) -> DanbiResult<BriefingSnap
         healing,
         daily,
         activity,
+        active_decisions: active_decisions(vault, project, BRIEFING_DECISIONS),
         vector_warning: None,
-        hint: "질문은 danbi_context, 문서 전체는 danbi_read, 기록은 danbi_log",
+        hint: "질문은 danbi_context, 문서 전체는 danbi_read, 기록은 danbi_log. active_decisions 는 지금 유효한 결정 — 뒤집을 땐 새 결정에 `대체:: [[옛 결정]]` 을 적으세요",
     })
 }
 

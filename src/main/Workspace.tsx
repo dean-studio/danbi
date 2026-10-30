@@ -22,6 +22,7 @@ import { ConnectSheet } from "@/main/ConnectSheet";
 import { McpSetupPrompt } from "@/main/McpSetupPrompt";
 import { DocView } from "@/main/DocView";
 import { GraphView } from "@/main/GraphView";
+import { OntologyView } from "@/main/OntologyView";
 import { FOCUS_MEMO_EVENT, Home } from "@/main/Home";
 import { ProjectHome } from "@/main/ProjectHome";
 import { ReviewView } from "@/main/ReviewView";
@@ -84,6 +85,8 @@ export function Workspace() {
   const [paletteMode, setPaletteMode] = useState<PaletteMode>("mixed");
   const [graphOpen, setGraphOpen] = useState(false);
   const [graphProject, setGraphProject] = useState<string | null>(null);
+  // 온톨로지 표 오버레이 — 프로젝트 이름이 있으면 열림.
+  const [ontologyProject, setOntologyProject] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -761,6 +764,9 @@ export function Workspace() {
     { id: "review", label: "검토함", shortcut: "⌘⇧R", run: () => setView("review") },
     { id: "usage", label: "사용량", shortcut: "⌘⇧U", run: () => setView("usage") },
     { id: "graph", label: "그래프", shortcut: "⌘G", run: () => { setGraphProject(useApp.getState().selection.project); setGraphOpen(true); } },
+    ...(selection.project
+      ? [{ id: "ontology", label: `온톨로지 표 · ${selection.project}`, run: () => setOntologyProject(useApp.getState().selection.project), keywords: ["ontology", "종류", "관계", "결정", "버그"] }]
+      : []),
     { id: "connect", label: "연결 관리 (Claude Code · Codex · Cursor)", run: () => openConnectSheet(useApp.getState().selection.project), keywords: ["mcp", "skill", "cursor", "codex", "claude"] },
     { id: "trash", label: trashHasUnseen ? "휴지통 · 새 항목" : "휴지통", hint: trashCount > 0 ? `${trashCount}개` : undefined, run: () => { setTrashOpen(true); setTrashSeenCount(trashCount); localStorage.setItem(TRASH_SEEN_KEY, String(trashCount)); } },
     { id: "mark-read", label: "모두 읽음으로 표시", run: () => { markVaultAllRead().then(() => refresh()); } },
@@ -937,6 +943,7 @@ export function Workspace() {
                   setGraphProject(project);
                   setGraphOpen(true);
                 }}
+                onOpenOntology={setOntologyProject}
               />
             ) : (
               <Home onOpenShortcuts={() => setShortcutsOpen(true)} />
@@ -1280,6 +1287,11 @@ export function Workspace() {
         open={graphOpen}
         initialProject={graphProject}
         onClose={() => setGraphOpen(false)}
+      />
+
+      <OntologyView
+        project={ontologyProject}
+        onClose={() => setOntologyProject(null)}
       />
 
       <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />

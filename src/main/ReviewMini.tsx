@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Check, ChevronRight } from "lucide-react";
-import { useReviewRows, type ReviewRow } from "@/main/ReviewView";
+import { RelationTag, useReviewRows, type ReviewRow } from "@/main/ReviewView";
 import { cn } from "@/lib/utils";
 
 /**
@@ -118,6 +118,7 @@ function MiniRow({
         </button>
       </div>
       <div className="flex items-center gap-2">
+        {row.tag && <RelationTag>{row.tag}</RelationTag>}
         <span className="min-w-0 flex-1 truncate text-[11px] text-mute" title={row.reason}>
           {row.reason}
         </span>

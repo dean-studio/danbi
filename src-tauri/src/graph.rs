@@ -24,9 +24,10 @@
 use crate::error::{DanbiError, DanbiResult};
 use crate::ghost_links::{self, GhostStatus};
 use crate::links::{build_index_cached_with, WikiLink};
+use crate::ontology::{self, Vocabulary};
 use crate::vault::{list_tree, PROJECTS_DIRNAME};
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -47,6 +48,12 @@ pub struct GraphNode {
     /// rendering (hubs larger) and insight ranking.
     #[serde(default)]
     pub degree: u32,
+    /// Ontology type (`decision`, `bug`, `daily`, …) — declared in
+    /// frontmatter or inferred from the folder.
+    pub doc_type: String,
+    /// Effective status (`active`, `superseded`, `done`) when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -62,6 +69,10 @@ pub struct GraphEdge {
     pub ghost_id: Option<String>,
     pub ghost_project: Option<String>,
     pub reason: Option<String>,
+    /// Typed relation (`affects`, `caused_by`, …) from source to target —
+    /// confirmed links typed in markdown, or a ghost suggestion's proposal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone, Default)]
@@ -79,6 +90,12 @@ pub struct GraphInsights {
     /// Edges that connect otherwise-separate communities. The single
     /// thread that ties two topic clusters together.
     pub surprising: Vec<SurprisingEdge>,
+    /// Live decisions that don't say what they affect (`영향::`).
+    #[serde(default)]
+    pub decisions_without_affects: Vec<String>,
+    /// Open bugs that don't name a cause (`원인::`).
+    #[serde(default)]
+    pub bugs_without_cause: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -121,6 +138,8 @@ pub fn build_graph(vault: &Path, project_filter: Option<&str>) -> DanbiResult<Gr
 
 fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &str) -> DanbiResult<GraphData> {
     let tree = list_tree(vault)?;
+    let index = build_index_cached_with(vault, fingerprint)?;
+    let mut vocabs: HashMap<String, Vocabulary> = HashMap::new();
 
     // 1) Nodes
     let mut nodes: Vec<GraphNode> = Vec::new();
@@ -131,9 +150,13 @@ fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &st
                 continue;
             }
         }
+        let vocab = vocabs
+            .entry(p.name.clone())
+            .or_insert_with(|| ontology::vocabulary_for(vault, &p.name));
         for d in &p.domains {
             let id = format!("{}/{}", p.name, d.name);
             if node_ids.insert(id.clone()) {
+                let meta = index.meta_or_infer(vocab, &p.name, &d.name);
                 nodes.push(GraphNode {
                     id,
                     project: p.name.clone(),
@@ -142,6 +165,8 @@ fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &st
                     bytes: d.bytes,
                     community: -1,
                     degree: 0,
+                    doc_type: meta.doc_type,
+                    status: meta.effective_status,
                 });
             }
         }
@@ -154,6 +179,7 @@ fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &st
                         .rsplit_once('/')
                         .map(|(_, f)| f.to_string())
                         .unwrap_or_else(|| d.name.clone());
+                    let meta = index.meta_or_infer(vocab, &p.name, &d.name);
                     nodes.push(GraphNode {
                         id,
                         project: p.name.clone(),
@@ -162,6 +188,8 @@ fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &st
                         bytes: d.bytes,
                         community: -1,
                         degree: 0,
+                        doc_type: meta.doc_type,
+                        status: meta.effective_status,
                     });
                 }
             }
@@ -172,7 +200,6 @@ fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &st
     let mut edges: Vec<GraphEdge> = Vec::new();
     // Track confirmed pairs so ghost/soft layers don't duplicate them.
     let mut confirmed_pairs: HashSet<(String, String)> = HashSet::new();
-    let index = build_index_cached_with(vault, fingerprint)?;
     for (src_key, targets) in &index.outgoing {
         if !node_ids.contains(src_key) {
             continue;
@@ -191,6 +218,7 @@ fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &st
                 ghost_id: None,
                 ghost_project: None,
                 reason: None,
+                relation: t.relation.clone(),
             });
         }
     }
@@ -236,6 +264,7 @@ fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &st
                     ghost_id: Some(link.id),
                     ghost_project: Some(project.to_string()),
                     reason: Some(link.reason),
+                    relation: link.relation,
                 });
             }
         }
@@ -254,7 +283,8 @@ fn build_graph_with(vault: &Path, project_filter: Option<&str>, fingerprint: &st
     apply_degrees(&mut nodes, &edges);
 
     // 7) Insights
-    let insights = compute_insights(&nodes, &edges);
+    let mut insights = compute_insights(&nodes, &edges);
+    apply_ontology_gaps(&mut insights, &nodes, &edges);
 
     Ok(GraphData {
         nodes,
@@ -363,6 +393,11 @@ fn existing_doc_ids_cached_with(vault: &Path, fingerprint: &str) -> DanbiResult<
 pub struct DocRef {
     pub project: String,
     pub domain: String,
+    pub doc_type: String,
+    /// Relation seen from the queried document: for `links_out` as written,
+    /// for `links_in` the inverse (A `affects` B ⇒ B is `affected_by` A).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -380,6 +415,12 @@ pub struct RelatedDoc {
 pub struct RelatedDocs {
     pub project: String,
     pub domain: String,
+    pub doc_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Typed links in both directions, grouped by relation as seen from
+    /// this document ("affects" → […], "affected_by" → […]).
+    pub by_relation: BTreeMap<String, Vec<String>>,
     /// Confirmed `[[wiki links]]` this document makes (any project).
     pub links_out: Vec<DocRef>,
     /// Documents that link to this one (any project).
@@ -432,23 +473,55 @@ pub fn related(
     // that come back empty.
     let existing = existing_doc_ids_cached_with(vault, &fp)?;
     let index = build_index_cached_with(vault, &fp)?;
-    let to_refs = |links: Option<&Vec<WikiLink>>| -> Vec<DocRef> {
-        let mut seen: HashSet<String> = HashSet::new();
-        links
-            .into_iter()
-            .flatten()
-            .filter(|l| {
-                let k = format!("{}/{}", l.project, l.domain);
-                k != id && existing.contains(&k) && seen.insert(k)
-            })
-            .map(|l| DocRef {
-                project: l.project.clone(),
-                domain: l.domain.clone(),
-            })
-            .collect()
+    let vocab = ontology::vocabulary_for(vault, project);
+    let mut other_vocabs: HashMap<String, Vocabulary> = HashMap::new();
+    let mut type_of = |p: &str, d: &str| -> String {
+        let v = other_vocabs
+            .entry(p.to_string())
+            .or_insert_with(|| ontology::vocabulary_for(vault, p));
+        index.meta_or_infer(v, p, d).doc_type
     };
-    let links_out = to_refs(index.outgoing.get(&id));
-    let links_in = to_refs(index.incoming.get(&id));
+    // One ref per document; a typed mention beats a plain one.
+    let mut to_refs = |links: Option<&Vec<WikiLink>>, inverse: bool| -> Vec<DocRef> {
+        let mut out: Vec<DocRef> = Vec::new();
+        for l in links.into_iter().flatten() {
+            let k = format!("{}/{}", l.project, l.domain);
+            if k == id || !existing.contains(&k) {
+                continue;
+            }
+            let relation = l
+                .relation
+                .as_deref()
+                .map(|r| if inverse { vocab.inverse(r) } else { r.to_string() });
+            match out.iter_mut().find(|r| r.project == l.project && r.domain == l.domain) {
+                Some(prev) => {
+                    if prev.relation.is_none() {
+                        prev.relation = relation;
+                    }
+                }
+                None => out.push(DocRef {
+                    project: l.project.clone(),
+                    domain: l.domain.clone(),
+                    doc_type: type_of(&l.project, &l.domain),
+                    relation,
+                }),
+            }
+        }
+        out
+    };
+    let links_out = to_refs(index.outgoing.get(&id), false);
+    let links_in = to_refs(index.incoming.get(&id), true);
+    let mut by_relation: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for r in links_out.iter().chain(links_in.iter()) {
+        if let Some(rel) = &r.relation {
+            let k = format!("{}/{}", r.project, r.domain);
+            let list = by_relation.entry(rel.clone()).or_default();
+            if !list.contains(&k) {
+                list.push(k);
+            }
+        }
+    }
+    let my_meta = index.meta_or_infer(&vocab, project, domain);
 
     let mut linked: HashSet<String> = links_out
         .iter()
@@ -505,6 +578,9 @@ pub fn related(
     Ok(RelatedDocs {
         project: project.to_string(),
         domain: domain.to_string(),
+        doc_type: my_meta.doc_type,
+        status: my_meta.effective_status,
+        by_relation,
         links_out,
         links_in,
         related,
@@ -617,6 +693,7 @@ fn augment_with_relevance(
                 ghost_id: None,
                 ghost_project: None,
                 reason: None,
+                relation: None,
             });
         }
     }
@@ -907,6 +984,45 @@ fn compute_insights(nodes: &[GraphNode], edges: &[GraphEdge]) -> GraphInsights {
     out
 }
 
+const MAX_GAP_ITEMS: usize = 20;
+
+/// Ontology gaps: live decisions with no `affects` edge and open bugs with
+/// no `caused_by` edge (either direction — the inverse written on the other
+/// document counts too).
+fn apply_ontology_gaps(insights: &mut GraphInsights, nodes: &[GraphNode], edges: &[GraphEdge]) {
+    let mut has: HashSet<(&str, &str)> = HashSet::new();
+    for e in edges.iter().filter(|e| e.kind == "confirmed") {
+        match e.relation.as_deref() {
+            Some("affects") => {
+                has.insert((e.source.as_str(), "affects"));
+            }
+            Some("affected_by") => {
+                has.insert((e.target.as_str(), "affects"));
+            }
+            Some("caused_by") => {
+                has.insert((e.source.as_str(), "caused_by"));
+            }
+            Some("causes") => {
+                has.insert((e.target.as_str(), "caused_by"));
+            }
+            _ => {}
+        }
+    }
+    let open = |n: &GraphNode| !matches!(n.status.as_deref(), Some("superseded") | Some("done"));
+    insights.decisions_without_affects = nodes
+        .iter()
+        .filter(|n| n.doc_type == "decision" && open(n) && !has.contains(&(n.id.as_str(), "affects")))
+        .map(|n| n.id.clone())
+        .take(MAX_GAP_ITEMS)
+        .collect();
+    insights.bugs_without_cause = nodes
+        .iter()
+        .filter(|n| n.doc_type == "bug" && open(n) && !has.contains(&(n.id.as_str(), "caused_by")))
+        .map(|n| n.id.clone())
+        .take(MAX_GAP_ITEMS)
+        .collect();
+}
+
 /// Tarjan articulation-point algorithm on the undirected edge set.
 fn articulation_points(nodes: &[GraphNode], edges: &[GraphEdge]) -> Vec<String> {
     let mut idx: HashMap<String, usize> = HashMap::new();
@@ -1052,6 +1168,8 @@ mod tests {
                 reason: "test".into(),
                 status: GhostStatus::Pending,
                 created_at: 0,
+                relation: None,
+                proposed_by: None,
             }],
             last_scan_at: None,
         };

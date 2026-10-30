@@ -22,6 +22,7 @@ mod ingest;
 mod journal;
 mod journal_view;
 mod links;
+mod ontology;
 mod mcp;
 mod mcp_inbound;
 mod mcp_presence;
@@ -573,6 +574,8 @@ pub fn run() {
             commands::search_full,
             commands::compound_preview,
             commands::compound_apply,
+            commands::ontology_schema,
+            commands::ontology_docs,
             commands::ghost_list,
             commands::ghost_scan,
             commands::ghost_accept,

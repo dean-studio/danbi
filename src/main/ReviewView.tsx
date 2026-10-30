@@ -10,6 +10,7 @@ import {
   type ReviewItem,
   type VaultSuggestion,
 } from "@/lib/ipc";
+import { relationLabel } from "@/lib/ontology";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 
@@ -20,7 +21,14 @@ import { useApp } from "@/state/store";
  * 복제하지 않음). 고아 "제외" 만 `cfg.review_excluded_paths` 에 남는다.
  */
 
-export type Filter = "all" | "ghost" | "orphan" | "empty" | "large" | "review";
+export type Filter =
+  | "all"
+  | "ghost"
+  | "orphan"
+  | "empty"
+  | "large"
+  | "ontology"
+  | "review";
 
 const FILTERS: Array<{ key: Filter; label: string }> = [
   { key: "all", label: "전체" },
@@ -28,6 +36,7 @@ const FILTERS: Array<{ key: Filter; label: string }> = [
   { key: "orphan", label: "고아" },
   { key: "empty", label: "빈 파일" },
   { key: "large", label: "큰 파일" },
+  { key: "ontology", label: "온톨로지" },
   { key: "review", label: "저신뢰" },
 ];
 
@@ -57,18 +66,21 @@ export type ReviewRow = {
   ts: number;
   /** 승인/제외 동작의 라벨. null 이면 열기·무시만. */
   approveLabel: string | null;
+  /** 이유 앞에 붙는 작은 뱃지 (ghost 제안의 관계 이름 등). */
+  tag?: string;
   ghost?: GhostSuggestion;
   review?: ReviewItem;
 };
 type Row = ReviewRow;
 
-/** 표시 순서: ghost → 저신뢰 → 큰 파일 → 빈 파일 → 고아(최근 수정 우선). */
+/** 표시 순서: ghost → 저신뢰 → 온톨로지 → 큰 파일 → 빈 파일 → 고아(최근 수정 우선). */
 const FILTER_ORDER: Record<Exclude<Filter, "all">, number> = {
   ghost: 0,
   review: 1,
-  large: 2,
-  empty: 3,
-  orphan: 4,
+  ontology: 2,
+  large: 3,
+  empty: 4,
+  orphan: 5,
 };
 
 /**
@@ -172,9 +184,12 @@ export function useReviewRows(project?: string | null): {
           badgeTone: "text-accent-blue",
           project: g.project,
           domain: g.source_domain,
-          reason: `${g.source_domain} ↔ ${g.target_domain} · ${g.reason}`,
+          reason: g.relation
+            ? `${g.source_domain} → ${g.target_domain} · ${g.reason}`
+            : `${g.source_domain} ↔ ${g.target_domain} · ${g.reason}`,
           ts: g.created_at * 1000,
           approveLabel: "승인",
+          tag: g.relation ? relationLabel(g.relation) : undefined,
           ghost: g,
         });
       }
@@ -214,6 +229,7 @@ export function useReviewRows(project?: string | null): {
       orphan: 0,
       empty: 0,
       large: 0,
+      ontology: 0,
       review: 0,
     };
     for (const r of rows) c[r.filter] += 1;
@@ -428,7 +444,8 @@ export function ReviewView({
         <div className="mx-auto max-w-[1040px] px-6 py-6">
           <div className="text-caption-md text-mute">
             GHOST {counts.ghost} · 고아 {counts.orphan} · 빈 파일 {counts.empty}{" "}
-            · 큰 파일 {counts.large} · 저신뢰 {counts.review}
+            · 큰 파일 {counts.large} · 온톨로지 {counts.ontology} · 저신뢰{" "}
+            {counts.review}
           </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-1.5">
@@ -608,9 +625,26 @@ function ReviewRow({
             </>
           )}
         </div>
-        <div className="truncate text-[13px] text-ink" title={row.reason}>
-          {row.reason}
+        <div className="flex min-w-0 items-center gap-1.5">
+          {row.tag && <RelationTag>{row.tag}</RelationTag>}
+          <div className="truncate text-[13px] text-ink" title={row.reason}>
+            {row.reason}
+          </div>
         </div>
+        {row.ghost?.proposed_by && row.ghost.proposed_by !== "scan" && (
+          <div className="text-caption-sm text-stone">
+            에이전트 제안 ({row.ghost.proposed_by})
+          </div>
+        )}
+        {row.ghost?.relation && row.ghost.relation !== "relates_to" && (
+          <div className="text-caption-sm text-stone">
+            승인하면 {row.ghost.source_domain} 에{" "}
+            <span className="font-mono">
+              {row.tag}:: [[{row.ghost.target_domain}]]
+            </span>{" "}
+            로 적어요.
+          </div>
+        )}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         {canOpen && (
@@ -658,6 +692,15 @@ function ActionButton({
   );
 }
 
+/** 관계 이름 뱃지 — 중립 톤. ReviewMini 도 쓴다. */
+export function RelationTag({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex h-[18px] shrink-0 items-center rounded-xs border border-hairline-strong bg-surface-elevated px-1.5 text-[10px] text-on-dark">
+      {children}
+    </span>
+  );
+}
+
 function Key({ children }: { children: React.ReactNode }) {
   return (
     <kbd className="inline-flex h-5 min-w-[20px] items-center justify-center rounded-xs border border-hairline bg-surface-elevated px-1 font-mono text-[10px] text-mute">
@@ -685,45 +728,118 @@ function healingRow(
   }
   const path = `${h.project}/${h.domain}`;
   const ts = mtimeOf.get(path) ?? 0;
-  if (h.kind === "Orphan") {
-    const base = h.domain.split("/").pop() ?? h.domain;
-    if (INDEX_LIKE.has(base)) return null;
-    return {
-      key: `heal:orphan:${path}`,
-      filter: "orphan",
-      badge: "ORPHAN",
-      badgeTone: "text-accent-blue",
-      project: h.project,
-      domain: h.domain,
-      reason: "들어오는 링크가 없어요. 관련 문서에서 [[링크]] 를 걸거나 제외하세요.",
-      ts,
-      approveLabel: "제외",
-    };
+  switch (h.kind) {
+    case "Orphan": {
+      const base = h.domain.split("/").pop() ?? h.domain;
+      if (INDEX_LIKE.has(base)) return null;
+      return {
+        key: `heal:orphan:${path}`,
+        filter: "orphan",
+        badge: "ORPHAN",
+        badgeTone: "text-accent-blue",
+        project: h.project,
+        domain: h.domain,
+        reason: "들어오는 링크가 없어요. 관련 문서에서 [[링크]] 를 걸거나 제외하세요.",
+        ts,
+        approveLabel: "제외",
+      };
+    }
+    case "Empty":
+      return {
+        key: `heal:empty:${path}`,
+        filter: "empty",
+        badge: "EMPTY",
+        badgeTone: "text-on-dark-mute",
+        project: h.project,
+        domain: h.domain,
+        reason: "비어있는 문서예요.",
+        ts,
+        approveLabel: null,
+      };
+    case "Oversized":
+      return {
+        key: `heal:large:${path}`,
+        filter: "large",
+        badge: "LARGE",
+        badgeTone: "text-accent-yellow",
+        project: h.project,
+        domain: h.domain,
+        reason: `${(h.bytes / 1024).toFixed(1)}KB — 섹션으로 분할하는 걸 고려하세요.`,
+        ts,
+        approveLabel: null,
+      };
+    case "UnknownType":
+    case "UnknownStatus":
+    case "UnknownRelation":
+    case "DanglingTypedLink":
+      return ontologyRow(h, path, ts);
+    default: {
+      // 백엔드가 새 종류를 더해도 화면이 깨지지 않게 — 타입상 never.
+      const unknown = h as { kind?: string; project?: string; domain?: string };
+      return {
+        key: `heal:other:${unknown.kind ?? "?"}:${path}`,
+        filter: "ontology",
+        badge: (unknown.kind ?? "기타").slice(0, 10).toUpperCase(),
+        badgeTone: "text-on-dark-mute",
+        project: unknown.project ?? "—",
+        domain: unknown.domain ?? null,
+        reason: "정리 제안이 있어요.",
+        ts,
+        approveLabel: null,
+      };
+    }
   }
-  if (h.kind === "Empty") {
-    return {
-      key: `heal:empty:${path}`,
-      filter: "empty",
-      badge: "EMPTY",
-      badgeTone: "text-on-dark-mute",
-      project: h.project,
-      domain: h.domain,
-      reason: "비어있는 문서예요.",
-      ts,
-      approveLabel: null,
-    };
-  }
-  return {
-    key: `heal:large:${path}`,
-    filter: "large",
-    badge: "LARGE",
-    badgeTone: "text-accent-yellow",
+}
+
+type OntologySuggestion = Extract<
+  VaultSuggestion,
+  { kind: "UnknownType" | "UnknownStatus" | "UnknownRelation" | "DanglingTypedLink" }
+>;
+
+/** 온톨로지 정리 제안 4종 — 한국어 안내 문구. 고칠 곳은 문서 자체라 열기·무시만. */
+function ontologyRow(h: OntologySuggestion, path: string, ts: number): Row {
+  const base = {
+    filter: "ontology" as const,
+    badgeTone: "text-on-dark-mute",
     project: h.project,
     domain: h.domain,
-    reason: `${(h.bytes / 1024).toFixed(1)}KB — 섹션으로 분할하는 걸 고려하세요.`,
     ts,
     approveLabel: null,
   };
+  switch (h.kind) {
+    case "UnknownType":
+      return {
+        ...base,
+        key: `heal:onto-type:${path}:${h.value}`,
+        badge: "TYPE",
+        reason: `모르는 문서 종류 '${h.value}' — schema.md 의 ## 온톨로지 에 추가하거나 type 값을 바꾸세요.`,
+      };
+    case "UnknownStatus":
+      return {
+        ...base,
+        key: `heal:onto-status:${path}:${h.value}`,
+        badge: "STATUS",
+        reason: `모르는 상태 '${h.value}' — active(유효) · superseded(대체됨) · done(완료) 중 하나로 바꾸거나 schema.md 에 추가하세요.`,
+      };
+    case "UnknownRelation":
+      return {
+        ...base,
+        key: `heal:onto-rel:${path}:${h.key}`,
+        badge: "RELATION",
+        reason: `모르는 관계 '${h.key}::' — schema.md 의 ## 온톨로지 에 추가하거나 영향·원인·대체 같은 이름으로 바꾸세요.`,
+      };
+    case "DanglingTypedLink": {
+      const target = h.target.startsWith(`${h.project}/`)
+        ? h.target.slice(h.project.length + 1)
+        : h.target;
+      return {
+        ...base,
+        key: `heal:onto-dangling:${path}:${h.relation}:${h.target}`,
+        badge: "BROKEN",
+        reason: `끊긴 관계 링크: ${relationLabel(h.relation)} → ${target} (문서 없음)`,
+      };
+    }
+  }
 }
 
 function kindLabel(kind: string): string {

@@ -37,6 +37,8 @@ MCP endpoint: `{{MCP_URL}}` (이미 등록돼 있으면 무시. 안 등록돼 �
 - `danbi_read` — 특정 프로젝트/도메인 파일. 큰 문서는 `heading` 으로 섹션만, `max_chars`/`offset` 으로 나눠서
 - `danbi_daily` — 오늘 + 1주/1달/1년 전 daily 노트
 - `danbi_list_projects` — 프로젝트 목록 (기본 요약형, `project` 를 주면 그 프로젝트의 파일 트리)
+- `danbi_query` — 문서 종류·상태·관계로 고르기 (검색어 없이). 예: `type=decision status=active`, `relation=caused_by target=notes/x.md`
+- `danbi_schema` — 이 프로젝트의 종류·관계·상태 단어 목록과 종류별 문서 수
 
 **쓰기** (현재 cwd 의 프로젝트로 자동 clamp — 다른 프로젝트로 잘못 쓸 위험 0):
 - `danbi_log` — 오늘 daily 노트에 append. project 파라미터 **생략**. `_시각 · 호출자_` 줄은 자동(첫 제목 바로 아래), 직전 기록과 같은 본문은 `deduped`. 응답에 `warning` 이 오면 저장은 된 것 — 재시도 금지.
@@ -45,6 +47,8 @@ MCP endpoint: `{{MCP_URL}}` (이미 등록돼 있으면 무시. 안 등록돼 �
 - `danbi_create_file` — 폴더+파일+내용을 한 번에 보장. 매일 통계 자동 기록 같은 자동화에 적합.
 - `danbi_replace_section` — 지정 헤딩(`## ...`) 아래 본문 전체를 새 내용으로 **교체**. 같은 섹션이 자주 갱신되는 문서에 사용 (append 누적 X).
 - `danbi_upsert_item` — 리스트 섹션의 한 항목을 in-place 교체 (없으면 추가). `[#id]` 마커 또는 첫 줄 텍스트로 매칭. 진행 상태가 바뀌는 체크리스트·카드 리스트에 적합.
+- `danbi_set_meta` — 문서 frontmatter 에 `type`·`status`·문서 단위 관계만 넣기. 본문·다른 키는 그대로.
+- `danbi_propose_link` — 기존 문서 사이 관계를 **제안만** (사용자가 앱에서 승인하면 기록). 지난 기록 정리용.
 
 ## Read — 언제 무엇을 읽는가
 
@@ -61,7 +65,10 @@ MCP endpoint: `{{MCP_URL}}` (이미 등록돼 있으면 무시. 안 등록돼 �
 | 사용자 뉘앙스 | 호출 |
 |---|---|
 | "예전에 이거 어떻게 정했지?" | `danbi_context` (부족하면 `danbi_read`) |
-| "이 문서랑 관련된 건?" | `danbi_related` |
+| "이 문서랑 관련된 건?" | `danbi_related` (`by_relation` 에 영향·원인·대체별 묶음) |
+| "지금 유효한 결정은?" | `danbi_query(type="decision", status="active")` |
+| "이 결정 바꾸면 어디에 영향?" | `danbi_query(relation="affected_by", target="decisions/x.md")` |
+| "같은 원인으로 난 버그 있었나?" | `danbi_query(relation="caused_by", target="notes/원인.md")` |
 | "지난주/어제 뭐 했지?" | `danbi_briefing` activity |
 | "1년 전 오늘" / "비슷한 거 한 적 있나" | `danbi_daily` |
 | "X 관련 기존 노트" | `danbi_search` |
@@ -158,6 +165,32 @@ danbi_create_file(domain="stats/2026-05-17.md", content="...")
 의 리스크 매트릭스 기준 수용 가능. 토큰 만료 처리는 [[notes/token-refresh-flow.md]] 참조.
 ```
 
+### 관계로 적기 (온톨로지)
+
+링크가 "그냥 관련"이 아니면 **관계 이름을 붙여** 적는다. 그래프와 `danbi_query` 가 이걸로 답한다.
+
+```markdown
+### 원인: 자동 업데이트가 안 뜸
+- 체크가 앱 시작 1회뿐
+원인:: [[notes/updater-throttle.md]]
+영향:: [[release.md]]
+```
+
+| 관계 | 쓰는 때 | 반대 방향(자동) |
+|---|---|---|
+| `영향::` (affects) | 이 결정·변경이 저 문서에 영향 | 영향받음 |
+| `원인::` (caused_by) | 이 버그·문제의 원인이 저 문서 | 결과 |
+| `대체::` (supersedes) | 이 결정이 옛 결정을 대체 → 옛 결정은 자동으로 superseded | 대체됨 |
+| `구현::` (implements) | 이 작업이 저 기능·결정을 구현 | 구현됨 |
+| `차단::` (blocks) | 이 문제가 저 작업을 막음 | 차단됨 |
+| `부분::` (part_of) | 이 문서가 저 문서의 일부 | 포함 |
+| `관련::` 또는 `## 관련` 아래 | 그 외 | 관련 |
+
+- 결정을 뒤집을 땐 새 결정에 `대체:: [[옛 결정]]` — 옛 것을 지우지 않는다. `danbi_briefing` 의 `active_decisions` 가 지금 유효한 결정이다.
+- 문서 종류는 폴더로 정해진다 (`decisions/` 결정, `notes/` 메모, `daily/` 일지). 다르게 하려면 `danbi_set_meta(type=...)`.
+- 단어 목록 밖의 관계 이름은 쓰지 않는다 — `danbi_schema` 로 확인. 프로젝트가 schema.md 의 `## 온톨로지` 에서 더 추가할 수 있다.
+- 지난 문서의 관계를 정리할 땐 직접 고치지 말고 `danbi_propose_link` 로 제안 → 사용자가 승인.
+
 ### Ghost 제안 처리
 
 `danbi_briefing` 응답의 `ghost_suggestions` 는 단비가 제안한 "아직 확정 안 된 링크". 작업 중 source 문서 편집 시 제안 target 이 정말 관련 있으면 본문에 `[[target]]` 삽입. 점선 → 실선 승격.
@@ -167,5 +200,6 @@ danbi_create_file(domain="stats/2026-05-17.md", content="...")
 - **❌ `danbi_log` 누락**: 작은 결정일수록 나중에 찾기 어렵다. 기록한다.
 - **❌ 일반 지식으로 답**: 이 vault 의 결정이 중요하다. 먼저 검색.
 - **❌ 링크 없이 기록**: 관련 문서 있는데 `[[]]` 안 걺 → 그래프 안 자람.
+- **❌ 관계 이름 없이 원인·영향 기록**: "원인은 [[x]]" 대신 `원인:: [[x]]` — 그래야 같은 원인을 다시 찾는다.
 - **❌ project 파라미터 수동 지정**: scoped endpoint 가 자동 clamp. 생략이 맞다.
 "####;

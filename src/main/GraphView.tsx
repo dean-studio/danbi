@@ -4,13 +4,20 @@ import ForceGraph2D, {
   type LinkObject,
   type NodeObject,
 } from "react-force-graph-2d";
-import { Filter, Lightbulb, Palette, Search, X } from "lucide-react";
+import { Filter, GitBranch, Lightbulb, Palette, Search, X } from "lucide-react";
 import {
   ipc,
   type GhostSuggestion,
   type GraphData,
   type GraphInsights,
+  type OntologySchema,
 } from "@/lib/ipc";
+import {
+  DEFAULT_TYPE_ORDER,
+  pickLabel,
+  statusAlpha,
+  typeColor,
+} from "@/lib/ontology";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 
@@ -24,7 +31,11 @@ type GNode = NodeObject & {
   bytes: number;
   community: number;
   degree: number;
+  doc_type: string;
+  status?: string;
   color?: string;
+  /** 관계 필터가 켜졌을 때 보이는 선에 닿지 않는 노드 — 흐리게. */
+  dimmed?: boolean;
   // When set, pins the node to (fx, fy) — used to anchor the hub at the
   // origin so the layout reads as radial around it.
   fx?: number;
@@ -40,9 +51,25 @@ type GLink = LinkObject & {
   ghost_id: string | null;
   ghost_project: string | null;
   reason: string | null;
+  relation?: string;
 };
 
-type ColorMode = "project" | "community";
+type ColorMode = "type" | "project" | "community";
+
+const COLOR_MODE_LABEL: Record<ColorMode, string> = {
+  type: "종류",
+  project: "프로젝트",
+  community: "커뮤니티",
+};
+
+/** 관계 필터 — "" 전체 · TYPED 관계 있는 선만 · 그 외 특정 관계 이름. */
+const REL_TYPED = "__typed";
+
+/** 노드 반지름 — 페인터·히트 영역·화살표가 같은 값을 쓴다. */
+function nodeRadius(n: { bytes: number; isHub?: boolean }): number {
+  const baseR = Math.max(3, 3 + Math.sqrt(Math.max(1, n.bytes)) / 40);
+  return n.isHub ? Math.max(baseR * 2.2, baseR + 8) : baseR;
+}
 
 /**
  * Full-screen overlay graph of the vault.
@@ -77,7 +104,13 @@ export function GraphView({
   const [showConfirmed, setShowConfirmed] = useState(true);
   const [showGhost, setShowGhost] = useState(true);
   const [showSoft, setShowSoft] = useState(true);
-  const [colorMode, setColorMode] = useState<ColorMode>("community");
+  // 기본은 "종류" — 결정·버그·기능이 색으로 갈려 보이는 게 이 그래프의
+  // 첫 볼거리다. 프로젝트/커뮤니티는 select 로 바꿀 수 있다.
+  const [colorMode, setColorMode] = useState<ColorMode>("type");
+  const [relFilter, setRelFilter] = useState<string>("");
+  const [hoveredLink, setHoveredLink] = useState<GLink | null>(null);
+  // 프로젝트별 온톨로지 schema — 한글 라벨(ko)과 "아는 종류" 판정용.
+  const [schemas, setSchemas] = useState<Record<string, OntologySchema>>({});
   // 가독성 컨트롤 — 큰 vault 에서 노드/edge 가 한 화면에 폭주하면 그래프
   // 자체가 의미 없어진다. 0 이면 비활성. 슬라이더 UI 는 0.2 에서 도입.
   const [minDegree] = useState<number>(0);
@@ -108,6 +141,49 @@ export function GraphView({
       .catch((e) => setErr(String(e)))
       .finally(() => setLoading(false));
   }, [open, projectFilter]);
+
+  // 그래프에 나온 프로젝트의 schema 를 한 번씩만 받아 둔다. 실패하면 기본
+  // 라벨로 충분하니 조용히 넘어간다.
+  useEffect(() => {
+    if (!data) return;
+    const need = Array.from(new Set(data.nodes.map((n) => n.project))).filter(
+      (p) => !schemas[p],
+    );
+    if (need.length === 0) return;
+    let alive = true;
+    Promise.allSettled(need.map((p) => ipc.ontologySchema(p))).then((res) => {
+      if (!alive) return;
+      const add: Record<string, OntologySchema> = {};
+      res.forEach((r, i) => {
+        if (r.status === "fulfilled") add[need[i]] = r.value;
+      });
+      if (Object.keys(add).length > 0) setSchemas((s) => ({ ...s, ...add }));
+    });
+    return () => {
+      alive = false;
+    };
+    // schemas 는 캐시 — 의존하면 받을 때마다 다시 돈다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
+
+  const schemaList = useMemo(() => Object.values(schemas), [schemas]);
+  const knownTypes = useMemo(() => {
+    const s = new Set<string>(DEFAULT_TYPE_ORDER);
+    for (const sc of schemaList) for (const t of sc.types) s.add(t.name);
+    return s;
+  }, [schemaList]);
+  const typeKo = useCallback(
+    (name: string) => pickLabel("type", name, schemaList),
+    [schemaList],
+  );
+  const relKo = useCallback(
+    (name: string) => pickLabel("relation", name, schemaList),
+    [schemaList],
+  );
+  const statusKo = useCallback(
+    (name: string) => pickLabel("status", name, schemaList),
+    [schemaList],
+  );
 
   // Tune the d3-force simulation for roomy layouts. We can't set these
   // as props (the library doesn't expose them that way); instead we
@@ -264,28 +340,16 @@ export function GraphView({
     for (const n of data.nodes) {
       if (n.id === hubId || n.degree >= minDegree) visibleIds.add(n.id);
     }
-    const nodes: GNode[] = data.nodes
-      .filter((n) => visibleIds.has(n.id))
-      .map((n) => {
-        const isHub = n.id === hubId;
-        return {
-          ...n,
-          color:
-            colorMode === "community"
-              ? communityColor(n.community)
-              : projectColor(n.project),
-          isHub,
-          fx: isHub ? 0 : undefined,
-          fy: isHub ? 0 : undefined,
-        };
-      });
-
-    // 2) edge 필터링: kind 토글 + score 임계 + 양 끝 노드가 모두 보일 때만.
+    // 2) edge 필터링: kind 토글 + 관계 필터 + score 임계 + 양 끝 노드가
+    //    모두 보일 때만.
     const links: GLink[] = data.edges
       .filter((e) => {
         if (e.kind === "ghost" && !showGhost) return false;
         if (e.kind === "soft" && !showSoft) return false;
         if (e.kind === "confirmed" && !showConfirmed) return false;
+        if (relFilter === REL_TYPED && !e.relation) return false;
+        if (relFilter && relFilter !== REL_TYPED && e.relation !== relFilter)
+          return false;
         if (e.score < minScore) return false;
         if (!visibleIds.has(e.source) || !visibleIds.has(e.target)) return false;
         return true;
@@ -298,7 +362,37 @@ export function GraphView({
         ghost_id: e.ghost_id,
         ghost_project: e.ghost_project,
         reason: e.reason,
+        relation: e.relation,
       }));
+
+    // 관계 필터가 켜지면 남은 선에 닿는 노드만 또렷하게. 노드 자체는 숨기지
+    // 않는다(레이아웃이 매번 뒤집히지 않게).
+    const touched = new Set<string>();
+    if (relFilter) {
+      for (const l of links) {
+        touched.add(l.source as string);
+        touched.add(l.target as string);
+      }
+    }
+
+    const nodes: GNode[] = data.nodes
+      .filter((n) => visibleIds.has(n.id))
+      .map((n) => {
+        const isHub = n.id === hubId;
+        return {
+          ...n,
+          color:
+            colorMode === "type"
+              ? typeColor(n.doc_type, knownTypes.has(n.doc_type), cssToken)
+              : colorMode === "community"
+                ? communityColor(n.community)
+                : projectColor(n.project),
+          dimmed: !!relFilter && !touched.has(n.id),
+          isHub,
+          fx: isHub ? 0 : undefined,
+          fy: isHub ? 0 : undefined,
+        };
+      });
     return { nodes, links };
   }, [
     data,
@@ -306,12 +400,38 @@ export function GraphView({
     showConfirmed,
     showGhost,
     showSoft,
+    relFilter,
     colorMode,
     projectColor,
     communityColor,
+    knownTypes,
     minDegree,
     minScore,
   ]);
+
+  // 데이터에 실제로 나온 관계 — 관계 필터 select 의 선택지.
+  const relationCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const e of data?.edges ?? []) {
+      if (e.relation) m.set(e.relation, (m.get(e.relation) ?? 0) + 1);
+    }
+    return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
+  }, [data]);
+  const typedEdgeTotal = relationCounts.reduce((a, [, n]) => a + n, 0);
+
+  // 종류 범례 — 지금 보이는 노드 기준 개수. 기본 종류 순서 → 나머지는 많은 순.
+  const typeCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const n of viewData.nodes) m.set(n.doc_type, (m.get(n.doc_type) ?? 0) + 1);
+    return Array.from(m.entries()).sort((a, b) => {
+      const ia = DEFAULT_TYPE_ORDER.indexOf(a[0]);
+      const ib = DEFAULT_TYPE_ORDER.indexOf(b[0]);
+      if (ia >= 0 && ib >= 0) return ia - ib;
+      if (ia >= 0) return -1;
+      if (ib >= 0) return 1;
+      return b[1] - a[1];
+    });
+  }, [viewData.nodes]);
 
   const projects = useMemo(() => {
     if (!data) return [] as string[];
@@ -326,10 +446,13 @@ export function GraphView({
   //   confirmed → bright hairline (ground truth)
   //   ghost     → accent blue, dashed (AI proposal, waiting for user)
   //   soft      → accent yellow, thin dashed (implicit relevance hint)
+  //   confirmed + 관계 → 거의 불투명 + 화살표 + 관계 이름 (가장 또렷)
   function linkColor(l: GLink): string {
     if (l.kind === "ghost") return cssToken("accent-blue");
     if (l.kind === "soft") return withAlpha(cssToken("accent-yellow"), 0.55);
-    return withAlpha(cssToken("ink"), 0.55);
+    if (l.relation) return withAlpha(cssToken("ink"), 0.92);
+    // 관계 있는 선이 하나라도 있으면 일반 링크는 한 톤 내려 대비를 만든다.
+    return withAlpha(cssToken("ink"), typedEdgeTotal > 0 ? 0.38 : 0.55);
   }
 
   // Canvas custom node painter — draws the circle + a label that fades in
@@ -359,8 +482,7 @@ export function GraphView({
     (node: GNode, ctx: CanvasRenderingContext2D, scale: number) => {
       // Hubs render noticeably larger with a soft halo so the radial
       // center is obvious at a glance — the eye should land there first.
-      const baseR = Math.max(3, 3 + Math.sqrt(Math.max(1, node.bytes)) / 40);
-      const r = node.isHub ? Math.max(baseR * 2.2, baseR + 8) : baseR;
+      const r = nodeRadius(node);
       const matches =
         q.length > 0 &&
         (node.label.toLowerCase().includes(q) ||
@@ -368,6 +490,15 @@ export function GraphView({
 
       const x = (node.x ?? 0) as number;
       const y = (node.y ?? 0) as number;
+
+      // 상태(대체됨/완료) · 관계 필터 밖 노드는 흐리게. 검색·hover 대상은
+      // 원래대로 보여준다.
+      const focus = matches || hovered?.id === node.id;
+      const alpha = focus
+        ? 1
+        : statusAlpha(node.status) * (node.dimmed ? 0.3 : 1);
+      ctx.save();
+      ctx.globalAlpha = alpha;
 
       // Soft radial halo behind the hub. Pure-canvas gradient so the
       // effect scales with the camera without hitting layout.
@@ -417,29 +548,56 @@ export function GraphView({
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillText(prettyLabel(node.label), x + r + 4 / scale, y);
+        // 대체된 문서는 이름에 취소선.
+        if (node.status === "superseded") {
+          const w = ctx.measureText(prettyLabel(node.label)).width;
+          ctx.beginPath();
+          ctx.moveTo(x + r + 4 / scale, y);
+          ctx.lineTo(x + r + 4 / scale + w, y);
+          ctx.strokeStyle = ctx.fillStyle;
+          ctx.lineWidth = 1 / scale;
+          ctx.stroke();
+        }
       }
+      ctx.restore();
     },
     [hovered, q, crowded],
   );
 
   const linkCanvasObject = useCallback(
-    (link: GLink, ctx: CanvasRenderingContext2D) => {
+    (link: GLink, ctx: CanvasRenderingContext2D, scale: number) => {
       const src = link.source as GNode;
       const tgt = link.target as GNode;
       const sx = (src?.x ?? 0) as number;
       const sy = (src?.y ?? 0) as number;
       const tx = (tgt?.x ?? 0) as number;
       const ty = (tgt?.y ?? 0) as number;
+      const color = linkColor(link);
+      const typed = !!link.relation && link.kind !== "soft";
+
+      // 대체된 문서에 닿은 선도 같이 흐리게 — 노드만 흐리면 선이 튄다.
+      const endAlpha = Math.min(
+        statusAlpha(src?.status) * (src?.dimmed ? 0.3 : 1),
+        statusAlpha(tgt?.status) * (tgt?.dimmed ? 0.3 : 1),
+      );
+      ctx.save();
+      ctx.globalAlpha = Math.max(0.25, endAlpha);
 
       ctx.beginPath();
       ctx.moveTo(sx, sy);
       ctx.lineTo(tx, ty);
-      ctx.strokeStyle = linkColor(link);
+      ctx.strokeStyle = color;
       // Thicken by score: a relevance 1.5 soft edge reads thinner than a
       // 3.0 confirmed wiki link. Confirmed stays bold so ground truth
-      // still dominates visually.
+      // still dominates visually. 관계 있는 확정 선은 한 단계 더 굵게.
       const base =
-        link.kind === "ghost" ? 2.2 : link.kind === "soft" ? 1.1 : 2.0;
+        link.kind === "ghost"
+          ? 2.2
+          : link.kind === "soft"
+            ? 1.1
+            : typed
+              ? 2.8
+              : 1.6;
       const boost = Math.min(1.5, (link.score - 1.0) * 0.35);
       ctx.lineWidth = Math.max(0.8, base + boost);
       if (link.kind === "ghost") {
@@ -451,8 +609,56 @@ export function GraphView({
       }
       ctx.stroke();
       ctx.setLineDash([]);
+
+      if (typed) {
+        const dx = tx - sx;
+        const dy = ty - sy;
+        const len = Math.hypot(dx, dy) || 1;
+        const ux = dx / len;
+        const uy = dy / len;
+
+        // 방향 화살표 — 관계는 source → target 으로 읽힌다.
+        const rt = nodeRadius(tgt ?? { bytes: 0 }) + 1.5;
+        const ax = tx - ux * rt;
+        const ay = ty - uy * rt;
+        const a = Math.max(4, 7 / Math.sqrt(Math.max(0.2, scale)));
+        ctx.beginPath();
+        ctx.moveTo(ax, ay);
+        ctx.lineTo(ax - ux * a - uy * a * 0.55, ay - uy * a + ux * a * 0.55);
+        ctx.lineTo(ax - ux * a + uy * a * 0.55, ay - uy * a - ux * a * 0.55);
+        ctx.closePath();
+        ctx.fillStyle = color;
+        ctx.fill();
+
+        // 관계 이름 — 확대했거나, 끝 노드/선에 hover 했거나, 그래프가 작을 때.
+        const near =
+          hoveredLink === link ||
+          (hovered && (hovered.id === src?.id || hovered.id === tgt?.id));
+        const showLabel = near || scale >= 1.1 || (!crowded && scale >= 0.6);
+        if (showLabel) {
+          const text =
+            relKo(link.relation!) + (link.kind === "ghost" ? " · 제안" : "");
+          const fontPx = 10 / scale;
+          ctx.font = `500 ${fontPx}px Inter, sans-serif`;
+          const w = ctx.measureText(text).width;
+          const mx = (sx + tx) / 2;
+          const my = (sy + ty) / 2;
+          const padX = 3 / scale;
+          const h = fontPx * 1.3;
+          ctx.fillStyle = withAlpha(cssToken("canvas"), 0.88);
+          ctx.fillRect(mx - w / 2 - padX, my - h / 2, w + padX * 2, h);
+          ctx.fillStyle =
+            link.kind === "ghost" ? cssToken("accent-blue") : cssToken("ink");
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(text, mx, my);
+        }
+      }
+      ctx.restore();
     },
-    [],
+    // linkColor 는 typedEdgeTotal 만 본다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [hovered, hoveredLink, crowded, relKo, typedEdgeTotal],
   );
 
   // Accept / reject is implemented via the existing ghost_links commands.
@@ -570,16 +776,45 @@ export function GraphView({
             </span>
           </label>
 
-          <button
-            onClick={() =>
-              setColorMode((m) => (m === "project" ? "community" : "project"))
-            }
-            title={`노드 색: ${colorMode === "project" ? "프로젝트별" : "커뮤니티별"} (클릭해서 전환)`}
-            className="inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body hover:text-on-dark"
+          <div
+            className="inline-flex items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 py-0.5 text-[12px]"
+            title="관계로 선 거르기"
           >
-            <Palette size={11} />
-            {colorMode === "project" ? "프로젝트" : "커뮤니티"}
-          </button>
+            <GitBranch size={11} className="text-stone" />
+            <select
+              value={relFilter}
+              onChange={(e) => setRelFilter(e.target.value)}
+              className="bg-transparent text-body outline-none"
+            >
+              <option value="">모든 선</option>
+              <option value={REL_TYPED}>
+                관계 있는 선만 ({typedEdgeTotal})
+              </option>
+              {relationCounts.map(([name, n]) => (
+                <option key={name} value={name}>
+                  {relKo(name)} ({n})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div
+            className="inline-flex items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 py-0.5 text-[12px]"
+            title="노드 색 기준"
+          >
+            <Palette size={11} className="text-stone" />
+            <select
+              value={colorMode}
+              onChange={(e) => setColorMode(e.target.value as ColorMode)}
+              className="bg-transparent text-body outline-none"
+            >
+              {(Object.keys(COLOR_MODE_LABEL) as ColorMode[]).map((m) => (
+                <option key={m} value={m}>
+                  색: {COLOR_MODE_LABEL[m]}
+                </option>
+              ))}
+            </select>
+          </div>
 
           <button
             onClick={() => setInsightsOpen((v) => !v)}
@@ -665,6 +900,7 @@ export function GraphView({
               ctx.stroke();
             }}
             onNodeHover={(n) => setHovered((n as GNode | null) ?? null)}
+            onLinkHover={(l) => setHoveredLink((l as GLink | null) ?? null)}
             onNodeClick={(n) => {
               const node = n as GNode;
               selectDomain(node.project, node.domain);
@@ -689,13 +925,28 @@ export function GraphView({
               {hovered.domain}
             </div>
             <div className="text-caption-sm text-stone">
+              {typeKo(hovered.doc_type)}
+              {hovered.status ? ` · ${statusKo(hovered.status)}` : ""} ·{" "}
               {(hovered.bytes / 1024).toFixed(1)} KB
             </div>
           </div>
         )}
 
+        {!hovered && hoveredLink && (
+          <LinkTooltip link={hoveredLink} relKo={relKo} />
+        )}
+
         {data && data.nodes.length > 0 && (
-          <GraphLegend colorMode={colorMode} />
+          <GraphLegend
+            colorMode={colorMode}
+            typeCounts={typeCounts.map(([name, n]) => ({
+              name,
+              label: typeKo(name),
+              count: n,
+              color: typeColor(name, knownTypes.has(name), cssToken),
+            }))}
+            typedEdges={typedEdgeTotal}
+          />
         )}
 
         {insightsOpen && data && (
@@ -730,6 +981,7 @@ export function GraphView({
               x={popup.x}
               y={popup.y}
               link={popup.link}
+              relKo={relKo}
               onAccept={() => acceptGhost(popup.link)}
               onReject={() => rejectGhost(popup.link)}
               onClose={() => setPopup(null)}
@@ -739,6 +991,7 @@ export function GraphView({
               x={popup.x}
               y={popup.y}
               link={popup.link}
+              relKo={relKo}
               onOpen={(node) => {
                 selectDomain(node.project, node.domain);
                 setPopup(null);
@@ -756,6 +1009,7 @@ function GhostPopup({
   x,
   y,
   link,
+  relKo,
   onAccept,
   onReject,
   onClose,
@@ -763,10 +1017,29 @@ function GhostPopup({
   x: number;
   y: number;
   link: GLink;
+  relKo: (name: string) => string;
   onAccept: () => void;
   onReject: () => void;
   onClose: () => void;
 }) {
+  // 그래프 edge 에는 제안자가 없어서 ghost store 에서 찾아온다.
+  const [proposedBy, setProposedBy] = useState<string | null>(null);
+  useEffect(() => {
+    if (!link.ghost_project || !link.ghost_id) return;
+    let alive = true;
+    ipc
+      .ghostList(link.ghost_project)
+      .then((st) => {
+        if (!alive) return;
+        const g = st.links.find((l) => l.id === link.ghost_id);
+        setProposedBy(g?.proposed_by ?? null);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [link.ghost_project, link.ghost_id]);
+
   // Trim popup label to just the filename portion for readability.
   const src =
     typeof link.source === "string"
@@ -786,8 +1059,10 @@ function GhostPopup({
       }}
     >
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-[11px] uppercase tracking-[0.4px] text-accent-blue">
-          AI 제안 링크
+        <span className="text-[11px] uppercase tracking-[0.4px] text-on-dark-mute">
+          {proposedBy && proposedBy !== "scan"
+            ? `에이전트 제안 (${proposedBy})`
+            : "AI 제안 링크"}
         </span>
         <button
           onClick={onClose}
@@ -801,11 +1076,25 @@ function GhostPopup({
         <span className="mx-1 text-stone">→</span>
         {tgt}
       </div>
+      {link.relation && (
+        <div className="mb-1.5 flex items-center gap-1.5">
+          <RelationBadge>{relKo(link.relation)}</RelationBadge>
+        </div>
+      )}
       {link.reason && (
-        <div className="mb-3 text-caption-sm leading-[1.5] text-body">
+        <div className="mb-2 text-caption-sm leading-[1.5] text-body">
           {link.reason}
         </div>
       )}
+      <div className="mb-3 text-caption-sm leading-[1.5] text-stone">
+        받아들이면 {src} 의 ## 관련 에{" "}
+        <span className="font-mono text-mute">
+          {link.relation && link.relation !== "relates_to"
+            ? `${relKo(link.relation)}:: [[…]]`
+            : "[[…]]"}
+        </span>{" "}
+        로 적어요.
+      </div>
       <div className="flex items-center justify-end gap-1.5">
         <button
           onClick={onReject}
@@ -831,12 +1120,14 @@ function ConfirmedPopup({
   x,
   y,
   link,
+  relKo,
   onOpen,
   onClose,
 }: {
   x: number;
   y: number;
   link: GLink;
+  relKo: (name: string) => string;
   onOpen: (node: GNode) => void;
   onClose: () => void;
 }) {
@@ -853,8 +1144,9 @@ function ConfirmedPopup({
       }}
     >
       <div className="mb-2 flex items-center justify-between">
-        <span className="text-[11px] uppercase tracking-[0.4px] text-on-dark-mute">
+        <span className="flex items-center gap-1.5 text-[11px] uppercase tracking-[0.4px] text-on-dark-mute">
           확정 링크
+          {link.relation && <RelationBadge>{relKo(link.relation)}</RelationBadge>}
         </span>
         <button
           onClick={onClose}
@@ -873,9 +1165,23 @@ function ConfirmedPopup({
         {tgt.domain}
       </div>
       <div className="mb-3 text-caption-sm leading-[1.5] text-body">
-        <span className="text-mute">{src.domain}</span> 의 본문에{" "}
-        <span className="font-mono text-on-dark">[[{tgt.label.replace(/\.md$/i, "")}]]</span>{" "}
-        참조가 있어서 이어진 선이에요.
+        {link.relation ? (
+          <>
+            <span className="text-mute">{src.domain}</span> 의{" "}
+            <span className="text-on-dark">{relKo(link.relation)}</span> 이(가){" "}
+            <span className="text-mute">{tgt.domain}</span> 라고 적혀 있어요{" "}
+            <span className="font-mono text-stone">
+              ({relKo(link.relation)}:: [[{tgt.label.replace(/\.md$/i, "")}]])
+            </span>
+            .
+          </>
+        ) : (
+          <>
+            <span className="text-mute">{src.domain}</span> 의 본문에{" "}
+            <span className="font-mono text-on-dark">[[{tgt.label.replace(/\.md$/i, "")}]]</span>{" "}
+            참조가 있어서 이어진 선이에요.
+          </>
+        )}
       </div>
       <div className="flex items-center justify-end gap-1.5">
         <button
@@ -929,6 +1235,24 @@ function InsightsPanel({
         그래프 인사이트
       </header>
       <div className="flex-1 min-h-0 overflow-auto px-3 py-2">
+        <InsightSection
+          title="영향 표시 없는 결정"
+          subtitle="유효한 결정인데 무엇에 영향을 주는지 안 적혔어요 — 본문에 영향:: [[문서]]"
+          empty="모든 결정에 영향이 적혀 있어요."
+          items={(insights.decisions_without_affects ?? []).map((id) => ({ id }))}
+          labelOf={labelOf}
+          projectOf={projectOf}
+          onFocus={onFocusNode}
+        />
+        <InsightSection
+          title="원인 없는 버그"
+          subtitle="열린 버그인데 원인이 안 적혔어요 — 본문에 원인:: [[문서]]"
+          empty="모든 버그에 원인이 적혀 있어요."
+          items={(insights.bugs_without_cause ?? []).map((id) => ({ id }))}
+          labelOf={labelOf}
+          projectOf={projectOf}
+          onFocus={onFocusNode}
+        />
         <InsightSection
           title="Hub"
           subtitle="가장 많이 연결된 문서들 — 프로젝트의 중심 개념"
@@ -1052,23 +1376,52 @@ function InsightSection({
   );
 }
 
-function GraphLegend({ colorMode }: { colorMode: ColorMode }) {
+function GraphLegend({
+  colorMode,
+  typeCounts,
+  typedEdges,
+}: {
+  colorMode: ColorMode;
+  typeCounts: Array<{ name: string; label: string; count: number; color: string }>;
+  typedEdges: number;
+}) {
   return (
-    <div className="pointer-events-none absolute bottom-3 left-3 select-none rounded-md border border-hairline bg-surface/90 px-3 py-2 backdrop-blur">
+    <div className="pointer-events-none absolute bottom-3 left-3 max-h-[calc(100%-24px)] select-none overflow-hidden rounded-md border border-hairline bg-surface/90 px-3 py-2 backdrop-blur">
       <div className="mb-1.5 text-[10px] uppercase tracking-[0.6px] text-mute">
         범례
       </div>
 
       <div className="mb-2">
-        <div className="mb-1 text-caption-sm text-stone">노드</div>
+        <div className="mb-1 text-caption-sm text-stone">
+          노드{colorMode === "type" ? " — 문서 종류" : ""}
+        </div>
         <div className="flex flex-col gap-0.5 text-caption-md text-body">
+          {colorMode === "type" ? (
+            typeCounts.map((t) => (
+              <div key={t.name} className="flex items-center gap-1.5">
+                <span
+                  className="inline-block h-2 w-2 rounded-full"
+                  style={{ backgroundColor: t.color }}
+                />
+                <span>{t.label}</span>
+                <span className="font-mono text-caption-sm text-stone">
+                  {t.count}
+                </span>
+              </div>
+            ))
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <span className="inline-block h-2 w-2 rounded-full bg-accent-blue" />
+              <span>
+                {colorMode === "community"
+                  ? "커뮤니티 (같은 색 = 같은 주제군)"
+                  : "프로젝트별 색상"}
+              </span>
+            </div>
+          )}
           <div className="flex items-center gap-1.5">
-            <span className="inline-block h-2 w-2 rounded-full bg-accent-blue" />
-            <span>
-              {colorMode === "community"
-                ? "커뮤니티 (같은 색 = 같은 주제군)"
-                : "프로젝트별 색상"}
-            </span>
+            <span className="inline-block h-2 w-2 rounded-full bg-on-dark-mute opacity-30" />
+            <span>흐림: 대체됨 · 옅음: 완료</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block h-2 w-2 rounded-full bg-on-dark-mute" />
@@ -1080,6 +1433,15 @@ function GraphLegend({ colorMode }: { colorMode: ColorMode }) {
       <div>
         <div className="mb-1 text-caption-sm text-stone">링크</div>
         <div className="flex flex-col gap-0.5 text-caption-md text-body">
+          <div className="flex items-center gap-1.5">
+            <span className="inline-block h-[2px] w-5 bg-ink" />
+            <span>
+              관계 — 화살표 + 이름 (영향·원인…)
+              <span className="ml-1 font-mono text-caption-sm text-stone">
+                {typedEdges}
+              </span>
+            </span>
+          </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block h-0.5 w-5 bg-on-dark-mute" />
             <span>확정 — 실제 wikilink</span>
@@ -1095,6 +1457,46 @@ function GraphLegend({ colorMode }: { colorMode: ColorMode }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function LinkTooltip({
+  link,
+  relKo,
+}: {
+  link: GLink;
+  relKo: (name: string) => string;
+}) {
+  const s = link.source as GNode;
+  const t = link.target as GNode;
+  const kind =
+    link.kind === "ghost" ? "제안" : link.kind === "soft" ? "내용 유사" : "확정";
+  return (
+    <div className="pointer-events-none absolute bottom-3 right-3 max-w-[360px] rounded-md border border-hairline bg-surface px-3 py-2 text-caption-md">
+      <div className="flex items-center gap-1.5 text-mute">
+        {kind}
+        {link.relation && <RelationBadge>{relKo(link.relation)}</RelationBadge>}
+      </div>
+      <div className="mt-0.5 font-mono text-[12px] text-ink">
+        <span className="truncate">{s?.domain ?? String(link.source)}</span>
+        <span className="mx-1 text-stone">→</span>
+        <span className="truncate">{t?.domain ?? String(link.target)}</span>
+      </div>
+      {link.reason && (
+        <div className="mt-0.5 line-clamp-2 text-caption-sm text-stone">
+          {link.reason}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 관계 이름 뱃지 — 중립 톤(chrome 에 accent 금지). */
+function RelationBadge({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex h-[18px] items-center rounded-xs border border-hairline-strong bg-surface-elevated px-1.5 text-[10px] normal-case tracking-normal text-on-dark">
+      {children}
+    </span>
   );
 }
 

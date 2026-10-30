@@ -537,11 +537,25 @@ export type ExportRecord = {
 export type WikiLink = {
   project: string;
   domain: string;
+  /** 링크의 관계(`affects`, `caused_by` …) — source 문서가 적은 방향 그대로.
+   *  incoming 항목도 source 쪽 관계다. 관계 없는 일반 링크는 없음. */
+  relation?: string;
+};
+
+/** 문서 한 개의 온톨로지 메타 (links::LinkIndex.meta). */
+export type DocMeta = {
+  doc_type: string;
+  type_source: OntologyTypeSource;
+  type_known: boolean;
+  status?: string;
+  effective_status?: string;
 };
 
 export type LinkIndex = {
   outgoing: Record<string, WikiLink[]>;
   incoming: Record<string, WikiLink[]>;
+  /** "project/domain" → 종류·상태. 구버전 백엔드엔 없음. */
+  meta?: Record<string, DocMeta>;
 };
 
 export type VaultSuggestion =
@@ -553,6 +567,20 @@ export type VaultSuggestion =
       project: string;
       domain: string;
       bytes: number;
+    }
+  /** `type:` 값이 프로젝트 온톨로지에 없음. */
+  | { kind: "UnknownType"; project: string; domain: string; value: string }
+  /** `status:` 값이 온톨로지에 없음. */
+  | { kind: "UnknownStatus"; project: string; domain: string; value: string }
+  /** `키:: [[x]]` 의 키가 알려진 관계가 아님. */
+  | { kind: "UnknownRelation"; project: string; domain: string; key: string }
+  /** 관계 링크가 없는 문서를 가리킴. target 은 "project/domain". */
+  | {
+      kind: "DanglingTypedLink";
+      project: string;
+      domain: string;
+      relation: string;
+      target: string;
     };
 
 export type DailyNoteRef = {
@@ -612,6 +640,10 @@ export type GhostSuggestion = {
   target_domain: string;
   reason: string;
   created_at: number;
+  /** 제안된 관계 (`affects` …). 승인하면 `원인:: [[x]]` 형태로 기록. */
+  relation?: string;
+  /** "scan" (앱 안 모델) 또는 제안한 MCP 클라이언트 이름. */
+  proposed_by?: string;
 };
 
 export type ActivityWindow = {
@@ -801,6 +833,11 @@ export type GraphNode = {
   bytes: number;
   community: number;
   degree: number;
+  /** 온톨로지 종류 (`decision`, `bug`, `daily` …) — frontmatter 선언 또는
+   *  폴더로 추론. 프로젝트 schema 가 더한 값·모르는 값도 그대로 온다. */
+  doc_type: string;
+  /** 실효 상태 (`active` · `superseded` · `done`). */
+  status?: string;
 };
 
 export type GraphEdge = {
@@ -811,6 +848,8 @@ export type GraphEdge = {
   ghost_id: string | null;
   ghost_project: string | null;
   reason: string | null;
+  /** source → target 관계. 확정 링크에 관계가 적혀 있거나 ghost 제안의 관계. */
+  relation?: string;
 };
 
 export type SparseCommunity = { id: number; members: string[] };
@@ -828,6 +867,10 @@ export type GraphInsights = {
   bridges: string[];
   hubs: HubNode[];
   surprising: SurprisingEdge[];
+  /** 유효한 결정인데 `영향::` 이 없는 문서 id (최대 20). */
+  decisions_without_affects: string[];
+  /** 열린 버그인데 `원인::` 이 없는 문서 id (최대 20). */
+  bugs_without_cause: string[];
 };
 
 export type GraphData = {
@@ -845,11 +888,62 @@ export type GhostLink = {
   reason: string;
   status: GhostStatus;
   created_at: number;
+  /** 제안된 관계. 승인하면 `원인:: [[x]]` 처럼 관계째 기록된다. */
+  relation?: string;
+  /** "scan"(앱 내 스캔) 또는 제안한 MCP 클라이언트 이름. */
+  proposed_by?: string;
 };
 
 export type GhostStore = {
   links: GhostLink[];
   last_scan_at: number | null;
+};
+
+// ---- Ontology (문서 종류 · 관계 · 상태) ----
+
+export type OntologyTypeSource = "declared" | "folder";
+
+export type OntologyTermDef = { name: string; ko?: string | null };
+export type OntologyRelationDef = {
+  name: string;
+  ko?: string | null;
+  /** target 쪽에서 본 관계 이름. relates_to 는 자기 자신. */
+  inverse: string;
+};
+
+export type OntologySchema = {
+  project: string;
+  types: OntologyTermDef[];
+  relations: OntologyRelationDef[];
+  statuses: OntologyTermDef[];
+  /** schema.md 가 더한 폴더 → 종류 매핑. */
+  folders: Record<string, string>;
+  inherited_from?: string | null;
+  counts_by_type: Record<string, number>;
+  declared_types: number;
+  typed_links: number;
+  how_to: string[];
+};
+
+export type OntologyRelationRef = {
+  relation: string;
+  /** "project/domain" */
+  doc: string;
+};
+
+export type OntologyDocRow = {
+  project: string;
+  domain: string;
+  doc_type: string;
+  type_source: OntologyTypeSource;
+  status?: string;
+  relations: OntologyRelationRef[];
+  modified_ms?: number;
+};
+
+export type OntologyDocs = {
+  total: number;
+  docs: OntologyDocRow[];
 };
 
 export type SampleFile = { name: string; content: string };
@@ -1324,6 +1418,22 @@ export const ipc = {
     invoke<GhostStore>("ghost_accept", { project, id }),
   ghostReject: (project: string, id: string) =>
     invoke<GhostStore>("ghost_reject", { project, id }),
+  ontologySchema: (project: string) =>
+    invoke<OntologySchema>("ontology_schema", { project }),
+  ontologyDocs: (args: {
+    project: string;
+    docType?: string | null;
+    status?: string | null;
+    relation?: string | null;
+    limit?: number | null;
+  }) =>
+    invoke<OntologyDocs>("ontology_docs", {
+      project: args.project,
+      docType: args.docType ?? null,
+      status: args.status ?? null,
+      relation: args.relation ?? null,
+      limit: args.limit ?? null,
+    }),
 
   goalsList: (project: string, includeArchived = false) =>
     invoke<Goal[]>("goals_list", { project, includeArchived }),

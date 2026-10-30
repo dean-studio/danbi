@@ -8,6 +8,7 @@ import {
   type GhostLink,
   type WikiLink,
 } from "@/lib/ipc";
+import { inverseRelation, relationLabel } from "@/lib/ontology";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 
@@ -434,6 +435,7 @@ function LinksTab({
               key={`${l.project}/${l.domain}-${i}`}
               link={l}
               current={project}
+              incoming
               onClick={() => onOpenDoc(l.project, l.domain)}
             />
           ))
@@ -454,17 +456,36 @@ function LinksTab({
               key={g.id}
               className="rounded-md border border-hairline bg-surface-elevated px-2.5 py-2"
             >
-              <button
-                type="button"
-                onClick={() => onOpenDoc(project, g.target_domain)}
-                className="block w-full truncate text-left font-mono text-[12px] text-body hover:text-on-dark"
-                title={g.target_domain}
-              >
-                → {g.target_domain}
-              </button>
+              <div className="flex min-w-0 items-center gap-1.5">
+                {g.relation && (
+                  <RelTag>{relationLabel(g.relation)}</RelTag>
+                )}
+                <button
+                  type="button"
+                  onClick={() => onOpenDoc(project, g.target_domain)}
+                  className="block min-w-0 flex-1 truncate text-left font-mono text-[12px] text-body hover:text-on-dark"
+                  title={g.target_domain}
+                >
+                  → {g.target_domain}
+                </button>
+              </div>
+              {g.proposed_by && g.proposed_by !== "scan" && (
+                <div className="mt-0.5 text-caption-sm text-stone">
+                  에이전트 제안 ({g.proposed_by})
+                </div>
+              )}
               {g.reason && (
                 <div className="mt-0.5 line-clamp-2 text-caption-sm text-mute">
                   {g.reason}
+                </div>
+              )}
+              {g.relation && g.relation !== "relates_to" && (
+                <div className="mt-0.5 text-caption-sm text-stone">
+                  승인하면{" "}
+                  <span className="font-mono">
+                    {relationLabel(g.relation)}:: [[…]]
+                  </span>{" "}
+                  로 적어요.
                 </div>
               )}
               <div className="mt-1.5 flex items-center gap-1">
@@ -485,18 +506,35 @@ function LinksTab({
 function LinkRow({
   link,
   current,
+  incoming = false,
   onClick,
 }: {
   link: WikiLink;
   current: string;
+  /** 들어오는 링크면 relation 은 상대 문서가 적은 것 — 역방향으로 표시. */
+  incoming?: boolean;
   onClick: () => void;
 }) {
+  // 들어오는 링크는 상대가 적은 관계의 역방향으로 읽는다 (원인 → 결과).
+  const rel = link.relation
+    ? incoming
+      ? inverseRelation(link.relation)
+      : link.relation
+    : null;
   return (
     <button
       type="button"
       onClick={onClick}
+      title={
+        rel
+          ? incoming
+            ? `${link.domain} 에 '${relationLabel(link.relation!)}:: [[이 문서]]' 로 적혀 있어요`
+            : `이 문서의 ${relationLabel(rel)}`
+          : undefined
+      }
       className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12px] text-body transition-colors hover:bg-surface-elevated hover:text-on-dark"
     >
+      {rel && <RelTag>{relationLabel(rel)}</RelTag>}
       {link.project !== current && (
         <>
           <span className="shrink-0 text-mute">{link.project}</span>
@@ -583,6 +621,14 @@ function Section({
       </div>
       <div className="flex flex-col gap-1">{children}</div>
     </section>
+  );
+}
+
+function RelTag({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="inline-flex h-[18px] shrink-0 items-center rounded-xs border border-hairline-strong bg-surface-elevated px-1.5 text-[10px] text-on-dark">
+      {children}
+    </span>
   );
 }
 

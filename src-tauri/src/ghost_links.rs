@@ -33,6 +33,13 @@ pub struct GhostLink {
     pub status: GhostStatus,
     /// Unix seconds.
     pub created_at: i64,
+    /// Proposed typed relation (`affects`, `caused_by`, …). Accepting writes
+    /// `관계:: [[target]]` instead of a plain link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relation: Option<String>,
+    /// Who proposed it — "scan" (the in-app model) or the MCP client name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed_by: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -192,6 +199,10 @@ Your job: suggest pairs (source_domain, target_domain) where the source's
 excerpt clearly discusses the subject of the target, and a wiki link
 `[[project/target]]` inside the source would help the reader navigate.
 
+Also name the relation from source to target when it is clear, using ONLY
+one of: affects, caused_by, supersedes, implements, blocks, part_of,
+relates_to. Use relates_to when unsure.
+
 Hard rules:
 - source_domain and target_domain MUST both appear verbatim in the `docs`
   array. No invented filenames.
@@ -208,6 +219,7 @@ Respond with ONLY a JSON object, no prose, no fences:
     {
       "source_domain": "ui.md",
       "target_domain": "notes/auth.md",
+      "relation": "relates_to",
       "reason": "ui.md의 로그인 흐름 설명이 notes/auth.md의 토큰 정의를 참조함"
     }
   ]
@@ -219,6 +231,8 @@ struct RouterSuggestion {
     target_domain: String,
     #[serde(default)]
     reason: String,
+    #[serde(default)]
+    relation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -394,6 +408,7 @@ pub async fn scan_project(
     }
 
     let now = Utc::now().timestamp();
+    let vocab = crate::ontology::vocabulary_for(vault, project);
     for s in parsed.suggestions.into_iter().take(MAX_SUGGESTIONS) {
         let src = s.source_domain.trim().to_string();
         let tgt = s.target_domain.trim().to_string();
@@ -419,6 +434,11 @@ pub async fn scan_project(
         if !seen.insert(key.clone()) {
             continue;
         }
+        // An out-of-vocabulary relation is demoted, never invented.
+        let relation = s
+            .relation
+            .as_deref()
+            .map(|r| vocab.canonical_relation(r).unwrap_or_else(|| "relates_to".into()));
         merged.push(GhostLink {
             id: rand_id(),
             source_domain: src,
@@ -426,6 +446,8 @@ pub async fn scan_project(
             reason: s.reason.trim().to_string(),
             status: GhostStatus::Pending,
             created_at: now,
+            relation,
+            proposed_by: Some("scan".into()),
         });
     }
 
@@ -465,27 +487,97 @@ pub fn accept(
     // Read source doc, append a wiki link to it.
     let existing = vault::read_doc(vault, project, &link.source_domain)?;
     let insertion = format!("[[{project}/{}]]", link.target_domain);
+    // A typed suggestion lands as `원인:: [[…]]` so the relation survives in
+    // the markdown; a plain one stays a bare link under `## 관련`.
+    let vocab = crate::ontology::vocabulary_for(vault, project);
+    let relation = link.relation.as_deref().filter(|r| *r != "relates_to");
+    let item = match relation {
+        Some(rel) => format!("{}:: {insertion}", vocab.relation_ko(rel)),
+        None => insertion.clone(),
+    };
 
-    // If the doc already contains the exact link substring, don't duplicate —
-    // just mark accepted.
-    let updated = if existing.contains(&insertion) {
+    // Already there — any spelling of the link (`[[x.md]]`, `[[P/x.md|별칭]]`)
+    // and, for a typed suggestion, with that same relation — just mark it
+    // accepted.
+    let rels = crate::ontology::line_relations(&vocab, &existing);
+    let present = links::extract_links_at(&existing, project).into_iter().any(|(at, l)| {
+        let same_target = (l.project == project && l.domain == link.target_domain)
+            || format!("{}/{}", l.project, l.domain) == link.target_domain;
+        same_target && relation.map_or(true, |r| rels.at(at) == Some(r))
+    });
+    let updated = if present {
         existing
     } else {
-        let trimmed = existing.trim_end().to_string();
-        if trimmed.is_empty() {
-            format!("{insertion}\n")
-        } else if trimmed.contains("\n## 관련") {
-            // Append to existing section.
-            format!("{trimmed}\n- {insertion}\n")
-        } else {
-            format!("{trimmed}\n\n## 관련\n\n- {insertion}\n")
-        }
+        crate::ontology::append_related_item(&existing, &item)
     };
 
     vault::write_doc(vault, project, &link.source_domain, &updated)?;
     store.links[idx].status = GhostStatus::Accepted;
     save(vault, project, &store)?;
     Ok(store)
+}
+
+/// Adds one pending suggestion from outside the in-app scan — an agent
+/// backfilling relations over MCP. The user still accepts or rejects it in
+/// the app; nothing touches markdown here. Returns (link, created): an
+/// existing suggestion for the same pair is returned as-is, and a pair the
+/// user already rejected is not re-proposed.
+pub fn propose(
+    vault: &Path,
+    project: &str,
+    source_domain: &str,
+    target_domain: &str,
+    relation: Option<&str>,
+    reason: &str,
+    proposed_by: Option<&str>,
+) -> DanbiResult<(GhostLink, bool)> {
+    if source_domain == target_domain {
+        return Err(DanbiError::Config("source 와 target 이 같아요.".into()));
+    }
+    for d in [source_domain, target_domain] {
+        if vault::read_doc_opt(vault, project, d)?.is_none() {
+            return Err(DanbiError::Config(format!("document not found: {project}/{d}")));
+        }
+    }
+    let vocab = crate::ontology::vocabulary_for(vault, project);
+    let relation = match relation {
+        Some(r) => Some(vocab.canonical_relation(r).ok_or_else(|| {
+            DanbiError::Config(format!(
+                "모르는 관계: {r}. 쓸 수 있는 관계: {}",
+                vocab.relations.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ")
+            ))
+        })?),
+        None => None,
+    };
+    let mut store = load(vault, project)?;
+    if let Some(prev) = store
+        .links
+        .iter()
+        .find(|l| l.source_domain == source_domain && l.target_domain == target_domain)
+    {
+        return Ok((prev.clone(), false));
+    }
+    let already = existing_links(vault, project)
+        .get(source_domain)
+        .is_some_and(|set| set.contains(target_domain));
+    let link = GhostLink {
+        id: rand_id(),
+        source_domain: source_domain.to_string(),
+        target_domain: target_domain.to_string(),
+        reason: reason.trim().to_string(),
+        status: GhostStatus::Pending,
+        created_at: Utc::now().timestamp(),
+        relation,
+        proposed_by: proposed_by.map(str::to_string),
+    };
+    // A plain link that already exists only needs its relation written —
+    // still worth proposing when typed; an untyped duplicate is noise.
+    if already && link.relation.is_none() {
+        return Ok((link, false));
+    }
+    store.links.push(link.clone());
+    save(vault, project, &store)?;
+    Ok((link, true))
 }
 
 pub fn reject(vault: &Path, project: &str, id: &str) -> DanbiResult<GhostStore> {

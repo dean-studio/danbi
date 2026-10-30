@@ -36,12 +36,16 @@ export function buildClaudeMdBlock(project: string): string {
 - \`danbi_read\` — 특정 프로젝트/도메인 파일의 전체 내용
 - \`danbi_daily\` — 오늘 + 1주/1달/1년 전 daily 노트
 - \`danbi_list_projects\` — vault 전체 프로젝트·도메인 트리
+- \`danbi_query\` — 문서 종류·상태·관계로 고르기 (예: \`type=decision status=active\`, \`relation=caused_by target=notes/x.md\`)
+- \`danbi_schema\` — 종류·관계·상태 단어 목록과 종류별 문서 수
 
 **쓰기** (이 엔드포인트는 "${project}"로 자동 clamp — 다른 프로젝트로 잘못 쓸 위험 0):
 - \`danbi_log\` — 오늘 daily 노트에 append. project 파라미터 **생략**.
 - \`danbi_append\` — 임의 도메인 파일에 append (없으면 자동 생성). project 파라미터 **생략**.
 - \`danbi_create_folder\` — 프로젝트 안에 1~2단계 sub-folder 생성 (예: \`stats\`, \`daily/2026-05\`). 카테고리·시기별 누적용. project 파라미터 **생략**.
 - \`danbi_create_file\` — **폴더 + 파일을 한 번에 보장 + 내용 append**. \`danbi_create_folder\` + \`danbi_append\` 두 호출을 한 번으로 합친 편의 도구. 매일 통계 자동 기록 같은 자동화에 적합. project 파라미터 **생략**.
+- \`danbi_set_meta\` — 문서 frontmatter 에 \`type\`·\`status\`·관계만 넣기 (본문은 그대로). project 파라미터 **생략**.
+- \`danbi_propose_link\` — 기존 문서 사이 관계를 **제안만** (사용자가 단비 앱에서 승인하면 기록). 지난 기록 정리용. project 파라미터 **생략**.
 
 ## Read — 언제 무엇을 읽는가
 
@@ -61,7 +65,9 @@ export function buildClaudeMdBlock(project: string): string {
 | 사용자가 이런 뉘앙스로 물으면 | 이 도구를 먼저 |
 |---|---|
 | "예전에 이거 어떻게 정했지?" | \`danbi_context\` (부족하면 \`danbi_read\`) |
-| "이 문서랑 관련된 건?" | \`danbi_related\` |
+| "이 문서랑 관련된 건?" | \`danbi_related\` (\`by_relation\` 에 영향·원인·대체별 묶음) |
+| "지금 유효한 결정은?" | \`danbi_query(type="decision", status="active")\` |
+| "같은 원인으로 난 버그 있었나?" | \`danbi_query(relation="caused_by", target="notes/원인.md")\` |
 | "지난주/어제 뭐 했지?" | \`danbi_briefing\` activity |
 | "1년 전 오늘" / "비슷한 작업 한 적 있나" | \`danbi_daily\` |
 | "X 관련 기존 노트" | \`danbi_search\` 쿼리 |
@@ -145,6 +151,20 @@ ${"`danbi_log`"}·${"`danbi_append`"} 로 기록할 때 다음 중 하나라도 
 에 정리된 리스크 매트릭스 기준으로 수용 가능 범위로 판단. 관련 토큰 만료
 처리는 [[notes/token-refresh-flow.md]] 참조.
 \`\`\`
+
+### 관계로 적기 (온톨로지)
+
+원인·영향·대체처럼 의미가 있는 링크는 **관계 이름을 붙여** 적는다. 그래프와 \`danbi_query\` 가 이걸로 답한다.
+
+\`\`\`markdown
+### 원인: 자동 업데이트가 안 뜸
+원인:: [[notes/updater-throttle.md]]
+영향:: [[release.md]]
+\`\`\`
+
+- 관계 이름: \`영향::\` \`원인::\` \`대체::\` \`구현::\` \`차단::\` \`부분::\` \`관련::\` (반대 방향은 자동). 목록 밖 이름은 쓰지 않는다 — \`danbi_schema\` 로 확인.
+- 결정을 뒤집을 땐 새 결정에 \`대체:: [[옛 결정]]\` — 옛 결정은 자동으로 superseded 가 된다.
+- 지난 문서의 관계 정리는 직접 고치지 말고 \`danbi_propose_link\` 로 제안 → 사용자가 승인.
 
 ### Ghost 제안 처리
 

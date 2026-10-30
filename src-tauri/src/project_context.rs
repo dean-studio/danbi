@@ -37,6 +37,11 @@ pub struct ProjectContext {
     /// "too long, consider summarizing" hint.
     pub purpose_clipped: bool,
     pub schema_clipped: bool,
+    /// Compact ontology vocabulary (types / relations / statuses) for the
+    /// Writer. Built from defaults + schema.md's `## 온톨로지` block, so it
+    /// survives the 2KB schema clip.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ontology: Option<String>,
 }
 
 fn project_root(vault: &Path, project: &str) -> PathBuf {
@@ -84,7 +89,39 @@ pub fn load(vault: &Path, project: &str) -> ProjectContext {
         ctx.schema_clipped = clipped;
         ctx.schema = Some(body);
     }
+    ctx.ontology = Some(ontology_block(&crate::ontology::vocabulary_for(vault, project)));
     ctx
+}
+
+fn ontology_block(vocab: &crate::ontology::Vocabulary) -> String {
+    let named = |name: &str, ko: Option<&str>| match ko {
+        Some(k) => format!("{name}({k})"),
+        None => name.to_string(),
+    };
+    let types: Vec<String> = vocab.types.iter().map(|t| named(&t.name, t.ko.as_deref())).collect();
+    let statuses: Vec<String> = vocab.statuses.iter().map(|t| named(&t.name, t.ko.as_deref())).collect();
+    // One line per forward/inverse pair, forward first.
+    let mut seen = std::collections::HashSet::new();
+    let mut pairs: Vec<String> = Vec::new();
+    for r in &vocab.relations {
+        if !seen.insert(r.name.clone()) {
+            continue;
+        }
+        let fwd = named(&r.name, r.ko.as_deref());
+        if r.inverse == r.name {
+            pairs.push(fwd);
+            continue;
+        }
+        seen.insert(r.inverse.clone());
+        let inv_ko = vocab.relations.iter().find(|x| x.name == r.inverse).and_then(|x| x.ko.clone());
+        pairs.push(format!("{fwd} ↔ {}", named(&r.inverse, inv_ko.as_deref())));
+    }
+    format!(
+        "Document types (frontmatter `type:`): {}\nRelations (written on the link's line, e.g. `원인:: [[notes/x.md]]`): {}\nStatuses (frontmatter `status:`): {}",
+        types.join(", "),
+        pairs.join(", "),
+        statuses.join(", ")
+    )
 }
 
 /// Produces a `<project_context>` XML-ish block to append to a Writer
@@ -107,7 +144,7 @@ pub fn as_prompt_block(
     let purpose = if skip_purpose { None } else { ctx.purpose.as_deref() };
     let schema = if skip_schema { None } else { ctx.schema.as_deref() };
 
-    if purpose.is_none() && schema.is_none() {
+    if purpose.is_none() && schema.is_none() && ctx.ontology.is_none() {
         return None;
     }
 
@@ -122,13 +159,22 @@ pub fn as_prompt_block(
         out.push_str(s);
         out.push_str("\n</schema>\n");
     }
+    if let Some(o) = ctx.ontology.as_deref() {
+        out.push_str("<ontology>\n");
+        out.push_str(o);
+        out.push_str("\n</ontology>\n");
+    }
     out.push_str(
         "</project_context>\n\n\
          Respect the project purpose and schema above:\n\
          - Never produce output that contradicts the stated purpose/scope.\n\
          - Match the naming and section conventions declared in schema.\n\
          - If the user's request falls outside the purpose, prefer to ask a\n  \
-           brief clarifying question rather than silently drifting.\n",
+           brief clarifying question rather than silently drifting.\n\
+         - When the text you write states that one document causes, affects,\n  \
+           replaces or implements another, write that link as `관계:: [[target]]`\n  \
+           using ONLY the relations in <ontology>. Leave existing frontmatter\n  \
+           keys exactly as they are.\n",
     );
     Some(out)
 }

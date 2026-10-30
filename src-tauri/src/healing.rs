@@ -25,6 +25,31 @@ pub enum Suggestion {
         domain: String,
         bytes: u64,
     },
+    /// `type:` outside the project's ontology vocabulary.
+    UnknownType {
+        project: String,
+        domain: String,
+        value: String,
+    },
+    /// `status:` outside the vocabulary.
+    UnknownStatus {
+        project: String,
+        domain: String,
+        value: String,
+    },
+    /// `키:: [[x]]` whose key is not a known relation.
+    UnknownRelation {
+        project: String,
+        domain: String,
+        key: String,
+    },
+    /// A typed relation pointing at a document that doesn't exist.
+    DanglingTypedLink {
+        project: String,
+        domain: String,
+        relation: String,
+        target: String,
+    },
 }
 
 const OVERSIZED_BYTES: u64 = 60_000; // ~20k tokens — reasonable review trigger
@@ -33,6 +58,16 @@ pub fn scan(vault: &Path) -> DanbiResult<Vec<Suggestion>> {
     let mut out: Vec<Suggestion> = Vec::new();
     let tree = list_tree(vault)?;
     let index = build_index(vault)?;
+    let existing: std::collections::HashSet<String> = tree
+        .projects
+        .iter()
+        .flat_map(|p| {
+            p.domains
+                .iter()
+                .chain(p.subfolders.iter().flat_map(|s| s.domains.iter()))
+                .map(move |d| format!("{}/{}", p.name, d.name))
+        })
+        .collect();
 
     for p in &tree.projects {
         // A project is "empty" only when it has neither top-level files nor
@@ -78,11 +113,60 @@ pub fn scan(vault: &Path) -> DanbiResult<Vec<Suggestion>> {
                     bytes: d.bytes,
                 });
             }
+            ontology_suggestions(&index, &existing, &p.name, &d.name, &key, &mut out);
         }
     }
     // Filter out suggestions that sit in hidden/dotfiles or the _assets dir.
     let _ = vault.join(PROJECTS_DIRNAME); // referenced for type safety
     Ok(out)
+}
+
+/// Vocabulary problems of one document. Advisory only — nothing is
+/// rejected or rewritten.
+fn ontology_suggestions(
+    index: &crate::links::LinkIndex,
+    existing: &std::collections::HashSet<String>,
+    project: &str,
+    domain: &str,
+    key: &str,
+    out: &mut Vec<Suggestion>,
+) {
+    if let Some(issues) = index.issues.get(key) {
+        if let Some(v) = &issues.unknown_type {
+            out.push(Suggestion::UnknownType {
+                project: project.into(),
+                domain: domain.into(),
+                value: v.clone(),
+            });
+        }
+        if let Some(v) = &issues.unknown_status {
+            out.push(Suggestion::UnknownStatus {
+                project: project.into(),
+                domain: domain.into(),
+                value: v.clone(),
+            });
+        }
+        for k in &issues.unknown_relations {
+            out.push(Suggestion::UnknownRelation {
+                project: project.into(),
+                domain: domain.into(),
+                key: k.clone(),
+            });
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for l in index.outgoing.get(key).into_iter().flatten() {
+        let Some(rel) = &l.relation else { continue };
+        let target = format!("{}/{}", l.project, l.domain);
+        if !existing.contains(&target) && seen.insert(target.clone()) {
+            out.push(Suggestion::DanglingTypedLink {
+                project: project.into(),
+                domain: domain.into(),
+                relation: rel.clone(),
+                target,
+            });
+        }
+    }
 }
 
 fn is_index_like(name: &str) -> bool {
@@ -102,7 +186,11 @@ impl Suggestion {
             Suggestion::Orphan { project, .. }
             | Suggestion::Empty { project, .. }
             | Suggestion::EmptyProject { project }
-            | Suggestion::Oversized { project, .. } => project,
+            | Suggestion::Oversized { project, .. }
+            | Suggestion::UnknownType { project, .. }
+            | Suggestion::UnknownStatus { project, .. }
+            | Suggestion::UnknownRelation { project, .. }
+            | Suggestion::DanglingTypedLink { project, .. } => project,
         }
     }
 
@@ -114,6 +202,10 @@ impl Suggestion {
             Suggestion::Empty { .. } => 1,
             Suggestion::Oversized { .. } => 2,
             Suggestion::Orphan { .. } => 3,
+            Suggestion::DanglingTypedLink { .. } => 4,
+            Suggestion::UnknownRelation { .. }
+            | Suggestion::UnknownType { .. }
+            | Suggestion::UnknownStatus { .. } => 5,
         }
     }
 }
