@@ -18,7 +18,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.9.1-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.9.1" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.9.2-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.9.2" />
   </a>
 </p>
 
@@ -34,7 +34,7 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license MIT" /></a>
-  <img src="https://img.shields.io/badge/version-0.9.1-success" alt="version 0.9.1" />
+  <img src="https://img.shields.io/badge/version-0.9.2-success" alt="version 0.9.2" />
 </p>
 
 ---
@@ -62,7 +62,7 @@ AI는 새 대화창을 열 때마다 어제 한 결정을 잊습니다. 그래�
 - **온톨로지 표** — 프로젝트 홈의 [온톨로지] 버튼(또는 ⌘K)에서 문서를 종류·상태·관계별로 봅니다.
 - **기존 노트는 건드리지 않습니다** — 종류는 폴더 이름으로 추정하고, 관계 보강은 제안 → 승인으로만 적힙니다. 프로젝트마다 `schema.md` 의 `## 온톨로지` 섹션에서 종류·관계를 늘릴 수 있습니다.
 
-v0.9.1 에서는 그래프를 다시 그렸습니다 — 전체가 둥근 원판으로 모이고 프로젝트·주제군별 색과 영역으로 나뉘며, 마우스를 올리면 이웃만 남습니다.
+v0.9.1 에서는 그래프를 다시 그렸습니다 — 전체가 둥근 원판으로 모이고 프로젝트·주제군별 색과 영역으로 나뉘며, 마우스를 올리면 이웃만 남고, 범례를 누르면 그 프로젝트·주제군만 강조됩니다(v0.9.2).
 
 그 전에는 Gemini 키 전송 방식 보안 수정과 자동 업데이트 주기(v0.8.12), macOS 27 메뉴바 팝오버(v0.8.11)를 고쳤습니다.
 
