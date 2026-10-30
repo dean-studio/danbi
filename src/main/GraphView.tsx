@@ -62,13 +62,101 @@ const COLOR_MODE_LABEL: Record<ColorMode, string> = {
   community: "커뮤니티",
 };
 
+// 이름표·주제군 이름으로 쓰지 않는 종류.
+const NAMELESS_TYPES = new Set(["daily", "meta"]);
+
+// 주제군·프로젝트 색 — 20색. 앞쪽일수록 서로 멀리 떨어진 색.
+const GROUP_PALETTE = [
+  "#57c1ff", "#59d499", "#ffc533", "#ff6161", "#b47cff",
+  "#7fffd4", "#ff8c42", "#5eead4", "#fb7185", "#a78bfa",
+  "#fbbf24", "#34d399", "#60a5fa", "#f472b6", "#f87171",
+  "#4ade80", "#38bdf8", "#fcd34d", "#c084fc", "#facc15",
+];
+
 /** 관계 필터 — "" 전체 · TYPED 관계 있는 선만 · 그 외 특정 관계 이름. */
 const REL_TYPED = "__typed";
 
+// "관련(relates_to)" 은 관계 없는 [[링크]] 의 기본값이라 일반 선으로 그린다.
+// 화살표·이름·굵기는 영향·원인처럼 뜻이 있는 관계에만 준다.
+function isTyped(relation?: string | null): boolean {
+  return !!relation && relation !== "relates_to";
+}
+
 /** 노드 반지름 — 페인터·히트 영역·화살표가 같은 값을 쓴다. */
-function nodeRadius(n: { bytes: number; isHub?: boolean }): number {
-  const baseR = Math.max(3, 3 + Math.sqrt(Math.max(1, n.bytes)) / 40);
-  return n.isHub ? Math.max(baseR * 2.2, baseR + 8) : baseR;
+// 크기 = 연결 수(√). 허브가 크게 보여야 어디가 중심인지 한눈에 읽힌다.
+function nodeRadius(n: { degree?: number; isHub?: boolean }): number {
+  const baseR = Math.min(18, 3 + Math.sqrt(Math.max(0, n.degree ?? 0)) * 1.6);
+  return n.isHub ? Math.max(baseR * 1.5, baseR + 5) : baseR;
+}
+
+// 노드를 원점으로 당기는 중력 — d3 의 center 는 평균 위치만 옮길 뿐 당기지
+// 않아서, 강한 반발력과 만나면 클러스터가 사방으로 흩어졌다. 옵시디언의
+// "중심력" 처럼 이 힘이 그래프 전체를 둥근 원판으로 모은다.
+type SimNode = { x?: number; y?: number; vx?: number; vy?: number };
+function gravityForce(k: number) {
+  let nodes: SimNode[] = [];
+  const force = (alpha: number) => {
+    for (const n of nodes) {
+      n.vx = (n.vx ?? 0) - (n.x ?? 0) * k * alpha;
+      n.vy = (n.vy ?? 0) - (n.y ?? 0) * k * alpha;
+    }
+  };
+  force.initialize = (ns: SimNode[]) => {
+    nodes = ns;
+  };
+  return force;
+}
+
+// 주제군(커뮤니티)마다 원 둘레에 자리를 주고 그쪽으로 살짝 당긴다 — 같은
+// 색이 한 영역에 모여 "지식 지도" 처럼 읽힌다. 큰 군집 12개만 자리를 받고
+// 나머지·고립 노드는 중력만 받아 가운데에 남는다.
+type ClusterNode = SimNode & { community?: number; project?: string };
+function clusterForce(
+  anchors: Map<string, { x: number; y: number }>,
+  groupOf: (n: ClusterNode) => string,
+  k: number,
+) {
+  let nodes: ClusterNode[] = [];
+  const force = (alpha: number) => {
+    for (const n of nodes) {
+      const a = anchors.get(groupOf(n));
+      if (!a) continue;
+      n.vx = (n.vx ?? 0) + (a.x - (n.x ?? 0)) * k * alpha;
+      n.vy = (n.vy ?? 0) + (a.y - (n.y ?? 0)) * k * alpha;
+    }
+  };
+  force.initialize = (ns: ClusterNode[]) => {
+    nodes = ns;
+  };
+  return force;
+}
+
+/** 전체 화면은 프로젝트로, 한 프로젝트 화면은 주제군(커뮤니티)으로 묶는다. */
+function clusterKey(n: ClusterNode, byProject: boolean): string {
+  if (byProject) return `p:${n.project ?? ""}`;
+  return (n.community ?? -1) >= 0 ? `c:${n.community}` : "";
+}
+
+function clusterAnchors(
+  nodes: ClusterNode[],
+  byProject: boolean,
+): Map<string, { x: number; y: number }> {
+  const sizes = new Map<string, number>();
+  for (const n of nodes) {
+    const key = clusterKey(n, byProject);
+    if (key) sizes.set(key, (sizes.get(key) ?? 0) + 1);
+  }
+  const big = Array.from(sizes.entries())
+    .filter(([, c]) => c >= 3)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12);
+  const radius = 9 * Math.sqrt(nodes.length);
+  const m = new Map<string, { x: number; y: number }>();
+  big.forEach(([id], i) => {
+    const t = (i / big.length) * Math.PI * 2;
+    m.set(id, { x: Math.cos(t) * radius, y: Math.sin(t) * radius });
+  });
+  return m;
 }
 
 /**
@@ -103,10 +191,16 @@ export function GraphView({
   }, [open, initialProject]);
   const [showConfirmed, setShowConfirmed] = useState(true);
   const [showGhost, setShowGhost] = useState(true);
-  const [showSoft, setShowSoft] = useState(true);
-  // 기본은 "종류" — 결정·버그·기능이 색으로 갈려 보이는 게 이 그래프의
-  // 첫 볼거리다. 프로젝트/커뮤니티는 select 로 바꿀 수 있다.
-  const [colorMode, setColorMode] = useState<ColorMode>("type");
+  // 내용 유사도 선은 수천 개라 켜 두면 실제 링크가 묻힌다 — 기본 끔.
+  const [showSoft, setShowSoft] = useState(false);
+  // 기본은 "커뮤니티" — 대부분 문서가 아직 메모·일지라 종류 색은 한두 색에
+  // 그친다. 주제군 색이 그래프를 읽히게 한다. 종류는 select 로 바꾼다.
+  const [colorMode, setColorMode] = useState<ColorMode>("community");
+  // 전체 화면은 주제군이 수백 개라 색이 반복된다 — 프로젝트 색으로 시작하고,
+  // 한 프로젝트를 고르면 주제군 색으로. 고른 뒤엔 select 로 바꿀 수 있다.
+  useEffect(() => {
+    setColorMode(projectFilter ? "community" : "project");
+  }, [projectFilter]);
   const [relFilter, setRelFilter] = useState<string>("");
   const [hoveredLink, setHoveredLink] = useState<GLink | null>(null);
   // 프로젝트별 온톨로지 schema — 한글 라벨(ko)과 "아는 종류" 판정용.
@@ -133,13 +227,25 @@ export function GraphView({
   // need to worry about staleness mid-session.
   useEffect(() => {
     if (!open) return;
+    // 필터를 바꾸면 이전 요청의 응답은 버린다 — 프로젝트에서 열 때 먼저 나간
+    // "전체" 요청이 늦게 도착해 프로젝트 그래프를 덮어쓰던 문제.
+    let alive = true;
     setLoading(true);
     setErr(null);
     ipc
       .buildGraph(projectFilter || undefined)
-      .then(setData)
-      .catch((e) => setErr(String(e)))
-      .finally(() => setLoading(false));
+      .then((g) => {
+        if (alive) setData(g);
+      })
+      .catch((e) => {
+        if (alive) setErr(String(e));
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
   }, [open, projectFilter]);
 
   // 그래프에 나온 프로젝트의 schema 를 한 번씩만 받아 둔다. 실패하면 기본
@@ -216,7 +322,7 @@ export function GraphView({
       // Strong repulsion so nodes don't clump into a pile even when they
       // share many edges. Single-project mode pushes harder because the
       // hub is pinned and we want an airy spray around it.
-      charge.strength(singleProject ? -600 : -380);
+      charge.strength(singleProject ? -160 : -45);
     }
 
     const link = inst.d3Force("link");
@@ -224,13 +330,13 @@ export function GraphView({
       // Longer target edge length = more breathing room between connected
       // nodes. Paired with a weaker link strength (below) so the
       // repulsion wins out on densely-connected clusters.
-      link.distance(singleProject ? 180 : 140);
+      link.distance(singleProject ? 70 : 36);
     }
     if (link && typeof link.strength === "function") {
       // Default link strength (1/min-degree) pulls hard on hub-like
       // nodes, which squishes their neighborhoods together. Clamping to a
       // gentle constant lets the charge repulsion breathe.
-      link.strength(0.12);
+      link.strength(0.25);
     }
 
     // Gentle pull toward origin so the hub-centric layout stays framed.
@@ -240,6 +346,15 @@ export function GraphView({
     if (center && typeof center.strength === "function") {
       center.strength(singleProject ? 0.04 : 0.02);
     }
+    inst.d3Force("gravity", gravityForce(singleProject ? 0.05 : 0.09));
+    inst.d3Force(
+      "cluster",
+      clusterForce(
+        clusterAnchors(data.nodes, !singleProject),
+        (n) => clusterKey(n, !singleProject),
+        0.06,
+      ),
+    );
   }, [data, projectFilter]);
 
   // Resize observer — the force-graph canvas sizes off explicit w/h props, so
@@ -274,29 +389,28 @@ export function GraphView({
   // Project color palette — stable per project name, so re-renders don't
   // shuffle colors around. Resolved from the design tokens so light mode
   // picks up its own accent values.
-  const projectColor = useCallback((project: string): string => {
-    const palette = [
-      cssToken("accent-blue"),
-      cssToken("accent-green"),
-      cssToken("accent-yellow"),
-      cssToken("accent-red"),
-    ];
-    let h = 0;
-    for (const ch of project) h = (h * 31 + ch.charCodeAt(0)) | 0;
-    return palette[Math.abs(h) % palette.length];
-  }, []);
+  // 프로젝트 색 — 문서 많은 순으로 팔레트를 배정해 큰 프로젝트끼리 색이
+  // 겹치지 않게 한다.
+  const projectRank = useMemo(() => {
+    const sizes = new Map<string, number>();
+    for (const n of data?.nodes ?? []) sizes.set(n.project, (sizes.get(n.project) ?? 0) + 1);
+    const m = new Map<string, number>();
+    Array.from(sizes.entries())
+      .sort((a, b) => b[1] - a[1])
+      .forEach(([p], i) => m.set(p, i));
+    return m;
+  }, [data]);
+  const projectColor = useCallback(
+    (project: string): string =>
+      GROUP_PALETTE[(projectRank.get(project) ?? 0) % GROUP_PALETTE.length],
+    [projectRank],
+  );
 
   // Louvain community color palette — 20 distinct hues. -1 (isolated)
   // renders muted so the eye skips over them.
   const communityColor = useCallback((id: number): string => {
     if (id < 0) return "#6a6b6c";
-    const palette = [
-      "#57c1ff", "#59d499", "#ffc533", "#ff6161", "#b47cff",
-      "#7fffd4", "#ff8c42", "#5eead4", "#fb7185", "#a78bfa",
-      "#fbbf24", "#34d399", "#60a5fa", "#f472b6", "#f87171",
-      "#4ade80", "#38bdf8", "#fcd34d", "#c084fc", "#facc15",
-    ];
-    return palette[id % palette.length];
+    return GROUP_PALETTE[id % GROUP_PALETTE.length];
   }, []);
 
   // Build the view-model each time filters change. We keep two parallel
@@ -347,7 +461,7 @@ export function GraphView({
         if (e.kind === "ghost" && !showGhost) return false;
         if (e.kind === "soft" && !showSoft) return false;
         if (e.kind === "confirmed" && !showConfirmed) return false;
-        if (relFilter === REL_TYPED && !e.relation) return false;
+        if (relFilter === REL_TYPED && !isTyped(e.relation)) return false;
         if (relFilter && relFilter !== REL_TYPED && e.relation !== relFilter)
           return false;
         if (e.score < minScore) return false;
@@ -413,7 +527,7 @@ export function GraphView({
   const relationCounts = useMemo(() => {
     const m = new Map<string, number>();
     for (const e of data?.edges ?? []) {
-      if (e.relation) m.set(e.relation, (m.get(e.relation) ?? 0) + 1);
+      if (isTyped(e.relation)) m.set(e.relation!, (m.get(e.relation!) ?? 0) + 1);
     }
     return Array.from(m.entries()).sort((a, b) => b[1] - a[1]);
   }, [data]);
@@ -442,6 +556,57 @@ export function GraphView({
 
   const q = query.trim().toLowerCase();
 
+  // hover 한 노드 + 이웃만 또렷하게, 나머지는 흐리게 (옵시디언·llm_wiki 방식).
+  const adjacency = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    const idOf = (v: string | GNode) => (typeof v === "string" ? v : v.id);
+    for (const l of viewData.links) {
+      const a = idOf(l.source);
+      const b = idOf(l.target);
+      if (!m.has(a)) m.set(a, new Set());
+      if (!m.has(b)) m.set(b, new Set());
+      m.get(a)!.add(b);
+      m.get(b)!.add(a);
+    }
+    return m;
+  }, [viewData.links]);
+  const focusSet = useMemo(() => {
+    if (!hovered) return null;
+    const s = new Set<string>([hovered.id]);
+    for (const n of adjacency.get(hovered.id) ?? []) s.add(n);
+    return s;
+  }, [hovered, adjacency]);
+
+  // 노드가 많을 때 축소 화면에서도 이름을 붙여 둘 허브 — 연결 많은 순 상위 30.
+  // 일지·인덱스(메타)는 연결이 많아도 이름으로 쓸모가 적어 뺀다.
+  const topLabelIds = useMemo(() => {
+    const sorted = viewData.nodes
+      .filter((n) => !NAMELESS_TYPES.has(n.doc_type))
+      .sort((a, b) => b.degree - a.degree);
+    return new Set(sorted.slice(0, 30).map((n) => n.id));
+  }, [viewData.nodes]);
+
+  // 커뮤니티 이름 = 그 안에서 연결이 가장 많은 문서 이름. 범례·노드 정보에 쓴다.
+  const communities = useMemo(() => {
+    const m = new Map<number, { top: GNode; count: number }>();
+    for (const n of viewData.nodes) {
+      if (n.community < 0) continue;
+      // 이름 후보는 일지·인덱스보다 일반 문서를 먼저.
+      const better = (a: GNode, b: GNode) => {
+        const na = NAMELESS_TYPES.has(a.doc_type) ? 0 : 1;
+        const nb = NAMELESS_TYPES.has(b.doc_type) ? 0 : 1;
+        return na !== nb ? na > nb : a.degree > b.degree;
+      };
+      const cur = m.get(n.community);
+      if (!cur) m.set(n.community, { top: n, count: 1 });
+      else {
+        cur.count += 1;
+        if (better(n, cur.top)) cur.top = n;
+      }
+    }
+    return m;
+  }, [viewData.nodes]);
+
   // Edge color / dash pattern per kind:
   //   confirmed → bright hairline (ground truth)
   //   ghost     → accent blue, dashed (AI proposal, waiting for user)
@@ -450,9 +615,11 @@ export function GraphView({
   function linkColor(l: GLink): string {
     if (l.kind === "ghost") return cssToken("accent-blue");
     if (l.kind === "soft") return withAlpha(cssToken("accent-yellow"), 0.55);
-    if (l.relation) return withAlpha(cssToken("ink"), 0.92);
-    // 관계 있는 선이 하나라도 있으면 일반 링크는 한 톤 내려 대비를 만든다.
-    return withAlpha(cssToken("ink"), typedEdgeTotal > 0 ? 0.38 : 0.55);
+    if (isTyped(l.relation)) return withAlpha(cssToken("ink"), 0.92);
+    // 일반 링크는 출발 노드 색으로 옅게 물들인다 — 선이 어느 주제군에서
+    // 나왔는지 보이고, 흰 거미줄처럼 보이지 않는다. 큰 vault 일수록 더 옅게.
+    const base = (l.source as GNode)?.color ?? cssToken("ink");
+    return withAlpha(base, crowded ? 0.1 : 0.45);
   }
 
   // Canvas custom node painter — draws the circle + a label that fades in
@@ -482,7 +649,8 @@ export function GraphView({
     (node: GNode, ctx: CanvasRenderingContext2D, scale: number) => {
       // Hubs render noticeably larger with a soft halo so the radial
       // center is obvious at a glance — the eye should land there first.
-      const r = nodeRadius(node);
+      // 축소해도 점이 화면에서 2.5px 아래로 줄지 않게 — 그래야 종류 색이 보인다.
+      const r = Math.max(nodeRadius(node), 2.5 / scale);
       const matches =
         q.length > 0 &&
         (node.label.toLowerCase().includes(q) ||
@@ -494,9 +662,12 @@ export function GraphView({
       // 상태(대체됨/완료) · 관계 필터 밖 노드는 흐리게. 검색·hover 대상은
       // 원래대로 보여준다.
       const focus = matches || hovered?.id === node.id;
+      const inFocus = !focusSet || focusSet.has(node.id);
       const alpha = focus
         ? 1
-        : statusAlpha(node.status) * (node.dimmed ? 0.3 : 1);
+        : statusAlpha(node.status) *
+          (node.dimmed ? 0.3 : 1) *
+          (inFocus ? 1 : 0.12);
       ctx.save();
       ctx.globalAlpha = alpha;
 
@@ -530,30 +701,34 @@ export function GraphView({
         ctx.stroke();
       }
 
+      // 이름은 점 아래 가운데 — 축소 화면에선 허브·hover 이웃만.
       const showLabel =
         !crowded ||
         scale > 1.4 ||
         matches ||
-        hovered?.id === node.id ||
-        node.isHub;
-      if (showLabel) {
-        const fontPx = node.isHub
-          ? Math.max(13, 14 / scale)
-          : Math.max(10, 11 / scale);
-        ctx.font = `${node.isHub ? "600 " : ""}${fontPx}px Inter, sans-serif`;
+        node.isHub ||
+        topLabelIds.has(node.id) ||
+        (!!focusSet && focusSet.has(node.id));
+      if (showLabel && inFocus) {
+        // 화면 기준 글자 크기 고정 — 확대·축소해도 같은 크기로 읽힌다.
+        const fontPx = (node.isHub ? 12 : 10.5) / scale;
+        const label = prettyLabel(node.label);
+        ctx.font = `${node.isHub ? "600 " : "500 "}${fontPx}px Inter, sans-serif`;
         ctx.fillStyle =
           matches || hovered?.id === node.id || node.isHub
             ? cssToken("ink")
             : cssToken("body");
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        ctx.fillText(prettyLabel(node.label), x + r + 4 / scale, y);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        const ly = y + r + 3 / scale;
+        ctx.fillText(label, x, ly);
         // 대체된 문서는 이름에 취소선.
         if (node.status === "superseded") {
-          const w = ctx.measureText(prettyLabel(node.label)).width;
+          const w = ctx.measureText(label).width;
+          const my = ly + fontPx * 0.55;
           ctx.beginPath();
-          ctx.moveTo(x + r + 4 / scale, y);
-          ctx.lineTo(x + r + 4 / scale + w, y);
+          ctx.moveTo(x - w / 2, my);
+          ctx.lineTo(x + w / 2, my);
           ctx.strokeStyle = ctx.fillStyle;
           ctx.lineWidth = 1 / scale;
           ctx.stroke();
@@ -561,7 +736,7 @@ export function GraphView({
       }
       ctx.restore();
     },
-    [hovered, q, crowded],
+    [hovered, q, crowded, focusSet, topLabelIds],
   );
 
   const linkCanvasObject = useCallback(
@@ -572,8 +747,17 @@ export function GraphView({
       const sy = (src?.y ?? 0) as number;
       const tx = (tgt?.x ?? 0) as number;
       const ty = (tgt?.y ?? 0) as number;
-      const color = linkColor(link);
-      const typed = !!link.relation && link.kind !== "soft";
+      const typed = isTyped(link.relation) && link.kind !== "soft";
+      // hover 중이면 그 노드에 닿은 선만 노드 색으로 진하게, 나머지는 거의 숨김.
+      const touching =
+        !!hovered && (src?.id === hovered.id || tgt?.id === hovered.id);
+      const color = !hovered
+        ? linkColor(link)
+        : touching
+          ? typed
+            ? withAlpha(cssToken("ink"), 0.95)
+            : withAlpha(hovered.color ?? cssToken("ink"), 0.9)
+          : withAlpha(cssToken("ink"), 0.03);
 
       // 대체된 문서에 닿은 선도 같이 흐리게 — 노드만 흐리면 선이 튄다.
       const endAlpha = Math.min(
@@ -581,7 +765,7 @@ export function GraphView({
         statusAlpha(tgt?.status) * (tgt?.dimmed ? 0.3 : 1),
       );
       ctx.save();
-      ctx.globalAlpha = Math.max(0.25, endAlpha);
+      ctx.globalAlpha = touching ? 1 : Math.max(0.25, endAlpha);
 
       ctx.beginPath();
       ctx.moveTo(sx, sy);
@@ -597,7 +781,9 @@ export function GraphView({
             ? 1.1
             : typed
               ? 2.8
-              : 1.6;
+              : touching
+                ? 1.8
+                : 1.0;
       const boost = Math.min(1.5, (link.score - 1.0) * 0.35);
       ctx.lineWidth = Math.max(0.8, base + boost);
       if (link.kind === "ghost") {
@@ -610,7 +796,8 @@ export function GraphView({
       ctx.stroke();
       ctx.setLineDash([]);
 
-      if (typed) {
+      // 화살표: 관계 선은 항상, 일반 링크는 작은 그래프이거나 hover 이웃일 때.
+      if (typed || (link.kind === "confirmed" && (!crowded || touching))) {
         const dx = tx - sx;
         const dy = ty - sy;
         const len = Math.hypot(dx, dy) || 1;
@@ -618,10 +805,11 @@ export function GraphView({
         const uy = dy / len;
 
         // 방향 화살표 — 관계는 source → target 으로 읽힌다.
-        const rt = nodeRadius(tgt ?? { bytes: 0 }) + 1.5;
+        const rt = Math.max(nodeRadius(tgt ?? {}), 2.5 / scale) + 1.5;
         const ax = tx - ux * rt;
         const ay = ty - uy * rt;
-        const a = Math.max(4, 7 / Math.sqrt(Math.max(0.2, scale)));
+        const a =
+          (typed ? 1 : 0.65) * Math.max(4, 7 / Math.sqrt(Math.max(0.2, scale)));
         ctx.beginPath();
         ctx.moveTo(ax, ay);
         ctx.lineTo(ax - ux * a - uy * a * 0.55, ay - uy * a + ux * a * 0.55);
@@ -634,7 +822,8 @@ export function GraphView({
         const near =
           hoveredLink === link ||
           (hovered && (hovered.id === src?.id || hovered.id === tgt?.id));
-        const showLabel = near || scale >= 1.1 || (!crowded && scale >= 0.6);
+        const showLabel =
+          typed && (near || scale >= 1.1 || (!crowded && scale >= 0.6));
         if (showLabel) {
           const text =
             relKo(link.relation!) + (link.kind === "ghost" ? " · 제안" : "");
@@ -869,13 +1058,8 @@ export function GraphView({
             nodeCanvasObject={nodeCanvasObject}
             nodePointerAreaPaint={(node, color, ctx) => {
               const n = node as GNode;
-              const baseR = Math.max(
-                6,
-                6 + Math.sqrt(Math.max(1, n.bytes)) / 40,
-              );
-              // Match the visual radius bump for hubs so the hit area
-              // matches what the user sees.
-              const r = n.isHub ? Math.max(baseR * 2.2, baseR + 8) : baseR;
+              // 보이는 크기보다 조금 넉넉하게 — 작은 점도 집기 쉽게.
+              const r = Math.max(6, nodeRadius(n) + 2);
               ctx.fillStyle = color;
               ctx.beginPath();
               ctx.arc(
@@ -926,9 +1110,19 @@ export function GraphView({
             </div>
             <div className="text-caption-sm text-stone">
               {typeKo(hovered.doc_type)}
-              {hovered.status ? ` · ${statusKo(hovered.status)}` : ""} ·{" "}
-              {(hovered.bytes / 1024).toFixed(1)} KB
+              {hovered.status ? ` · ${statusKo(hovered.status)}` : ""} · 연결{" "}
+              {hovered.degree} · {(hovered.bytes / 1024).toFixed(1)} KB
             </div>
+            {communities.get(hovered.community) && (
+              <div className="mt-0.5 flex items-center gap-1.5 text-caption-sm text-stone">
+                <span
+                  className="inline-block h-2 w-2 rounded-full"
+                  style={{ backgroundColor: communityColor(hovered.community) }}
+                />
+                주제군:{" "}
+                {prettyLabel(communities.get(hovered.community)!.top.label)}
+              </div>
+            )}
           </div>
         )}
 
@@ -946,6 +1140,32 @@ export function GraphView({
               color: typeColor(name, knownTypes.has(name), cssToken),
             }))}
             typedEdges={typedEdgeTotal}
+            communities={
+              colorMode === "project"
+                ? Array.from(
+                    viewData.nodes.reduce(
+                      (m, n) => m.set(n.project, (m.get(n.project) ?? 0) + 1),
+                      new Map<string, number>(),
+                    ),
+                  )
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 12)
+                    .map(([p, count], id) => ({
+                      id,
+                      name: p,
+                      count,
+                      color: projectColor(p),
+                    }))
+                : Array.from(communities.entries())
+                    .sort((a, b) => b[1].count - a[1].count)
+                    .slice(0, 12)
+                    .map(([id, c]) => ({
+                      id,
+                      name: prettyLabel(c.top.label),
+                      count: c.count,
+                      color: communityColor(id),
+                    }))
+            }
           />
         )}
 
@@ -1380,10 +1600,12 @@ function GraphLegend({
   colorMode,
   typeCounts,
   typedEdges,
+  communities,
 }: {
   colorMode: ColorMode;
   typeCounts: Array<{ name: string; label: string; count: number; color: string }>;
   typedEdges: number;
+  communities: Array<{ id: number; name: string; count: number; color: string }>;
 }) {
   return (
     <div className="pointer-events-none absolute bottom-3 left-3 max-h-[calc(100%-24px)] select-none overflow-hidden rounded-md border border-hairline bg-surface/90 px-3 py-2 backdrop-blur">
@@ -1393,7 +1615,12 @@ function GraphLegend({
 
       <div className="mb-2">
         <div className="mb-1 text-caption-sm text-stone">
-          노드{colorMode === "type" ? " — 문서 종류" : ""}
+          노드 —{" "}
+          {colorMode === "type"
+            ? "문서 종류"
+            : colorMode === "project"
+              ? "프로젝트"
+              : "주제군"}
         </div>
         <div className="flex flex-col gap-0.5 text-caption-md text-body">
           {colorMode === "type" ? (
@@ -1410,14 +1637,20 @@ function GraphLegend({
               </div>
             ))
           ) : (
-            <div className="flex items-center gap-1.5">
-              <span className="inline-block h-2 w-2 rounded-full bg-accent-blue" />
-              <span>
-                {colorMode === "community"
-                  ? "커뮤니티 (같은 색 = 같은 주제군)"
-                  : "프로젝트별 색상"}
-              </span>
-            </div>
+            // 주제군 이름 = 그 안에서 연결이 가장 많은 문서, 프로젝트 모드는
+            // 프로젝트 이름. 큰 순 12개.
+            communities.map((c) => (
+              <div key={c.id} className="flex items-center gap-1.5">
+                <span
+                  className="inline-block h-2 w-2 shrink-0 rounded-full"
+                  style={{ backgroundColor: c.color }}
+                />
+                <span className="max-w-[180px] truncate">{c.name}</span>
+                <span className="font-mono text-caption-sm text-stone">
+                  {c.count}
+                </span>
+              </div>
+            ))
           )}
           <div className="flex items-center gap-1.5">
             <span className="inline-block h-2 w-2 rounded-full bg-on-dark-mute opacity-30" />
@@ -1425,7 +1658,7 @@ function GraphLegend({
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block h-2 w-2 rounded-full bg-on-dark-mute" />
-            <span>크기: 문서 분량에 비례</span>
+            <span>크기: 연결 수에 비례</span>
           </div>
         </div>
       </div>
