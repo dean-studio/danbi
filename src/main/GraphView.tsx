@@ -62,6 +62,16 @@ const COLOR_MODE_LABEL: Record<ColorMode, string> = {
   community: "커뮤니티",
 };
 
+/** 범례에서 고른 묶음의 key — 색 기준과 같은 축으로 노드를 고른다. */
+function groupKeyOf(
+  n: { project: string; community: number; doc_type: string },
+  mode: ColorMode,
+): string {
+  if (mode === "project") return n.project;
+  if (mode === "type") return n.doc_type;
+  return String(n.community);
+}
+
 // 이름표·주제군 이름으로 쓰지 않는 종류.
 const NAMELESS_TYPES = new Set(["daily", "meta"]);
 
@@ -196,6 +206,11 @@ export function GraphView({
   // 기본은 "커뮤니티" — 대부분 문서가 아직 메모·일지라 종류 색은 한두 색에
   // 그친다. 주제군 색이 그래프를 읽히게 한다. 종류는 select 로 바꾼다.
   const [colorMode, setColorMode] = useState<ColorMode>("community");
+  const [groupFocus, setGroupFocus] = useState<string | null>(null);
+  // 색 기준·범위가 바뀌면 범례 선택은 뜻이 달라지니 푼다.
+  useEffect(() => {
+    setGroupFocus(null);
+  }, [colorMode, projectFilter]);
   // 전체 화면은 주제군이 수백 개라 색이 반복된다 — 프로젝트 색으로 시작하고,
   // 한 프로젝트를 고르면 주제군 색으로. 고른 뒤엔 select 로 바꿀 수 있다.
   useEffect(() => {
@@ -577,6 +592,36 @@ export function GraphView({
     return s;
   }, [hovered, adjacency]);
 
+  // 범례에서 고른 프로젝트·주제군·종류 — 그 노드만 또렷하게 남긴다.
+  const groupSet = useMemo(() => {
+    if (!groupFocus) return null;
+    return new Set(
+      viewData.nodes
+        .filter((n) => groupKeyOf(n, colorMode) === groupFocus)
+        .map((n) => n.id),
+    );
+  }, [groupFocus, viewData.nodes, colorMode]);
+  // 고른 묶음 안에서 이름을 붙여 둘 노드 — 연결 많은 순 15개.
+  const groupLabelIds = useMemo(() => {
+    if (!groupSet) return null;
+    const inGroup = viewData.nodes
+      .filter((n) => groupSet.has(n.id) && !NAMELESS_TYPES.has(n.doc_type))
+      .sort((a, b) => b.degree - a.degree);
+    return new Set(inGroup.slice(0, 15).map((n) => n.id));
+  }, [groupSet, viewData.nodes]);
+  // hover 가 범례 선택보다 우선한다.
+  const highlightSet = focusSet ?? groupSet;
+
+  function toggleGroup(key: string) {
+    const next = groupFocus === key ? null : key;
+    setGroupFocus(next);
+    if (!next) return;
+    const inst = graphRef.current as unknown as {
+      zoomToFit?: (ms: number, pad: number, filter: (n: GNode) => boolean) => void;
+    } | null;
+    inst?.zoomToFit?.(600, 80, (n) => groupKeyOf(n, colorMode) === next);
+  }
+
   // 노드가 많을 때 축소 화면에서도 이름을 붙여 둘 허브 — 연결 많은 순 상위 30.
   // 일지·인덱스(메타)는 연결이 많아도 이름으로 쓸모가 적어 뺀다.
   const topLabelIds = useMemo(() => {
@@ -662,7 +707,7 @@ export function GraphView({
       // 상태(대체됨/완료) · 관계 필터 밖 노드는 흐리게. 검색·hover 대상은
       // 원래대로 보여준다.
       const focus = matches || hovered?.id === node.id;
-      const inFocus = !focusSet || focusSet.has(node.id);
+      const inFocus = !highlightSet || highlightSet.has(node.id);
       const alpha = focus
         ? 1
         : statusAlpha(node.status) *
@@ -708,7 +753,8 @@ export function GraphView({
         matches ||
         node.isHub ||
         topLabelIds.has(node.id) ||
-        (!!focusSet && focusSet.has(node.id));
+        (!!focusSet && focusSet.has(node.id)) ||
+        (!focusSet && !!groupLabelIds && groupLabelIds.has(node.id));
       if (showLabel && inFocus) {
         // 화면 기준 글자 크기 고정 — 확대·축소해도 같은 크기로 읽힌다.
         const fontPx = (node.isHub ? 12 : 10.5) / scale;
@@ -736,7 +782,7 @@ export function GraphView({
       }
       ctx.restore();
     },
-    [hovered, q, crowded, focusSet, topLabelIds],
+    [hovered, q, crowded, focusSet, highlightSet, groupLabelIds, topLabelIds],
   );
 
   const linkCanvasObject = useCallback(
@@ -751,8 +797,15 @@ export function GraphView({
       // hover 중이면 그 노드에 닿은 선만 노드 색으로 진하게, 나머지는 거의 숨김.
       const touching =
         !!hovered && (src?.id === hovered.id || tgt?.id === hovered.id);
+      // 범례로 고른 묶음: 양 끝이 다 그 안이면 진하게, 아니면 거의 숨김.
+      const inGroup =
+        !hovered && !!groupSet && groupSet.has(src?.id) && groupSet.has(tgt?.id);
       const color = !hovered
-        ? linkColor(link)
+        ? groupSet
+          ? inGroup
+            ? withAlpha(src?.color ?? cssToken("ink"), 0.6)
+            : withAlpha(cssToken("ink"), 0.03)
+          : linkColor(link)
         : touching
           ? typed
             ? withAlpha(cssToken("ink"), 0.95)
@@ -847,7 +900,7 @@ export function GraphView({
     },
     // linkColor 는 typedEdgeTotal 만 본다.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [hovered, hoveredLink, crowded, relKo, typedEdgeTotal],
+    [hovered, hoveredLink, crowded, relKo, typedEdgeTotal, groupSet],
   );
 
   // Accept / reject is implemented via the existing ghost_links commands.
@@ -1140,6 +1193,9 @@ export function GraphView({
               color: typeColor(name, knownTypes.has(name), cssToken),
             }))}
             typedEdges={typedEdgeTotal}
+            selected={groupFocus}
+            onSelect={toggleGroup}
+            onOpenProject={(p) => setProjectFilter(p)}
             communities={
               colorMode === "project"
                 ? Array.from(
@@ -1152,6 +1208,7 @@ export function GraphView({
                     .slice(0, 12)
                     .map(([p, count], id) => ({
                       id,
+                      key: p,
                       name: p,
                       count,
                       color: projectColor(p),
@@ -1161,6 +1218,7 @@ export function GraphView({
                     .slice(0, 12)
                     .map(([id, c]) => ({
                       id,
+                      key: String(id),
                       name: prettyLabel(c.top.label),
                       count: c.count,
                       color: communityColor(id),
@@ -1601,14 +1659,24 @@ function GraphLegend({
   typeCounts,
   typedEdges,
   communities,
+  selected,
+  onSelect,
+  onOpenProject,
 }: {
   colorMode: ColorMode;
   typeCounts: Array<{ name: string; label: string; count: number; color: string }>;
   typedEdges: number;
-  communities: Array<{ id: number; name: string; count: number; color: string }>;
+  communities: Array<{ id: number; key: string; name: string; count: number; color: string }>;
+  selected: string | null;
+  onSelect: (key: string) => void;
+  onOpenProject: (project: string) => void;
 }) {
+  const items =
+    colorMode === "type"
+      ? typeCounts.map((t) => ({ key: t.name, name: t.label, count: t.count, color: t.color }))
+      : communities;
   return (
-    <div className="pointer-events-none absolute bottom-3 left-3 max-h-[calc(100%-24px)] select-none overflow-hidden rounded-md border border-hairline bg-surface/90 px-3 py-2 backdrop-blur">
+    <div className="absolute bottom-3 left-3 max-h-[calc(100%-24px)] select-none overflow-y-auto rounded-md border border-hairline bg-surface/90 px-3 py-2 backdrop-blur">
       <div className="mb-1.5 text-[10px] uppercase tracking-[0.6px] text-mute">
         범례
       </div>
@@ -1623,35 +1691,42 @@ function GraphLegend({
               : "주제군"}
         </div>
         <div className="flex flex-col gap-0.5 text-caption-md text-body">
-          {colorMode === "type" ? (
-            typeCounts.map((t) => (
-              <div key={t.name} className="flex items-center gap-1.5">
-                <span
-                  className="inline-block h-2 w-2 rounded-full"
-                  style={{ backgroundColor: t.color }}
-                />
-                <span>{t.label}</span>
-                <span className="font-mono text-caption-sm text-stone">
-                  {t.count}
-                </span>
+          {/* 주제군 이름 = 그 안에서 연결이 가장 많은 문서, 프로젝트 모드는
+              프로젝트 이름. 큰 순 12개. 누르면 그 묶음만 남기고 확대. */}
+          {items.map((c) => {
+            const active = selected === c.key;
+            const faded = !!selected && !active;
+            return (
+              <div key={c.key} className="group flex items-center gap-1">
+                <button
+                  onClick={() => onSelect(c.key)}
+                  title={active ? "선택 해제" : "이것만 강조"}
+                  className={cn(
+                    "-mx-1 flex min-w-0 items-center gap-1.5 rounded-xs px-1 py-px text-left transition-colors hover:bg-surface-elevated",
+                    active && "bg-surface-elevated text-ink",
+                    faded && "opacity-45",
+                  )}
+                >
+                  <span
+                    className="inline-block h-2 w-2 shrink-0 rounded-full"
+                    style={{ backgroundColor: c.color }}
+                  />
+                  <span className="max-w-[180px] truncate">{c.name}</span>
+                  <span className="font-mono text-caption-sm text-stone">
+                    {c.count}
+                  </span>
+                </button>
+                {colorMode === "project" && active && (
+                  <button
+                    onClick={() => onOpenProject(c.key)}
+                    className="shrink-0 rounded-xs px-1 text-caption-sm text-stone transition-colors hover:bg-surface-elevated hover:text-ink"
+                  >
+                    이 프로젝트만 →
+                  </button>
+                )}
               </div>
-            ))
-          ) : (
-            // 주제군 이름 = 그 안에서 연결이 가장 많은 문서, 프로젝트 모드는
-            // 프로젝트 이름. 큰 순 12개.
-            communities.map((c) => (
-              <div key={c.id} className="flex items-center gap-1.5">
-                <span
-                  className="inline-block h-2 w-2 shrink-0 rounded-full"
-                  style={{ backgroundColor: c.color }}
-                />
-                <span className="max-w-[180px] truncate">{c.name}</span>
-                <span className="font-mono text-caption-sm text-stone">
-                  {c.count}
-                </span>
-              </div>
-            ))
-          )}
+            );
+          })}
           <div className="flex items-center gap-1.5">
             <span className="inline-block h-2 w-2 rounded-full bg-on-dark-mute opacity-30" />
             <span>흐림: 대체됨 · 옅음: 완료</span>
