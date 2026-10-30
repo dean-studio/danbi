@@ -18,7 +18,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.8.12-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.8.12" />
+    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.9.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.9.0" />
   </a>
 </p>
 
@@ -34,7 +34,7 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license MIT" /></a>
-  <img src="https://img.shields.io/badge/version-0.8.12-success" alt="version 0.8.12" />
+  <img src="https://img.shields.io/badge/version-0.9.0-success" alt="version 0.9.0" />
 </p>
 
 ---
@@ -51,11 +51,18 @@ AI는 새 대화창을 열 때마다 어제 한 결정을 잊습니다. 그래�
 - **필요한 것만 꺼내 줍니다** — 다음 세션에서 브리핑·검색으로 관련 노트만 골라 AI에게 건넵니다.
 - **프로젝트끼리 섞이지 않습니다** — 프로젝트마다 연결이 따로라서, A 프로젝트 작업에 B의 노트가 끼어들지 않습니다.
 
-## 최근 업데이트 — v0.8.12
+## 최근 업데이트 — v0.9.0 · 가벼운 온톨로지
 
-Gemini 키 전송 방식 보안 수정, 첫 설치 때 MCP 가 꺼져 있던 문제, 자동 업데이트가 늦게 뜨던 문제를 고쳤습니다(v0.8.12). 0.8.11 이하에서는 **설정 → 업데이트 확인**을 한 번 눌러 주세요. 그 전에는 macOS 27 메뉴바 팝오버(v0.8.11)와 연결 관리 멈춤(v0.8.10)을 고쳤습니다. 아래는 v0.8.9 내용입니다.
+노트마다 **종류**(결정·버그·기능·노트…)와 **상태**(유효·대체됨·완료)를, 링크마다 **관계**(원인·영향·대체·구현…)를 붙일 수 있게 됐습니다. 전부 Markdown 안에 그대로 적히고, LLM 없이 동작합니다.
 
-더 가볍고 덜 버벅이게 다듬었습니다. 디스크·git 을 다루는 작업 100여 개를 화면을 그리는 스레드 밖으로 옮겼고, Claude Code 사용량 캐시 메모리를 97MB에서 18MB로 줄였습니다. 트레이 아이콘을 눌러도 팝오버가 안 뜨던 문제와 사용량 "오늘" 차트가 회색 덩어리로 보이던 문제를 고쳤고, ⌃Space Quick Capture 팝업은 홈 빠른 메모(⌘J)로 일원화하며 제거했습니다.
+- **관계로 적기** — `원인:: [[bugs/cors.md]]`, `대체:: [[decisions/jwt-1d.md]]` 처럼 줄 앞에 관계를 쓰면 그 링크가 "원인" 화살표가 됩니다. 기존 `[[링크]]` 는 그대로 "관련" 으로 읽힙니다.
+- **"지금 유효한 결정만"** — 다른 결정이 대체한 결정은 자동으로 "대체됨" 이 되어 검색·브리핑에서 뒤로 밀립니다. 세션 시작 브리핑에 지금 유효한 결정 5개가 같이 나옵니다.
+- **AI 가 구조로 묻고 답합니다** — 새 MCP 도구 `danbi_query`(종류·상태·관계로 조회), `danbi_schema`(이 프로젝트의 어휘), `danbi_set_meta`(종류·상태 지정), `danbi_propose_link`(관계 링크 제안 → 리뷰에서 승인).
+- **그래프가 읽힙니다** — 노드는 종류별 색, 엣지는 관계 이름과 화살표. 관계 필터, "영향이 안 적힌 결정·원인이 안 적힌 버그" 인사이트, 대체된 문서 흐리게.
+- **온톨로지 표** — 프로젝트 홈의 [온톨로지] 버튼(또는 ⌘K)에서 문서를 종류·상태·관계별로 봅니다.
+- **기존 노트는 건드리지 않습니다** — 종류는 폴더 이름으로 추정하고, 관계 보강은 제안 → 승인으로만 적힙니다. 프로젝트마다 `schema.md` 의 `## 온톨로지` 섹션에서 종류·관계를 늘릴 수 있습니다.
+
+그 전에는 Gemini 키 전송 방식 보안 수정과 자동 업데이트 주기(v0.8.12), macOS 27 메뉴바 팝오버(v0.8.11)를 고쳤습니다.
 
 [전체 변경 기록 →](CHANGELOG.md)
 
@@ -153,6 +160,8 @@ Claude Code · Cursor 에서 보니 프로젝트 폴더로 들어가면 **보니
 | `danbi_read` | "그 노트 전체 내용 보여줘" — 특정 파일 그대로 |
 | `danbi_daily` | "1년 전 오늘 뭐 했지?" — 오늘 + 어제 + 1주/1달/1년 전 daily 노트 |
 | `danbi_list_projects` | "다른 프로젝트들엔 뭐가 있더라?" — vault 전체 트리 |
+| `danbi_query` | "지금 유효한 결정만 보여줘" / "이 버그 원인 뭐였지?" — 종류·상태·관계로 조회 |
+| `danbi_schema` | "이 프로젝트에선 어떤 종류·관계를 써?" — 프로젝트 어휘 |
 
 #### ✍️ 쓰기 (각 프로젝트로 자동 격리됨)
 
@@ -161,6 +170,8 @@ Claude Code · Cursor 에서 보니 프로젝트 폴더로 들어가면 **보니
 | `danbi_log` | "이거 오늘 일지에 적어둬" — 오늘 daily 노트에 한 줄 추가 |
 | `danbi_append` | "이건 auth 노트에 붙여줘" — 특정 도메인 파일에 추가 (없으면 새로 생성) |
 | `danbi_create_folder` | "이 프로젝트 안에 stats 폴더 만들어줘" — 프로젝트 안 1단계 sub-folder 생성 |
+| `danbi_set_meta` | "이건 결정 문서야, 예전 결정은 대체됐어" — 종류·상태·관계를 frontmatter 에 기록 |
+| `danbi_propose_link` | "이 버그의 원인 문서랑 이어줘" — 관계 링크를 제안 (리뷰에서 승인하면 본문에 적힘) |
 
 > 쓰기 도구는 **그 endpoint 의 프로젝트로 자동 고정** 됩니다. 즉,
 > 보니 폴더에서 켠 Claude Code 가 실수로 상식이 프로젝트에 메모를 남길
@@ -285,7 +296,8 @@ LLM 의 컨텍스트 윈도우는 새 세션마다 비워집니다. 단비 vault
 
 - 마크다운 에디터 (BlockNote)
 - BM25 + 한국어 n-gram 키워드 검색
-- 그래프 뷰 (Louvain community + ghost suggestions)
+- 그래프 뷰 (Louvain community + ghost suggestions + 종류별 색·관계 화살표)
+- 가벼운 온톨로지 — 문서 종류·상태, `원인:: [[x]]` 관계 링크, 온톨로지 표
 - Wiki-link 클릭 (`[[notes/foo.md]]` ↔ 다른 도메인)
 - 홈 빠른 메모 (⌘J) — 열어 둔 단비에서 바로 daily 에 기록
 - 프로젝트별 MCP endpoint + SKILL 파일 자동 생성
