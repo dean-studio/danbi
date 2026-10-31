@@ -8,8 +8,7 @@
 
 <p align="center">
   <b>사이드 프로젝트 여러 개를 Claude Code · Codex 로 굴리는 사람을 위한 LLM 위키.</b><br/>
-  프로젝트마다 따로 기억하고, AI 가 직접 적고 꺼내 씁니다. 설치는 DMG 하나로 끝.<br/>
-  한국어 검색 기본 · API 키 없어도 동작 · 데이터는 내 Mac 에만
+  프로젝트마다 따로 기억하고, AI 가 직접 적고 꺼내 씁니다. 설치는 DMG 하나로 끝.
 </p>
 
 <p align="center">
@@ -20,25 +19,21 @@
 
 <p align="center">
   <sub>
-    <a href="https://github.com/dean-studio/danbi/releases/latest">최신 릴리즈</a> ·
+    Apple Silicon · macOS 11+ ·
     <a href="https://github.com/dean-studio/danbi/releases">전체 버전</a> ·
-    Apple Silicon · macOS 11+ 지원
+    <a href="CHANGELOG.md">변경 기록</a> ·
+    <a href="LICENSE">MIT</a>
   </sub>
 </p>
 
-<p align="center">
-  <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
-  <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license MIT" /></a>
-  <img src="https://img.shields.io/badge/version-0.9.3-success" alt="version 0.9.3" />
-</p>
-
----
+<br/>
 
 <p align="center">
-  <img src="readme_imgs/danbi-demo.gif" alt="Claude Code 가 단비에서 어제 결정을 찾아 답하고, 새 결정을 기록한 뒤 그래프로 보는 장면" width="880" />
+  <img src="readme_imgs/danbi-demo.gif" alt="프로젝트마다 코드 폴더를 연결하고, 각 폴더의 Claude Code 가 자기 프로젝트에만 기록한 뒤, 단비에서 기록과 그래프를 확인하는 장면" width="900" />
 </p>
-<p align="center"><sub>새 세션에서 어제 정한 걸 단비로 찾아 답하고 → 오늘 결정을 기록 → 그래프에서 프로젝트별로 확인 (<a href="readme_imgs/danbi-demo.mp4">고화질 영상</a>)</sub></p>
+<p align="center"><sub>코드 폴더 연결 → 각 폴더의 Claude Code 가 자기 프로젝트에만 기록 → 단비에서 기록·그래프 확인 · <a href="readme_imgs/danbi-demo.mp4">전체 영상 (1분 40초)</a></sub></p>
+
+<br/>
 
 ## 이런 분께 만들었어요
 
@@ -50,359 +45,241 @@
 
 단비는 프로젝트마다 **따로 된 기억 공간**을 만들어 줍니다. Claude Code · Codex 가 작업하면서 결정 · 버그 원인 · 할 일을 직접 적고, 다음 세션에서는 필요한 조각만 꺼내 씁니다.
 
-- **프로젝트 단위로 나뉩니다** — 프로젝트마다 연결이 따로라서, 쇼핑몰 폴더에서 연 Claude Code 의 기록은 쇼핑몰 프로젝트에만 들어갑니다. 다른 프로젝트로 잘못 적힐 일이 구조적으로 없습니다.
-- **AI 가 직접 적고 직접 찾습니다** — 사람이 따로 정리하지 않아도 됩니다. 쌓인 결과만 가끔 확인하면 됩니다.
-- **한국어로 잘 찾습니다** — 한국어 n-gram 검색이 기본이라 "웹훅 중복" 으로 "웹훅-멱등키" 문서를 찾습니다. API 키가 없어도 됩니다.
-- **전부 Markdown 파일입니다** — 내 Mac 의 폴더에 그대로 쌓이고, 저장할 때마다 git 으로 버전이 남습니다.
+| | |
+|---|---|
+| 🗂 **프로젝트 단위로 나뉩니다** | 쇼핑몰 폴더에서 연 Claude Code 의 기록은 쇼핑몰 프로젝트에만 들어갑니다. 다른 프로젝트로 잘못 적힐 일이 구조적으로 없습니다. |
+| ✍️ **AI 가 직접 적고 직접 찾습니다** | 사람이 따로 정리하지 않아도 됩니다. 쌓인 결과만 가끔 확인하면 됩니다. |
+| 🔎 **한국어로 잘 찾습니다** | 한국어 n-gram 검색이 기본이라 "웹훅 중복" 으로 "웹훅-멱등키" 문서를 찾습니다. API 키 없이도 됩니다. |
+| 📁 **전부 내 Mac 의 Markdown** | vault 폴더에 그대로 쌓이고, 저장할 때마다 git 으로 버전이 남습니다. 서버로 보내지 않습니다. |
+
+## 이렇게 씁니다
+
+### 1. 프로젝트마다 코드 폴더를 연결
+
+<img src="readme_imgs/shot-connect.png" alt="쇼핑몰앱 프로젝트의 에이전트 연결 창. Claude Code 연결 파일 기록과 Skill 설치가 완료된 상태" width="420" align="right" />
+
+프로젝트를 만들고 **[연결 관리]** 에서 Claude Code · Codex · Cursor 중 하나를 골라 코드 폴더를 선택하면 끝입니다.
+
+단비가 그 폴더에 연결 파일(`.mcp.json` 등)과 Skill 을 대신 써 둡니다. 연결 파일은 git 에 올라가지 않도록 자동으로 제외해 둡니다.
+
+프로젝트마다 쓰기 주소가 따로 나와서, 이 폴더에서 연 AI 는 **이 프로젝트에만** 기록할 수 있습니다. 읽기는 vault 전체에서 할 수 있어서 다른 프로젝트의 결정을 참고하는 건 됩니다.
+
+<br clear="right"/>
+
+### 2. 그 폴더에서 Claude Code 에 말하기
+
+"이거 단비에 기록해줘", "어제 뭐 정했지?" 처럼 평소대로 말하면 됩니다. Claude Code 가 알아서 단비 도구를 골라 씁니다.
+
+<p align="center">
+  <img src="readme_imgs/shot-claude-shop.png" alt="쇼핑몰앱 폴더의 Claude Code 가 결제 웹훅 멱등키 결정을 쇼핑몰앱 daily 에 기록하고 기존 결정 문서에 링크한 화면" width="860" />
+</p>
+<p align="center"><sub>쇼핑몰앱 폴더 — 결정을 말하면 쇼핑몰앱 daily 에 적고, 관련된 기존 결정 문서에 링크까지 겁니다.</sub></p>
+
+<p align="center">
+  <img src="readme_imgs/shot-claude-budget.png" alt="가계부 폴더의 Claude Code 가 버그 원인을 가계부에 기록하고, 쇼핑몰앱의 오늘 결정은 읽기만 해서 알려 주는 화면" width="860" />
+</p>
+<p align="center"><sub>가계부 폴더 — 기록은 가계부로만. 쇼핑몰앱의 오늘 결정은 <b>읽기만</b> 해서 알려 줍니다.</sub></p>
+
+### 3. 쌓인 기록은 단비에서 한눈에
+
+<p align="center">
+  <img src="readme_imgs/shot-today.png" alt="단비 오늘 화면. 16:09 가계부, 16:07 쇼핑몰앱에 Claude Code 가 남긴 기록이 시간순으로 보이고, 오른쪽에 검토함과 에이전트 연결 상태가 보인다" width="860" />
+</p>
+<p align="center"><sub>오늘 화면 — 어느 프로젝트에, 누가(Claude Code · 사람 · 단비), 언제 적었는지 시간순으로 보입니다.</sub></p>
+
+### 4. 기억이 쌓이면 지도가 됩니다
+
+<p align="center">
+  <img src="readme_imgs/graph-projects.png" alt="프로젝트별로 색과 영역이 나뉜 단비 그래프" width="860" />
+</p>
+<p align="center"><sub>전체 그래프 — 프로젝트마다 색과 영역이 나뉩니다. 범례를 누르면 그 프로젝트만 강조돼요.</sub></p>
+
+<p align="center">
+  <img src="readme_imgs/graph-ontology.png" alt="결정·버그·기능 종류별 색과 원인·영향·차단 관계 화살표가 보이는 프로젝트 그래프" width="860" />
+</p>
+<p align="center"><sub>프로젝트 하나 — 결정 · 버그 · 기능을 색으로, "원인 · 영향 · 차단" 같은 관계를 화살표로 봅니다.</sub></p>
+
+<p align="center"><sub>화면의 프로젝트와 노트는 모두 데모용 예시 데이터입니다.</sub></p>
 
 ## 설치는 3분이면 끝
 
 터미널 명령도, Python · Node · Docker 도 필요 없습니다.
 
 1. **[DMG 내려받기](https://github.com/dean-studio/danbi/releases/latest)** → `단비.app` 을 Applications 로 드래그. 애플 공증을 받아 경고 없이 열립니다.
-2. **처음 실행하면 마법사가 알아서** vault 폴더를 만들고 MCP 서버를 켭니다. AI 키는 건너뛰어도 됩니다.
-3. **프로젝트를 만들고 [연결 관리]** → Claude Code · Codex · Cursor 중 하나를 고르고 코드 폴더를 선택. 끝입니다. 단비가 그 폴더에 연결 파일(`.mcp.json` 등)을 써 둡니다.
+2. **처음 실행하면 마법사가** vault 폴더를 만들고 MCP 서버를 켭니다. AI 키는 건너뛰어도 됩니다.
+3. **프로젝트를 만들고 [연결 관리]** 에서 AI 도구와 코드 폴더를 고릅니다.
 
-이제 그 폴더에서 Claude Code 를 열고 "어제 뭐 했지?", "이거 단비에 기록해줘" 라고 말하면 됩니다. 업데이트도 앱이 알아서 받습니다.
+이제 그 폴더에서 Claude Code 를 열고(이미 열려 있었다면 다시 시작) 말을 걸면 됩니다. 업데이트는 앱이 알아서 받습니다.
 
-## 기억이 쌓이면 지도가 됩니다
+자세한 연결 방법과 실전 워크플로는 [docs/MCP_GUIDE.md](docs/MCP_GUIDE.md) 에 있습니다.
 
-<p align="center">
-  <img src="readme_imgs/graph-projects.png" alt="프로젝트별로 색과 영역이 나뉜 단비 그래프" width="880" />
-</p>
-<p align="center"><sub>전체 화면 — 프로젝트마다 색과 영역이 나뉩니다. 범례를 누르면 그 프로젝트만 강조돼요. (예시 데이터)</sub></p>
+## 왜 단비인가요
 
-<p align="center">
-  <img src="readme_imgs/graph-ontology.png" alt="결정·버그·기능 종류별 색과 원인·영향 관계 화살표가 보이는 그래프" width="880" />
-</p>
-<p align="center"><sub>프로젝트 하나 — 결정 · 버그 · 기능을 색으로, "원인 · 영향 · 차단" 을 화살표로 봅니다. (예시 데이터)</sub></p>
-
-## 최근 업데이트 — v0.9.0 · 가벼운 온톨로지
-
-노트마다 **종류**(결정·버그·기능·노트…)와 **상태**(유효·대체됨·완료)를, 링크마다 **관계**(원인·영향·대체·구현…)를 붙일 수 있게 됐습니다. 전부 Markdown 안에 그대로 적히고, LLM 없이 동작합니다.
-
-- **관계로 적기** — `원인:: [[bugs/cors.md]]`, `대체:: [[decisions/jwt-1d.md]]` 처럼 줄 앞에 관계를 쓰면 그 링크가 "원인" 화살표가 됩니다. 기존 `[[링크]]` 는 그대로 "관련" 으로 읽힙니다.
-- **"지금 유효한 결정만"** — 다른 결정이 대체한 결정은 자동으로 "대체됨" 이 되어 검색·브리핑에서 뒤로 밀립니다. 세션 시작 브리핑에 지금 유효한 결정 5개가 같이 나옵니다.
-- **AI 가 구조로 묻고 답합니다** — 새 MCP 도구 `danbi_query`(종류·상태·관계로 조회), `danbi_schema`(이 프로젝트의 어휘), `danbi_set_meta`(종류·상태 지정), `danbi_propose_link`(관계 링크 제안 → 리뷰에서 승인).
-- **그래프가 읽힙니다** — 노드는 종류별 색, 엣지는 관계 이름과 화살표. 관계 필터, "영향이 안 적힌 결정·원인이 안 적힌 버그" 인사이트, 대체된 문서 흐리게.
-- **온톨로지 표** — 프로젝트 홈의 [온톨로지] 버튼(또는 ⌘K)에서 문서를 종류·상태·관계별로 봅니다.
-- **기존 노트는 건드리지 않습니다** — 종류는 폴더 이름으로 추정하고, 관계 보강은 제안 → 승인으로만 적힙니다. 프로젝트마다 `schema.md` 의 `## 온톨로지` 섹션에서 종류·관계를 늘릴 수 있습니다.
-
-v0.9.1 에서는 그래프를 다시 그렸습니다 — 전체가 둥근 원판으로 모이고 프로젝트·주제군별 색과 영역으로 나뉘며, 마우스를 올리면 이웃만 남고, 범례를 누르면 그 프로젝트·주제군만 강조됩니다(v0.9.2). v0.9.3 에서는 그래프가 배치가 끝나면 화면에 꼭 맞게 잡힙니다.
-
-그 전에는 Gemini 키 전송 방식 보안 수정과 자동 업데이트 주기(v0.8.12), macOS 27 메뉴바 팝오버(v0.8.11)를 고쳤습니다.
-
-[전체 변경 기록 →](CHANGELOG.md)
-
----
-
-## 한 마디로
-세 가지 도구가 표면상 비슷해 보이지만 정체성이 다릅니다:
-
-- **옵시디언** — 사용자가 vault 의 주인. 직접 채우고 직접 연결.
-- **Raycast** — 사용자가 명령의 주인. 도구로 가는 통로.
-- **단비** — **AI 가 vault 의 주인이고, 사용자가 그 결과를 정밀하게 통제**.
-
-단비는 Claude Code · Codex · Cursor 같은 외부 AI 에이전트가 vault 를 직접 읽고 쓰도록 MCP 서버를 내장합니다. 사용자가 단비 앱을 안 열어둬도 AI 가 일하는 동안 vault 는 알아서 쌓이고 검색됩니다.
-
-## 핵심 가치
-
-- 🟡 **LLM API 키가 필수가 아니에요** — 추론은 외부 AI 가 자기 환경에서. 단비는 의미 검색·자동 요약 같은 옵션 기능을 켤 때만 키를 받습니다.
-- 🔵 **MCP 서버 내장** — Claude Code · Codex · Cursor 가 vault 를 직접 읽고·씁니다. 단비가 외부 AI 의 공유 뇌가 됩니다.
-- 🟢 **데이터는 Mac 에만 머물러요** — 모든 vault 파일은 로컬에 저장되고, git 으로 자동 버전 관리됩니다.
-
----
-
-## 원리
-
-ChatGPT · Claude 같은 AI 와 작업해본 적 있다면 이 답답함을 아실 거예요:
-
-> "어제 우리 이거 어떻게 하기로 했더라?" → AI: *"저는 이전 대화를 기억하지 못합니다."*
-
-AI 는 **새 대화창을 열 때마다 기억을 잃습니다.** 그래서 매번 같은 설명을
-처음부터 다시 해줘야 하고, 그 설명이 **곧 비용** 이에요. 메시지가 길수록
-요금이 올라가니까요.
-
-**단비는 AI 의 외장 메모리** 라고 생각하시면 됩니다.
+AI 는 **새 대화창을 열 때마다 기억을 잃습니다.** 그래서 매번 같은 설명을 처음부터 다시 해 줘야 하고, 그 설명이 곧 시간과 토큰입니다. 단비는 AI 의 외장 메모리입니다.
 
 ```
-당신 ──▶ AI (Claude, Cursor 등) ──▶ 단비 ──▶ 노트 파일 (Mac 안에)
-                  ▲                    │
-                  └────────────────────┘
-                  필요한 것만 꺼내서 보여줌
+나 ──▶ AI (Claude Code · Codex · Cursor) ──▶ 단비 ──▶ Markdown 노트 (내 Mac)
+               ▲                              │
+               └──────── 필요한 조각만 ───────┘
 ```
 
-작동 순서는 이렇게 단순합니다:
+1. **세션을 열면** — AI 가 `danbi_briefing` 으로 어제 한 일 · 지금 유효한 결정 · 할 일을 받아 이어서 시작합니다.
+2. **물어보면** — 단비가 노트 전체가 아니라 관련된 조각 몇 개만 골라 줍니다. 컨텍스트가 짧아지니 토큰이 덜 듭니다.
+3. **결정하면** — AI 가 그 자리에서 `danbi_log` 로 기록합니다. 내일 새 세션에서도 그대로 이어집니다.
 
-1. **당신이 AI 에게 묻습니다** — "어제 결정한 거 다시 알려줘"
-2. **AI 가 단비에게 부탁합니다** — "이 사람이 어제 뭐 했는지 찾아줘"
-3. **단비가 노트 더미에서 관련 부분만 추려서 줍니다** — 책 한 권 통째로
-   주는 게 아니라 **딱 필요한 페이지 한두 장만**
-4. **AI 가 그걸 보고 답합니다** — 답하면서 새로 결정한 내용도 단비에게
-   "기록해 둬" 라고 부탁
-5. **다음 날 새 대화창을 열어도 단비가 다 기억하고 있습니다** ✨
+단비 자체는 AI 를 부르지 않습니다. 추론은 Claude Code 같은 AI 가 자기 환경에서 하고, 단비는 **노트장 + 검색 도우미** 역할만 합니다. 그래서 단비를 쓴다고 추가 요금이 나가지 않습니다.
 
-### 사이드 프로젝트 여러 개 굴리는 사람에게 특히 유용해요
+<details>
+<summary><b>한 프로젝트만 보이게 하면 뭐가 좋은가요?</b></summary>
 
-회사 일 + 사이드 프로젝트 2~3개를 동시에 굴리는 분들이라면 이런 경험 있으실 거예요:
+<br/>
 
-- A 프로젝트 작업하다가 갑자기 B 프로젝트 노트 내용이 AI 답변에 섞여 나옴 😵
-- "어제 어느 프로젝트에서 그 결정 했더라?" 헷갈림
-- 프로젝트가 늘수록 AI 가 점점 산만해짐
-
-**단비는 프로젝트(또는 그룹)마다 완전히 독립된 주소를 줍니다.**
+프로젝트마다 쓰기 주소(MCP endpoint)와 Skill 이 따로 만들어집니다.
 
 ```
-~/.claude/skills/danbi-bonny/        ← 보니 프로젝트 전용 (포트 47921/bonny)
-~/.claude/skills/danbi-sangshiki/    ← 상식이 프로젝트 전용
-~/.claude/skills/danbi-side-blog/    ← 블로그 사이드 전용
+~/.claude/skills/danbi-12de2a75/   ← 쇼핑몰앱 전용 Skill
+~/.claude/skills/danbi-313956a4/   ← 가계부 전용 Skill
 ```
 
-Claude Code · Cursor 에서 보니 프로젝트 폴더로 들어가면 **보니 노트만**
-보입니다. 상식이 노트는 아예 시야에 없으니:
+- 쓰기 도구는 **그 연결의 프로젝트로 고정**됩니다. 쇼핑몰 폴더의 AI 가 가계부에 메모를 남길 수 없습니다.
+- 한 프로젝트 맥락만 보내니 다른 프로젝트 이야기가 답에 섞이지 않고, 컨텍스트도 짧아집니다.
+- 프로젝트별로 차곡차곡 쌓여서, 1년 뒤에도 "이 프로젝트 1년 전 오늘" 을 돌아볼 수 있습니다.
 
-- ✅ 다른 프로젝트의 내용이 답변에 섞일 일 0
-- ✅ 한 프로젝트만 보내니까 컨텍스트가 짧아져 **토큰 또 절약**
-- ✅ 프로젝트별로 깔끔하게 누적 — 1년 뒤에도 "보니 1년 전 오늘" 회고 가능
+</details>
 
-설치도 한 번에 끝납니다 — 사이드바에서 프로젝트 우클릭 → **"Claude Code
-설치 명령 복사"** → 터미널에 붙여넣기. 그 폴더에서 Claude Code 를 켜면
-끝.
+<details>
+<summary><b>검색은 어떻게 빠르고 정확한가요?</b></summary>
 
-### AI 가 단비에게 부탁할 수 있는 일들
+<br/>
 
-연결만 해두면 Claude Code · Cursor 가 자동으로 적절한 도구를 골라 씁니다.
-사용자가 직접 명령어를 외울 필요는 없지만, 대략 어떤 일을 시킬 수 있는지
-보면 감이 옵니다.
+- [tantivy](https://github.com/quickwit-oss/tantivy) 기반 BM25 + 한국어 n-gram 색인을 내 Mac 에서 미리 만들어 둡니다. 인터넷도, 임베딩 비용도 필요 없습니다.
+- 노트가 많아도 관련 조각 몇 개만 추려서 AI 에 넘깁니다.
+- (선택) Gemini · Bedrock 임베딩 키를 넣으면 의미 검색 결과를 [RRF](https://en.wikipedia.org/wiki/Reciprocal_rank_fusion) 로 합칩니다. "JWT 결정" 으로 "토큰 만료 정책" 같은 동의어 노트까지 찾습니다.
 
-#### 📖 읽기 (vault 안 어디든 조회)
+</details>
 
-| 도구 | 일상어로 말하면 |
+<details>
+<summary><b>실제로 토큰이 얼마나 줄었나요? (2026-05-21 하루 측정)</b></summary>
+
+<br/>
+
+같은 사람이 같은 Mac 에서 하루 동안 작업한 대화 26개를, 단비를 쓴 대화(2개)와 안 쓴 대화(24개)로 나눠 1턴 평균을 비교했습니다. 작업 종류가 달라 엄밀한 실험은 아니고, 참고용입니다.
+
+| 1턴 평균 | 단비 사용 | 단비 미사용 |
+|---|---:|---:|
+| 입력 토큰 | 약 1/2.5 | 기준 |
+| 답 받기까지 | 약 41초 | 약 1분 10초 |
+| 비용 | 약 절반 | 기준 |
+
+내 환경에서 재보려면 `scripts/token-stats.py` 를 실행하세요.
+
+</details>
+
+## AI 가 쓰는 도구
+
+연결만 해 두면 AI 가 알아서 골라 씁니다. 명령어를 외울 필요는 없고, 어떤 일을 시킬 수 있는지 감만 잡으시면 됩니다.
+
+<details>
+<summary><b>읽기 도구</b> — vault 전체에서 조회</summary>
+
+<br/>
+
+| 도구 | 이럴 때 |
 |---|---|
-| `danbi_briefing` | "오늘 시작할 때 어디서부터 이어 하면 돼?" — 최근 활동·TODO·1주/1달/1년 전 노트를 한 번에 요약 |
-| `danbi_recent` | "최근에 뭘 만졌더라?" — 최근 수정한 노트 목록 |
-| `danbi_search` | "지난번에 JWT 결정한 거 어디 적었지?" — 키워드/자연어 검색 (한국어 OK) |
-| `danbi_read` | "그 노트 전체 내용 보여줘" — 특정 파일 그대로 |
-| `danbi_daily` | "1년 전 오늘 뭐 했지?" — 오늘 + 어제 + 1주/1달/1년 전 daily 노트 |
-| `danbi_list_projects` | "다른 프로젝트들엔 뭐가 있더라?" — vault 전체 트리 |
-| `danbi_query` | "지금 유효한 결정만 보여줘" / "이 버그 원인 뭐였지?" — 종류·상태·관계로 조회 |
-| `danbi_schema` | "이 프로젝트에선 어떤 종류·관계를 써?" — 프로젝트 어휘 |
+| `danbi_briefing` | "어디서부터 이어 하면 돼?" — 최근 활동 · 유효한 결정 · 할 일 · 지난 daily 요약 |
+| `danbi_context` | "결제 웹훅 관련해서 뭐 있었지?" — 질문에 맞는 섹션만 골라서 |
+| `danbi_search` | "JWT 결정 어디 적었지?" — 키워드 · 자연어 검색 (한국어 OK) |
+| `danbi_read` | "그 노트 보여줘" — 문서 전체 또는 특정 섹션 |
+| `danbi_related` | "이거랑 관련된 문서는?" — 링크 · 내용으로 이어진 문서 |
+| `danbi_recent` | "최근에 뭘 만졌더라?" — 최근 수정한 노트 |
+| `danbi_daily` | "1년 전 오늘 뭐 했지?" — 오늘 · 어제 · 1주/1달/1년 전 daily |
+| `danbi_list_projects` | "다른 프로젝트엔 뭐가 있더라?" — vault 전체 트리 |
+| `danbi_query` | "지금 유효한 결정만" / "이 버그 원인은?" — 종류 · 상태 · 관계로 조회 |
+| `danbi_schema` | "이 프로젝트는 어떤 종류 · 관계를 써?" — 프로젝트 어휘 |
 
-#### ✍️ 쓰기 (각 프로젝트로 자동 격리됨)
+</details>
 
-| 도구 | 일상어로 말하면 |
+<details>
+<summary><b>쓰기 도구</b> — 연결된 프로젝트에만</summary>
+
+<br/>
+
+| 도구 | 이럴 때 |
 |---|---|
-| `danbi_log` | "이거 오늘 일지에 적어둬" — 오늘 daily 노트에 한 줄 추가 |
-| `danbi_append` | "이건 auth 노트에 붙여줘" — 특정 도메인 파일에 추가 (없으면 새로 생성) |
-| `danbi_create_folder` | "이 프로젝트 안에 stats 폴더 만들어줘" — 프로젝트 안 1단계 sub-folder 생성 |
-| `danbi_set_meta` | "이건 결정 문서야, 예전 결정은 대체됐어" — 종류·상태·관계를 frontmatter 에 기록 |
-| `danbi_propose_link` | "이 버그의 원인 문서랑 이어줘" — 관계 링크를 제안 (리뷰에서 승인하면 본문에 적힘) |
+| `danbi_log` | "이거 오늘 일지에 적어둬" — 오늘 daily 에 시각 · 호출자와 함께 추가 |
+| `danbi_append` | "auth 노트에 붙여줘" — 특정 문서에 추가 (없으면 새로 만듦) |
+| `danbi_create_file` | "결정 문서 새로 만들어줘" — 새 문서 생성 |
+| `danbi_replace_section` | "이 섹션 최신으로 바꿔줘" — 문서의 한 섹션만 교체 |
+| `danbi_upsert_item` | "할 일 목록에서 이거 완료로" — 목록 항목 추가 · 수정 |
+| `danbi_create_folder` | "stats 폴더 만들어줘" — 프로젝트 안 하위 폴더 |
+| `danbi_set_meta` | "이건 결정 문서, 예전 결정은 대체됨" — 종류 · 상태 · 관계 기록 |
+| `danbi_propose_link` | "이 버그 원인 문서랑 이어줘" — 관계 링크 제안 (검토함에서 승인) |
 
-> 쓰기 도구는 **그 endpoint 의 프로젝트로 자동 고정** 됩니다. 즉,
-> 보니 폴더에서 켠 Claude Code 가 실수로 상식이 프로젝트에 메모를 남길
-> 일은 구조적으로 없습니다.
-
-이 도구들 덕분에 Claude Code 와의 대화가 이런 식으로 흘러갈 수 있어요:
-
-> **나:** "어제 토큰 만료 어떻게 정했지?"<br/>
-> **Claude:** *(`danbi_search` 호출)* "JWT refresh 7일로 정하셨네요.
-> 이유는 모바일 세션 유지 vs 보안 트레이드오프 때문이고, 관련 노트는
-> `notes/auth-security.md` 에 있습니다."<br/>
-> **나:** "맞아. 오늘은 refresh 토큰 회전 로직 짜자. 결정 사항 기록해줘."<br/>
-> **Claude:** *(`danbi_log` 호출)* "기록 완료. 내일 새 세션에서도 이어
-> 보실 수 있어요."
-
-### 왜 이게 돈을 아껴주나요?
-
-AI 요금은 *대화에 들어간 글자 수* 로 계산됩니다.
-
-- 단비 없이: 매번 "내 프로젝트는 이런 거고요, 어제 이런 결정을 했고요…"
-  를 다 적어줘야 함 → **글자 수 폭발 → 요금 폭발**
-- 단비 있으면: AI 가 단비에게 "어제 결정만 보여줘" 라고 하면
-  단비가 **딱 그 부분만** 골라서 줌 → **글자 수 1/3 → 요금 1/2**
-
-### 왜 단비가 빠르게 찾아줄 수 있나요?
-
-도서관 사서가 색인 카드로 책을 찾듯, 단비도 **노트마다 미리 색인** 을
-만들어 둡니다. 그래서 노트가 1만 개가 있어도 0.1초 안에 찾아냅니다.
-(이 색인은 인터넷 없이 Mac 안에서 만들어지니 **공짜이자 빠릅니다**.)
-
-### 그럼 AI 키가 꼭 있어야 하나요?
-
-**아니요.** 단비는 AI 가 *아닙니다*. 그냥 **AI 의 노트장 + 검색 도우미**
-역할만 합니다. 추론 (생각하기) 은 Claude Code · Cursor 같은 AI 가 자기
-환경에서 합니다. 그래서 단비는:
-
-- AI 키 없이도 마크다운 에디터 + 검색 + 그래프 등 **80% 가 작동**
-- 키를 넣어도 그 키는 **당신 Mac 의 키체인에만** 저장. 단비 서버로 절대
-  안 보냄.
-- 노트도 전부 **당신 Mac 안에** 있고, git 으로 자동 백업됨.
-
----
-
-## 왜 단비? — 토큰을 아끼고, 컨텍스트가 죽지 않는 이유
-
-LLM 과 일하면서 가장 비싼 건 매번 같은 맥락을 다시 설명하는 일입니다.
-단비는 *맥락을 vault 에 적어두고, 필요한 조각만 꺼내 던지는* 4단계로 그
-비용을 깎습니다.
-
-### 1️⃣ 프로젝트마다 독립된 MCP endpoint + SKILL
-
-프로젝트를 만들면 단비가 자동으로:
-
-- 그 프로젝트 전용 **MCP endpoint** 를 띄우고
-- 그 프로젝트 전용 **SKILL.md** 를 `~/.claude/skills/danbi-<slug>/` 에 설치합니다
-
-Claude Code · Cursor 는 이 endpoint 에 붙어서 *해당 프로젝트만* 읽고·씁니다.
-다른 프로젝트의 노이즈가 컨텍스트에 섞이지 않으니, 매 턴 보내는 토큰이
-줄어듭니다.
-
-### 2️⃣ 세션 컨텍스트가 리셋돼도 단비가 기억합니다
-
-LLM 의 컨텍스트 윈도우는 새 세션마다 비워집니다. 단비 vault 는 영속이고,
-중요한 결정·버그 원인·TODO 가 매번 `danbi_log` 로 daily 노트에 누적됩니다.
-
-> 다음 날 Claude Code 가 새로 켜져도 → `danbi_briefing` 한 번 →
-> "어제 무슨 결정 했고, 어디까지 했고, 다음 무엇을 해야 하는지" **즉시 회복**.
-
-긴 시스템 프롬프트로 매번 복기시키지 않아도 되니, 첫 턴부터 토큰이 짧습니다.
-
-### 3️⃣ BM25 + 한국어 n-gram 검색 = 가장 큰 토큰 절약
-
-큰 vault 를 통째로 LLM 에 넣으면 비싸고 느립니다. 단비는 [tantivy](https://github.com/quickwit-oss/tantivy)
-기반 BM25 + 한국어 n-gram 인덱스로:
-
-- 수백만 글자 vault → 관련 청크 8개만 추려서 LLM 에 전달
-- 별도 임베딩 인덱스 / 비용 없음 — **로컬에서 즉시**
-- AI 가 "X 결정 어떻게 했지?" 라고 물으면 단비가 8KB 정도만 던지고 답이 옵니다
-
-### 4️⃣ (옵션) Gemini embedding 으로 의미 검색까지
-
-`gemini-embedding-001` 은 **무료**. 한 번 등록하면 단비가 BM25 결과와 의미
-검색 결과를 [RRF 하이브리드](https://en.wikipedia.org/wiki/Reciprocal_rank_fusion)
-로 합쳐서 던집니다.
-
-- "JWT 결정" 검색 → "토큰 만료 정책" 같은 동의어 노트까지 잡힘
-- 동의어를 찾기 위해 LLM 을 부르지 않으니 검색 비용 0
-
-### 📊 실제로 얼마나 아끼나 — 오늘 하루 측정 (2026-05-21)
-
-같은 사람이 같은 노트북에서 하루 동안 작업한 26개 대화 세션을 두 묶음으로
-나눠봤어요:
-
-- 🟢 **단비를 쓴 대화 (2개)** — Claude Code 가 단비 vault 에서 맥락을 꺼내 답함
-- ⚪ **단비를 안 쓴 대화 (24개)** — 매번 처음부터 맥락을 적어서 보냄
-
-(같은 사람, 같은 컴퓨터, 같은 Claude Opus 4.7 모델. 작업 종류만 다름.)
-
-대화 1턴 (= 한 번 묻고 한 번 답하는 것) 당 평균을 비교하면:
-
-| 1턴 평균 | 🟢 단비 사용 | ⚪ 단비 미사용 | 차이 |
-|---|---:|---:|---|
-| 보낸 글자 (입력 토큰) | 적게 | 많게 | **단비 쪽이 1/2.5** |
-| 답 받기까지 걸린 시간 | 약 41초 | 약 1분 10초 | **42% 빨라짐** |
-| 1턴당 비용 | 절반 | 두 배 | **비용 절반** |
-
-> 쉽게 말해: **같은 일을 시켜도 단비 쓰면 절반 비용 · 절반 시간**. 단비가
-> "필요한 부분만 골라서" AI 에게 주기 때문이에요.
-
-직접 자기 환경에서 재현해보고 싶다면 `scripts/token-stats.py` 실행. 결과는
-`Vault/Projects/단비/stats/token-usage/<날짜>.md` 에 누적됩니다.
-
-**핵심:** 단비 자체는 AI 를 호출하지 않습니다 (= 단비 쓴다고 추가 요금
-없음). 토큰이 줄어드는 이유는 외부 AI (Claude Code 등) 에게 vault 의
-*필요한 조각만* 골라 주기 때문입니다.
-
----
+</details>
 
 ## 기능
 
-### 키 0개로도 되는 것
+**키 없이 되는 것**
 
-- 마크다운 에디터 (BlockNote)
-- BM25 + 한국어 n-gram 키워드 검색
-- 그래프 뷰 (Louvain community + ghost suggestions + 종류별 색·관계 화살표)
-- 가벼운 온톨로지 — 문서 종류·상태, `원인:: [[x]]` 관계 링크, 온톨로지 표
-- Wiki-link 클릭 (`[[notes/foo.md]]` ↔ 다른 도메인)
-- 홈 빠른 메모 (⌘J) — 열어 둔 단비에서 바로 daily 에 기록
-- 프로젝트별 MCP endpoint + SKILL 파일 자동 생성
-- Git 자동 커밋 (저장 = 커밋)
-- 휴지통 (30일 자동 만료)
-- daily 노트 + Reminiscence (1주·1달·1년 전)
+- 마크다운 에디터 (BlockNote), `[[위키링크]]` 로 문서 연결
+- BM25 + 한국어 n-gram 검색
+- 그래프 — 프로젝트 · 주제군별 색과 영역, 범례 강조, 문서 종류별 색, 관계 화살표
+- 가벼운 온톨로지 — 문서 종류(결정 · 버그 · 기능…) · 상태(유효 · 대체됨 · 완료), `원인:: [[문서]]` 같은 관계 링크. 대체된 결정은 검색 · 브리핑에서 뒤로 밀립니다
+- 오늘 화면 · daily 노트 · 1주/1달/1년 전 돌아보기
+- 홈 빠른 메모 (⌘J)
+- 프로젝트별 MCP 연결 + Skill 자동 생성
+- 저장 = git 커밋, 휴지통 (30일 보관)
 
-### AI 연동 켜면 추가
+**AI 키를 넣으면 더해지는 것** (Gemini · Bedrock 등, 키는 macOS 키체인에만 저장)
 
-옵션 — Google Gemini API 키 (무료) 또는 AWS Bedrock (자격증명 자동 감지) 한 번 등록하면:
+- 의미 검색 (BM25 와 RRF 하이브리드)
+- daily 요약, 카드형 공유 페이지 만들기
+- 프로젝트 목적 · 스키마 자동 작성
+- 관련 노트 연결 제안
 
-- **의미 검색** — RRF 하이브리드. "JWT 결정" 검색 → "토큰 만료 정책" 같은 동의어 문서까지
-- **자연어 질의** — Claude Code 가 자연스러운 문장으로 vault 탐색해도 정확
-- **Daily 노트 요약 + HTML 추출** — 한 클릭으로 카드형 공유 페이지
-- **purpose / schema 자동 작성** — vault 의 다른 노트들 grounding 으로 자동 채움
-- **관련 노트 제안 (ghost links)** — vault 가 알아서 연결을 제안
-
-LLM 자동화는 모두 사용자 명시 트리거만 — 백그라운드 자동 호출 없음. 진행은 화면 우상단 toast + 사이드바 + 종 아이콘 알림 셋 다에서 노출.
-
-## 설치
-
-1. [Releases](https://github.com/dean-studio/danbi/releases) 에서 최신 `Danbi_*.dmg` 다운로드 (Apple Silicon)
-2. DMG 더블클릭 → `단비.app` 을 Applications 폴더로 드래그
-3. Launchpad 에서 단비 실행 → 4단계 마법사 (Welcome → AI 연동 → Vault → Template)
-
-요구사항: macOS 11+ (Apple Silicon — Intel 빌드는 추후)
-
-## 첫 1분
-
-상세 가이드는 [docs/MCP_GUIDE.md](docs/MCP_GUIDE.md) 에. 요약:
-
-1. 첫 프로젝트 만들기 (사이드바 +)
-2. 프로젝트 홈의 [연결 관리] → Claude Code · Codex · Cursor 선택 → 코드 폴더 선택
-3. 그 폴더에서 Claude Code 를 열기 (이미 열려 있었다면 재시작)
-4. 이제 Claude Code 에 "단비 vault 에 기록해줘" / "어제 뭐 했지?" 시킬 수 있음
+AI 호출은 모두 사용자가 직접 눌렀을 때만 일어납니다. 백그라운드에서 몰래 부르지 않습니다.
 
 ## 자주 쓰는 단축키
 
 | 단축키 | 동작 |
 |---|---|
 | ⌘J | 홈 빠른 메모 |
-| ⌘K | 검색 |
+| ⌘K | 검색 · 명령 |
 | ⌘G | 그래프 |
-| ⌘, | 설정 |
 | ⌘S | 저장 |
 | ⌘F | 노트 안 검색 |
+| ⌘, | 설정 |
 
-## 기술
+## 최근 업데이트
 
-- Tauri v2 (Rust 백엔드 + macOS native)
-- Vite + React + TypeScript + Tailwind + shadcn/ui
-- BlockNote 에디터
-- tantivy BM25 검색
-- 자체 JSON 벡터 스토어 + Gemini / Bedrock embedding
-- MCP HTTP 서버 (axum) + 프로젝트별 scoped endpoint
-- Git 기반 vault 버전 관리
+- **v0.9.3** — 그래프가 배치가 끝나면 화면에 꼭 맞게 잡힙니다.
+- **v0.9.2** — 그래프 범례를 눌러 프로젝트 · 주제군 · 종류만 강조하고, 그 프로젝트로 바로 들어갑니다.
+- **v0.9.1** — 그래프를 다시 그렸습니다. 둥근 원판 배치, 프로젝트 · 주제군별 색과 영역, 마우스를 올리면 이웃만 남기기.
+- **v0.9.0** — 가벼운 온톨로지. 문서 종류 · 상태 · 관계, `danbi_query` · `danbi_schema` · `danbi_set_meta` · `danbi_propose_link`, 온톨로지 표.
+
+[전체 변경 기록 →](CHANGELOG.md)
 
 ## 문서
 
 - [INTRO.md](docs/INTRO.md) — 단비란 무엇인가, 왜 만들었나
-- [MCP_GUIDE.md](docs/MCP_GUIDE.md) — Claude Code · Cursor 연결, 도구 목록, 실전 워크플로
-- [REST_API.md](docs/REST_API.md) — vault 에 직접 쓰는 HTTP API (옵시디언 Local REST API 호환 패턴)
-- [CHANGELOG.md](CHANGELOG.md) — 버전별 변경 이력
+- [MCP_GUIDE.md](docs/MCP_GUIDE.md) — Claude Code · Codex · Cursor 연결, 도구, 실전 워크플로
+- [REST_API.md](docs/REST_API.md) — vault 에 직접 쓰는 HTTP API
 
-## 빌드 (개발자)
+## 개발
+
+Tauri v2 (Rust) · Vite + React + TypeScript + Tailwind · BlockNote · tantivy · MCP HTTP 서버(axum) · git 기반 vault
 
 ```bash
-# 개발 모드
 pnpm install
-pnpm tauri dev
-
-# DMG 빌드 (Apple Developer 인증서 필요)
-pnpm bundle
+pnpm tauri dev      # 개발 모드
+pnpm bundle         # DMG 빌드 (Apple Developer 인증서 필요)
 ```
 
 ## 라이선스
 
 소스 코드는 [MIT 라이선스](LICENSE)로 공개합니다. 누구나 자유롭게 쓰고, 고치고, 다시 배포할 수 있어요.
 
-단, "Danbi"·"단비" 이름과 로고·앱 아이콘은 Dean Works inc.의 상표라서 MIT 라이선스에 포함되지 않습니다([TRADEMARKS.md](TRADEMARKS.md)). 고쳐서 배포할 때는 다른 이름과 아이콘을 써 주세요.
+단, "Danbi" · "단비" 이름과 로고 · 앱 아이콘은 Dean Works inc. 의 상표라서 MIT 라이선스에 포함되지 않습니다([TRADEMARKS.md](TRADEMARKS.md)). 고쳐서 배포할 때는 다른 이름과 아이콘을 써 주세요.
 
 버그 리포트 · 토론 · pull request 는 환영합니다.
 
