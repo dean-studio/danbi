@@ -1,6 +1,6 @@
 [package]
 name = "danbi"
-version = "0.9.2"
+version = "0.9.3"
 description = "Danbi — Intelligent Wiki Management Agent"
 authors = ["Dean Works inc. <hckim@dean.kr>"]
 license = "MIT"
