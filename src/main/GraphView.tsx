@@ -207,6 +207,20 @@ export function GraphView({
   // 그친다. 주제군 색이 그래프를 읽히게 한다. 종류는 select 로 바꾼다.
   const [colorMode, setColorMode] = useState<ColorMode>("community");
   const [groupFocus, setGroupFocus] = useState<string | null>(null);
+  // 새 데이터의 배치가 처음 멈추면 한 번만 화면에 맞춘다 — 드래그로 다시
+  // 움직일 때마다 시점이 튀지 않게.
+  const fittedRef = useRef(false);
+  useEffect(() => {
+    fittedRef.current = false;
+    // 이전 화면(범례로 확대한 상태 등)의 시점을 그대로 들고 오면 새 배치가
+    // 몇 초간 엉뚱하게 확대돼 보인다 — 원점·기본 배율로 먼저 돌려 둔다.
+    const inst = graphRef.current as unknown as {
+      centerAt?: (x: number, y: number, ms?: number) => void;
+      zoom?: (k: number, ms?: number) => void;
+    } | null;
+    inst?.centerAt?.(0, 0, 0);
+    inst?.zoom?.(1, 0);
+  }, [data]);
   // 색 기준·범위가 바뀌면 범례 선택은 뜻이 달라지니 푼다.
   useEffect(() => {
     setGroupFocus(null);
@@ -1135,6 +1149,14 @@ export function GraphView({
               ctx.moveTo((s?.x ?? 0) as number, (s?.y ?? 0) as number);
               ctx.lineTo((t?.x ?? 0) as number, (t?.y ?? 0) as number);
               ctx.stroke();
+            }}
+            onEngineStop={() => {
+              if (fittedRef.current) return;
+              fittedRef.current = true;
+              const inst = graphRef.current as unknown as {
+                zoomToFit?: (ms: number, pad: number) => void;
+              } | null;
+              inst?.zoomToFit?.(500, 60);
             }}
             onNodeHover={(n) => setHovered((n as GNode | null) ?? null)}
             onLinkHover={(l) => setHoveredLink((l as GLink | null) ?? null)}
