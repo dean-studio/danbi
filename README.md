@@ -7,18 +7,14 @@
 </p>
 
 <p align="center">
-  <b>AI 에이전트의 외장 메모리.</b><br/>
-  Claude Code · Codex가 새 세션을 열어도 프로젝트를 기억하도록, 노트를 대신 쌓고 필요한 만큼만 꺼내 줍니다.<br/>
-  macOS 앱 · MCP 서버 내장 · 데이터는 내 Mac에만
-</p>
-
-<p align="center">
-  <sub>Local-first external memory for AI coding agents. Built-in MCP server for Claude Code &amp; Codex — your notes never leave your Mac.</sub>
+  <b>사이드 프로젝트 여러 개를 Claude Code · Codex 로 굴리는 사람을 위한 LLM 위키.</b><br/>
+  프로젝트마다 따로 기억하고, AI 가 직접 적고 꺼내 씁니다. 설치는 DMG 하나로 끝.<br/>
+  한국어 검색 기본 · API 키 없어도 동작 · 데이터는 내 Mac 에만
 </p>
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/⬇%20Download%20Danbi%20for%20macOS-0.9.2-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="Download Danbi for macOS 0.9.2" />
+    <img src="https://img.shields.io/badge/%E2%AC%87%20%EB%8B%A8%EB%B9%84%20macOS%20%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-0.9.3-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="단비 macOS 다운로드 0.9.3" />
   </a>
 </p>
 
@@ -34,22 +30,52 @@
   <a href="https://github.com/dean-studio/danbi/releases/latest"><img src="https://img.shields.io/badge/download-DMG-blue" alt="download" /></a>
   <a href="https://github.com/dean-studio/danbi/releases"><img src="https://img.shields.io/badge/macOS-11%2B-black" alt="macOS 11+" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="license MIT" /></a>
-  <img src="https://img.shields.io/badge/version-0.9.2-success" alt="version 0.9.2" />
+  <img src="https://img.shields.io/badge/version-0.9.3-success" alt="version 0.9.3" />
 </p>
 
 ---
 
-![단비 홈 화면](readme_imgs/home-v041.png)
+<p align="center">
+  <img src="readme_imgs/danbi-demo.gif" alt="Claude Code 가 단비에서 어제 결정을 찾아 답하고, 새 결정을 기록한 뒤 그래프로 보는 장면" width="880" />
+</p>
+<p align="center"><sub>새 세션에서 어제 정한 걸 단비로 찾아 답하고 → 오늘 결정을 기록 → 그래프에서 프로젝트별로 확인 (<a href="readme_imgs/danbi-demo.mp4">고화질 영상</a>)</sub></p>
 
-## 단비는 무엇인가요
+## 이런 분께 만들었어요
 
-AI는 새 대화창을 열 때마다 어제 한 결정을 잊습니다. 그래서 매번 같은 설명을 다시 하고, 그 설명만큼 토큰을 씁니다.
+회사 일에 사이드 프로젝트 두세 개, 전부 Claude Code · Codex 로 굴리고 계신가요?
 
-단비는 그 기억을 Mac 안의 Markdown 노트로 남겨 두는 앱입니다.
+- 새 세션을 열 때마다 **어제 정한 걸 처음부터 다시 설명**하고 있다면
+- A 프로젝트 작업 중에 **B 프로젝트 이야기가 섞여 나와** 곤란했다면
+- 노트는 쌓이는데 **"그거 어디 적었더라"** 를 매번 찾고 있다면
 
-- **AI가 직접 기록합니다** — Claude Code · Codex가 MCP로 결정·TODO·작업 일지를 단비에 남깁니다.
-- **필요한 것만 꺼내 줍니다** — 다음 세션에서 브리핑·검색으로 관련 노트만 골라 AI에게 건넵니다.
-- **프로젝트끼리 섞이지 않습니다** — 프로젝트마다 연결이 따로라서, A 프로젝트 작업에 B의 노트가 끼어들지 않습니다.
+단비는 프로젝트마다 **따로 된 기억 공간**을 만들어 줍니다. Claude Code · Codex 가 작업하면서 결정 · 버그 원인 · 할 일을 직접 적고, 다음 세션에서는 필요한 조각만 꺼내 씁니다.
+
+- **프로젝트 단위로 나뉩니다** — 프로젝트마다 연결이 따로라서, 쇼핑몰 폴더에서 연 Claude Code 의 기록은 쇼핑몰 프로젝트에만 들어갑니다. 다른 프로젝트로 잘못 적힐 일이 구조적으로 없습니다.
+- **AI 가 직접 적고 직접 찾습니다** — 사람이 따로 정리하지 않아도 됩니다. 쌓인 결과만 가끔 확인하면 됩니다.
+- **한국어로 잘 찾습니다** — 한국어 n-gram 검색이 기본이라 "웹훅 중복" 으로 "웹훅-멱등키" 문서를 찾습니다. API 키가 없어도 됩니다.
+- **전부 Markdown 파일입니다** — 내 Mac 의 폴더에 그대로 쌓이고, 저장할 때마다 git 으로 버전이 남습니다.
+
+## 설치는 3분이면 끝
+
+터미널 명령도, Python · Node · Docker 도 필요 없습니다.
+
+1. **[DMG 내려받기](https://github.com/dean-studio/danbi/releases/latest)** → `단비.app` 을 Applications 로 드래그. 애플 공증을 받아 경고 없이 열립니다.
+2. **처음 실행하면 마법사가 알아서** vault 폴더를 만들고 MCP 서버를 켭니다. AI 키는 건너뛰어도 됩니다.
+3. **프로젝트를 만들고 [연결 관리]** → Claude Code · Codex · Cursor 중 하나를 고르고 코드 폴더를 선택. 끝입니다. 단비가 그 폴더에 연결 파일(`.mcp.json` 등)을 써 둡니다.
+
+이제 그 폴더에서 Claude Code 를 열고 "어제 뭐 했지?", "이거 단비에 기록해줘" 라고 말하면 됩니다. 업데이트도 앱이 알아서 받습니다.
+
+## 기억이 쌓이면 지도가 됩니다
+
+<p align="center">
+  <img src="readme_imgs/graph-projects.png" alt="프로젝트별로 색과 영역이 나뉜 단비 그래프" width="880" />
+</p>
+<p align="center"><sub>전체 화면 — 프로젝트마다 색과 영역이 나뉩니다. 범례를 누르면 그 프로젝트만 강조돼요. (예시 데이터)</sub></p>
+
+<p align="center">
+  <img src="readme_imgs/graph-ontology.png" alt="결정·버그·기능 종류별 색과 원인·영향 관계 화살표가 보이는 그래프" width="880" />
+</p>
+<p align="center"><sub>프로젝트 하나 — 결정 · 버그 · 기능을 색으로, "원인 · 영향 · 차단" 을 화살표로 봅니다. (예시 데이터)</sub></p>
 
 ## 최근 업데이트 — v0.9.0 · 가벼운 온톨로지
 
@@ -62,7 +88,7 @@ AI는 새 대화창을 열 때마다 어제 한 결정을 잊습니다. 그래�
 - **온톨로지 표** — 프로젝트 홈의 [온톨로지] 버튼(또는 ⌘K)에서 문서를 종류·상태·관계별로 봅니다.
 - **기존 노트는 건드리지 않습니다** — 종류는 폴더 이름으로 추정하고, 관계 보강은 제안 → 승인으로만 적힙니다. 프로젝트마다 `schema.md` 의 `## 온톨로지` 섹션에서 종류·관계를 늘릴 수 있습니다.
 
-v0.9.1 에서는 그래프를 다시 그렸습니다 — 전체가 둥근 원판으로 모이고 프로젝트·주제군별 색과 영역으로 나뉘며, 마우스를 올리면 이웃만 남고, 범례를 누르면 그 프로젝트·주제군만 강조됩니다(v0.9.2).
+v0.9.1 에서는 그래프를 다시 그렸습니다 — 전체가 둥근 원판으로 모이고 프로젝트·주제군별 색과 영역으로 나뉘며, 마우스를 올리면 이웃만 남고, 범례를 누르면 그 프로젝트·주제군만 강조됩니다(v0.9.2). v0.9.3 에서는 그래프가 배치가 끝나면 화면에 꼭 맞게 잡힙니다.
 
 그 전에는 Gemini 키 전송 방식 보안 수정과 자동 업데이트 주기(v0.8.12), macOS 27 메뉴바 팝오버(v0.8.11)를 고쳤습니다.
 
@@ -86,9 +112,6 @@ v0.9.1 에서는 그래프를 다시 그렸습니다 — 전체가 둥근 원판
 - 🟢 **데이터는 Mac 에만 머물러요** — 모든 vault 파일은 로컬에 저장되고, git 으로 자동 버전 관리됩니다.
 
 ---
-
-## 설치 방법
-![install-flow.svg](readme_imgs/install-flow.svg)
 
 ## 원리
 
@@ -332,9 +355,9 @@ LLM 자동화는 모두 사용자 명시 트리거만 — 백그라운드 자동
 상세 가이드는 [docs/MCP_GUIDE.md](docs/MCP_GUIDE.md) 에. 요약:
 
 1. 첫 프로젝트 만들기 (사이드바 +)
-2. 사이드바에서 프로젝트 우클릭 → "Claude Code 설치 명령 복사"
-3. 터미널에 붙여넣기
-4. 이제 Claude Code 에 "단비 vault 에 기록해줘" / "X 프로젝트 보고 답해줘" 시킬 수 있음
+2. 프로젝트 홈의 [연결 관리] → Claude Code · Codex · Cursor 선택 → 코드 폴더 선택
+3. 그 폴더에서 Claude Code 를 열기 (이미 열려 있었다면 재시작)
+4. 이제 Claude Code 에 "단비 vault 에 기록해줘" / "어제 뭐 했지?" 시킬 수 있음
 
 ## 자주 쓰는 단축키
 
