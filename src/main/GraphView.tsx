@@ -18,6 +18,7 @@ import {
   statusAlpha,
   typeColor,
 } from "@/lib/ontology";
+import { GROUP_PALETTE, useProjectColor } from "@/lib/projectColor";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 
@@ -74,14 +75,6 @@ function groupKeyOf(
 
 // 이름표·주제군 이름으로 쓰지 않는 종류.
 const NAMELESS_TYPES = new Set(["daily", "meta"]);
-
-// 주제군·프로젝트 색 — 20색. 앞쪽일수록 서로 멀리 떨어진 색.
-const GROUP_PALETTE = [
-  "#57c1ff", "#59d499", "#ffc533", "#ff6161", "#b47cff",
-  "#7fffd4", "#ff8c42", "#5eead4", "#fb7185", "#a78bfa",
-  "#fbbf24", "#34d399", "#60a5fa", "#f472b6", "#f87171",
-  "#4ade80", "#38bdf8", "#fcd34d", "#c084fc", "#facc15",
-];
 
 /** 관계 필터 — "" 전체 · TYPED 관계 있는 선만 · 그 외 특정 관계 이름. */
 const REL_TYPED = "__typed";
@@ -415,25 +408,8 @@ export function GraphView({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose, popup]);
 
-  // Project color palette — stable per project name, so re-renders don't
-  // shuffle colors around. Resolved from the design tokens so light mode
-  // picks up its own accent values.
-  // 프로젝트 색 — 문서 많은 순으로 팔레트를 배정해 큰 프로젝트끼리 색이
-  // 겹치지 않게 한다.
-  const projectRank = useMemo(() => {
-    const sizes = new Map<string, number>();
-    for (const n of data?.nodes ?? []) sizes.set(n.project, (sizes.get(n.project) ?? 0) + 1);
-    const m = new Map<string, number>();
-    Array.from(sizes.entries())
-      .sort((a, b) => b[1] - a[1])
-      .forEach(([p], i) => m.set(p, i));
-    return m;
-  }, [data]);
-  const projectColor = useCallback(
-    (project: string): string =>
-      GROUP_PALETTE[(projectRank.get(project) ?? 0) % GROUP_PALETTE.length],
-    [projectRank],
-  );
+  // 프로젝트 색 — vault 트리 기준이라 문서 인스펙터의 링크 그래프와 같다.
+  const projectColor = useProjectColor();
 
   // Louvain community color palette — 20 distinct hues. -1 (isolated)
   // renders muted so the eye skips over them.

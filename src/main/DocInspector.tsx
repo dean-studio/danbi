@@ -9,8 +9,10 @@ import {
   type WikiLink,
 } from "@/lib/ipc";
 import { inverseRelation, relationLabel } from "@/lib/ontology";
+import { useProjectColor } from "@/lib/projectColor";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
+import { buildNeighbors, LinkMap } from "./LinkMap";
 
 /**
  * 문서 화면 우측 인스펙터 (⌘I) — 변경 · 링크 · 정보 세 탭.
@@ -18,8 +20,9 @@ import { useApp } from "@/state/store";
  * 변경: 이 문서의 git 이력(docChangeHistory) + 커밋별 unified diff +
  *       문서 단위 복원(docRestore: "at" = 그 버전으로, "before" = 그 변경
  *       직전으로). vault 전체 reset 이 아니라 이 파일만 되돌린다.
- * 링크: linkIndex 의 나가는/들어오는 링크 + 이 문서가 source 인 ghost
- *       제안(승인/무시).
+ * 링크: 위쪽 연결 지도(LinkMap — 프로젝트별 색·호) + linkIndex 의
+ *       나가는/들어오는 링크 + 이 문서가 source 인 ghost 제안(승인/무시).
+ *       지도와 목록은 마우스 강조를 함께 쓴다.
  * 정보: 크기 · 수정 시각 · 경로 · kind.
  *
  * 하단 Backlinks 스트립을 대체한다. 탭은 localStorage 에 기억.
@@ -410,8 +413,32 @@ function LinksTab({
   const nothing =
     outgoing.length === 0 && incoming.length === 0 && (ghost?.length ?? 0) === 0;
 
+  const neighbors = useMemo(
+    () => buildNeighbors(project, domain, outgoing, incoming, ghost),
+    [project, domain, outgoing, incoming, ghost],
+  );
+  const [hot, setHot] = useState<string | null>(null);
+  useEffect(() => setHot(null), [key]);
+  const projectColor = useProjectColor();
+  const rowProps = (l: WikiLink) => {
+    const k = `${l.project}/${l.domain}`;
+    return {
+      color: projectColor(l.project),
+      hot: hot === k || hot === `project:${l.project}`,
+      onHover: (on: boolean) => setHot(on ? k : null),
+    };
+  };
+
   return (
     <div className="flex flex-col gap-4">
+      <LinkMap
+        project={project}
+        domain={domain}
+        neighbors={neighbors}
+        hot={hot}
+        onHot={setHot}
+        onOpenDoc={onOpenDoc}
+      />
       <Section label={`나가는 ${outgoing.length}`}>
         {outgoing.length === 0 ? (
           <Empty>나가는 링크가 없어요. 본문에 [[문서명]] 을 적으면 생겨요.</Empty>
@@ -421,6 +448,7 @@ function LinksTab({
               key={`${l.project}/${l.domain}-${i}`}
               link={l}
               current={project}
+              {...rowProps(l)}
               onClick={() => onOpenDoc(l.project, l.domain)}
             />
           ))
@@ -436,6 +464,7 @@ function LinksTab({
               link={l}
               current={project}
               incoming
+              {...rowProps(l)}
               onClick={() => onOpenDoc(l.project, l.domain)}
             />
           ))
@@ -507,12 +536,20 @@ function LinkRow({
   link,
   current,
   incoming = false,
+  color,
+  hot,
+  onHover,
   onClick,
 }: {
   link: WikiLink;
   current: string;
   /** 들어오는 링크면 relation 은 상대 문서가 적은 것 — 역방향으로 표시. */
   incoming?: boolean;
+  /** 프로젝트 색 — 연결 지도와 같은 색. */
+  color: string;
+  /** 지도에서 강조 중. */
+  hot: boolean;
+  onHover: (on: boolean) => void;
   onClick: () => void;
 }) {
   // 들어오는 링크는 상대가 적은 관계의 역방향으로 읽는다 (원인 → 결과).
@@ -525,6 +562,8 @@ function LinkRow({
     <button
       type="button"
       onClick={onClick}
+      onMouseEnter={() => onHover(true)}
+      onMouseLeave={() => onHover(false)}
       title={
         rel
           ? incoming
@@ -532,8 +571,12 @@ function LinkRow({
             : `이 문서의 ${relationLabel(rel)}`
           : undefined
       }
-      className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12px] text-body transition-colors hover:bg-surface-elevated hover:text-on-dark"
+      className={cn(
+        "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-[12px] text-body transition-colors hover:bg-surface-elevated hover:text-on-dark",
+        hot && "bg-surface-elevated text-on-dark",
+      )}
     >
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: color }} />
       {rel && <RelTag>{relationLabel(rel)}</RelTag>}
       {link.project !== current && (
         <>
