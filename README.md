@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/%E2%AC%87%20%EB%8B%A8%EB%B9%84%20macOS%20%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-0.9.4-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="단비 macOS 다운로드 0.9.4" />
+    <img src="https://img.shields.io/badge/%E2%AC%87%20%EB%8B%A8%EB%B9%84%20macOS%20%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-0.10.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="단비 macOS 다운로드 0.10.0" />
   </a>
 </p>
 
@@ -252,6 +252,7 @@ AI 호출은 모두 사용자가 직접 눌렀을 때만 일어납니다. 백그
 
 ## 최근 업데이트
 
+- **v0.10.0** — 사이드 프로젝트를 여러 개 오가는 분께. 프로젝트 홈의 "다음 한 걸음", 모든 프로젝트 할 일함, 쉬는 프로젝트 접기, 어디에 시간을 썼나, 다른 프로젝트에서 비슷한 문제를 다룬 기록. 검색은 기한 지난 문서를 뒤로 보냅니다.
 - **v0.9.4** — 문서 인스펙터 링크 탭에 연결 지도. 이 문서가 어느 프로젝트의 어떤 문서와 이어졌는지 한눈에 봅니다.
 - **v0.9.3** — 그래프가 배치가 끝나면 화면에 꼭 맞게 잡힙니다.
 - **v0.9.2** — 그래프 범례를 눌러 프로젝트 · 주제군 · 종류만 강조하고, 그 프로젝트로 바로 들어갑니다.
