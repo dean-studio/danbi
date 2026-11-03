@@ -15,6 +15,8 @@ import {
   GripVertical,
   Inbox,
   Layers,
+  ListChecks,
+  Moon,
   Network,
   Plus,
   Search as SearchIcon,
@@ -147,6 +149,61 @@ export function Sidebar({
     return n > 0 ? n : projectUpdates[project] ?? 0;
   };
 
+  // 프로젝트 활동 상태 — tree·보관·기준 일수가 바뀌면 다시 받는다.
+  const pulse = useApp((s) => s.pulse);
+  const setPulse = useApp((s) => s.setPulse);
+  const setCfgStore = useApp((s) => s.setCfg);
+  const showToast = useApp((s) => s.showToast);
+  useEffect(() => {
+    if (!tree) return;
+    let alive = true;
+    const t = window.setTimeout(() => {
+      ipc
+        .pulseList()
+        .then((rows) => alive && setPulse(rows))
+        .catch(() => {});
+    }, 300);
+    return () => {
+      alive = false;
+      window.clearTimeout(t);
+    };
+  }, [tree, cfg?.project_archived, cfg?.project_resumed_at, cfg?.dormant_days, setPulse]);
+  /** '쉬는 중' 섹션으로 내려간 프로젝트 (자동 휴면 + 보관). 그룹 소속은
+   *  설정에 그대로 두고 표시만 옮긴다 — 다시 시작하면 제자리로. */
+  const restingNames = (tree?.projects ?? [])
+    .map((p) => p.name)
+    .filter((n) => pulse[n] && pulse[n].state !== "active")
+    .sort((a, b) => (pulse[a].idle_days ?? 0) - (pulse[b].idle_days ?? 0));
+  const resting = new Set(restingNames);
+  const [restOpen, setRestOpen] = useState(() => {
+    try {
+      return localStorage.getItem("danbi:sidebar-rest-open") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("danbi:sidebar-rest-open", restOpen ? "1" : "0");
+    } catch {
+      /* 무시 */
+    }
+  }, [restOpen]);
+  async function setArchived(project: string, archived: boolean) {
+    try {
+      const next = archived
+        ? await ipc.projectSetArchived(project, true)
+        : await ipc.projectResume(project);
+      setCfgStore(next);
+      showToast(
+        "ok",
+        archived ? `${project} 보관 — '쉬는 중' 아래로 옮겼어요` : `${project} 다시 시작 — 제자리로 돌아왔어요`,
+      );
+    } catch (e) {
+      showToast("err", String(e));
+    }
+  }
+
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [ctx, setCtx] = useState<CtxState>({ kind: "none" });
   const [dragProject, setDragProject] = useState<string | null>(null);
@@ -266,7 +323,7 @@ export function Sidebar({
   const groupedNames = new Set<string>(groups.flatMap((g) => g.projects));
   const ungrouped = (tree?.projects ?? [])
     .map((p) => p.name)
-    .filter((n) => !groupedNames.has(n));
+    .filter((n) => !groupedNames.has(n) && !resting.has(n));
 
   async function persistGroups(next: ProjectGroup[]) {
     try {
@@ -502,6 +559,14 @@ export function Sidebar({
     { label: "아이콘 변경…", onClick: () => onChangeProjectIcon(project) },
     { label: "색상 변경…", onClick: () => onChangeProjectColor(project) },
     { label: "모두 읽음으로 표시", onClick: () => onMarkProjectRead(project) },
+    pulse[project]?.state === "archived"
+      ? { label: "보관 해제", onClick: () => setArchived(project, false) }
+      : pulse[project]?.state === "resting"
+        ? { label: "다시 시작", onClick: () => setArchived(project, false) }
+        : { label: "보관하기 (쉬는 중으로)", onClick: () => setArchived(project, true) },
+    ...(pulse[project]?.state === "resting"
+      ? [{ label: "보관하기", onClick: () => setArchived(project, true) }]
+      : []),
     { kind: "divider" },
     {
       label: "경로 복사 (절대)",
@@ -707,6 +772,12 @@ export function Sidebar({
           onClick={clearSelection}
         />
         <NavRow
+          icon={<ListChecks size={14} />}
+          label="할 일"
+          active={view === "todos"}
+          onClick={() => setView("todos")}
+        />
+        <NavRow
           icon={<Inbox size={14} />}
           label="검토함"
           badge={reviewCount}
@@ -888,6 +959,7 @@ export function Sidebar({
               <GroupSection
                 key={g.id}
                 group={g}
+                hidden={resting}
                 tree={tree}
                 expanded={expanded}
                 selection={selection}
@@ -999,6 +1071,23 @@ export function Sidebar({
               >
                 <Layers size={11} />새 그룹
               </button>
+            )}
+
+            {restingNames.length > 0 && (
+              <RestSection
+                names={restingNames}
+                open={restOpen}
+                onToggle={() => setRestOpen((v) => !v)}
+                selected={selection.project}
+                onSelect={(name) => {
+                  selectProject(name);
+                  clearProjectUpdate(name);
+                  ipc.projectMarkSeen(name).catch(() => {});
+                }}
+                onContext={(e, project) =>
+                  setCtx({ kind: "project", x: e.clientX, y: e.clientY, project })
+                }
+              />
             )}
           </>
         )}
@@ -1345,6 +1434,7 @@ function ProjectNode({
 /** A named group — header row (draggable drop target) + its projects. */
 function GroupSection({
   group,
+  hidden,
   tree,
   expanded,
   selection,
@@ -1382,6 +1472,8 @@ function GroupSection({
   onDropDomainOnFolder,
 }: {
   group: ProjectGroup;
+  /** '쉬는 중' 으로 내려가 여기서는 숨기는 프로젝트. */
+  hidden: Set<string>;
   tree: {
     projects: {
       name: string;
@@ -1571,7 +1663,7 @@ function GroupSection({
           )}
           {group.projects.map((name) => {
             const p = tree.projects.find((x) => x.name === name);
-            if (!p) return null;
+            if (!p || hidden.has(name)) return null;
             return (
               <ProjectNode
                 key={p.name}
@@ -2174,6 +2266,69 @@ function SidebarFooter({
 }
 
 /** 섹션 라벨 (최근 문서 · 프로젝트). caption-sm, 대문자 트래킹. */
+/** 사이드바 맨 아래 '쉬는 중 N' — 오래 손대지 않았거나 보관한 프로젝트.
+ *  기본은 접혀 있다. 행 = 아이콘 · 이름 · 쉰 날 (보관은 '보관'). */
+function RestSection({
+  names,
+  open,
+  onToggle,
+  selected,
+  onSelect,
+  onContext,
+}: {
+  names: string[];
+  open: boolean;
+  onToggle: () => void;
+  selected: string | null;
+  onSelect: (name: string) => void;
+  onContext: (e: React.MouseEvent, project: string) => void;
+}) {
+  const pulse = useApp((s) => s.pulse);
+  return (
+    <section className="mt-3 border-t border-hairline pt-2">
+      <button
+        onClick={onToggle}
+        className="flex w-full items-center gap-1.5 px-3 py-1 text-left text-[11px] font-medium uppercase tracking-[0.5px] text-stone hover:text-body"
+        title="오래 손대지 않았거나 보관한 프로젝트 — 설정에서 기준 일수를 바꿀 수 있어요"
+      >
+        {open ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+        <Moon size={11} />
+        쉬는 중
+        <span className="font-mono normal-case tracking-normal">{names.length}</span>
+      </button>
+      {open && (
+        <div className="mt-0.5 flex flex-col gap-px px-1">
+          {names.map((name) => {
+            const p = pulse[name];
+            const label = p?.state === "archived" ? "보관" : p?.idle_days != null ? `${p.idle_days}일` : "";
+            return (
+              <button
+                key={name}
+                onClick={() => onSelect(name)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onContext(e, name);
+                }}
+                title={p?.next ? `다음 한 걸음: ${p.next}` : name}
+                className={cn(
+                  "flex h-7 w-full items-center gap-2 rounded-sm px-2 text-left text-[13px] transition-colors",
+                  selected === name
+                    ? "bg-surface-elevated text-on-dark"
+                    : "text-mute hover:bg-surface-elevated hover:text-on-dark",
+                )}
+              >
+                <ProjectIcon project={name} />
+                <span className="min-w-0 flex-1 truncate">{name}</span>
+                <span className="shrink-0 font-mono text-[10px] text-stone">{label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function SectionLabel({
   label,
   right,

@@ -412,7 +412,45 @@ function AppearancePanel({ cfg }: { cfg: DanbiConfig }) {
           </Row>
         </>
       )}
+
+      <DormantRow cfg={cfg} />
     </>
+  );
+}
+
+const DORMANT_CHOICES = [0, 14, 30, 60, 90];
+
+/** 오래 손대지 않은 프로젝트를 사이드바 맨 아래 '쉬는 중' 으로 접는 기준. */
+function DormantRow({ cfg }: { cfg: DanbiConfig }) {
+  const current = cfg.dormant_days ?? 30;
+  const archived = cfg.project_archived?.length ?? 0;
+  return (
+    <Row
+      label="쉬는 프로젝트 접기"
+      hint={`이 기간 넘게 문서를 고치지 않은 프로젝트는 사이드바 맨 아래 '쉬는 중' 으로 내려가요. 파일은 그대로고, 열면 [다시 시작] 으로 올릴 수 있어요.${archived > 0 ? ` 직접 보관한 프로젝트 ${archived}개는 기간과 상관없이 거기 있어요.` : ""}`}
+    >
+      <div className="flex items-center gap-0.5 rounded-md border border-hairline bg-surface-elevated p-0.5">
+        {DORMANT_CHOICES.map((d) => (
+          <button
+            key={d}
+            type="button"
+            onClick={async () => {
+              try {
+                useApp.getState().setCfg(await ipc.dormantDaysSet(d));
+              } catch (e) {
+                useApp.getState().showToast("err", String(e));
+              }
+            }}
+            className={cn(
+              "h-6 rounded-sm px-2 text-[12px] transition-colors",
+              current === d ? "bg-surface-card text-on-dark" : "text-mute hover:text-on-dark",
+            )}
+          >
+            {d === 0 ? "끔" : `${d}일`}
+          </button>
+        ))}
+      </div>
+    </Row>
   );
 }
 

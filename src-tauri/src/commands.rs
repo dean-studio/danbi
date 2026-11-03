@@ -429,6 +429,23 @@ pub async fn rename_project(
                         }
                     }
                 }
+                // 보관·다시 시작·직접 묶은 폴더도 이름으로 저장돼 있다.
+                for p in cfg.project_archived.iter_mut() {
+                    if *p == old {
+                        *p = new.clone();
+                        touched = true;
+                    }
+                }
+                if let Some(ts) = cfg.project_resumed_at.remove(&old) {
+                    cfg.project_resumed_at.insert(new.clone(), ts);
+                    touched = true;
+                }
+                for p in cfg.folder_projects.values_mut() {
+                    if *p == old {
+                        *p = new.clone();
+                        touched = true;
+                    }
+                }
                 if touched {
                     let _ = config::save_config(&vault_root, &cfg);
                 }
@@ -458,6 +475,14 @@ pub async fn delete_project(vault_path: String, name: String) -> DanbiResult<()>
                     if g.projects.len() != before {
                         touched = true;
                     }
+                }
+                let before = cfg.project_archived.len() + cfg.folder_projects.len();
+                cfg.project_archived.retain(|p| p != &name);
+                cfg.folder_projects.retain(|_, p| p != &name);
+                if cfg.project_resumed_at.remove(&name).is_some()
+                    || cfg.project_archived.len() + cfg.folder_projects.len() != before
+                {
+                    touched = true;
                 }
                 if touched {
                     let _ = config::save_config(&vault_root, &cfg);
@@ -4737,6 +4762,136 @@ fn write_hook_helper(home: &std::path::Path) -> DanbiResult<std::path::PathBuf> 
             .map_err(|e| DanbiError::Other(format!("chmod danbi-hook: {e}")))?;
     }
     Ok(helper)
+}
+
+// ---------- 다시 시작하기 (0.10: 재진입 카드·할 일함·쉬는 중·시간 분배) ----------
+
+/// (설정 포인터 위치, 설정, 실제 vault 경로).
+fn pulse_ctx() -> DanbiResult<(PathBuf, DanbiConfig, PathBuf)> {
+    let root = default_vault_path()?;
+    let cfg = config::load_config(&root)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    Ok((root, cfg, vault_path))
+}
+
+#[tauri::command(async)]
+pub fn pulse_list() -> DanbiResult<Vec<crate::pulse::ProjectPulse>> {
+    let (_, cfg, vault_path) = pulse_ctx()?;
+    let tree = vault::list_tree_with(&vault_path, false)?;
+    Ok(crate::pulse::pulse_all(&vault_path, &cfg, &tree))
+}
+
+#[tauri::command(async)]
+pub fn resume_card(project: String) -> DanbiResult<crate::pulse::ResumeCard> {
+    let (_, cfg, vault_path) = pulse_ctx()?;
+    crate::pulse::resume_card(&vault_path, &cfg, &project)
+}
+
+/// 다음 한 걸음 적기. 빈 문자열 = 완료(지움).
+#[tauri::command(async)]
+pub fn next_step_set(project: String, text: String) -> DanbiResult<Option<crate::pulse::NextStep>> {
+    let (_, _, vault_path) = pulse_ctx()?;
+    crate::pulse::set_next(&vault_path, &project, &text, crate::vcs::CLIENT_HUMAN)
+}
+
+#[tauri::command(async)]
+pub fn todo_inbox(
+    days: Option<u32>,
+    project: Option<String>,
+) -> DanbiResult<crate::pulse::TodoInbox> {
+    let (_, cfg, vault_path) = pulse_ctx()?;
+    crate::pulse::todo_inbox(&vault_path, &cfg, days, project.as_deref())
+}
+
+#[tauri::command(async)]
+pub fn todo_set_done(
+    project: String,
+    domain: String,
+    line: usize,
+    raw: String,
+    done: bool,
+) -> DanbiResult<String> {
+    let (_, _, vault_path) = pulse_ctx()?;
+    crate::pulse::set_todo_done(&vault_path, &project, &domain, line, &raw, done)
+}
+
+/// 보관 / 보관 해제. 해제하면 '다시 시작' 과 같이 오늘부터 활동 중으로 친다.
+#[tauri::command(async)]
+pub fn project_set_archived(project: String, archived: bool) -> DanbiResult<DanbiConfig> {
+    let (root, mut cfg, vault_path) = pulse_ctx()?;
+    if !vault::project_exists(&vault_path, &project) {
+        return Err(DanbiError::Config(format!("unknown project: {project}")));
+    }
+    cfg.project_archived.retain(|p| p != &project);
+    if archived {
+        cfg.project_archived.push(project);
+    } else {
+        cfg.project_resumed_at.insert(project, chrono::Local::now().timestamp());
+    }
+    config::save_config(&root, &cfg)?;
+    Ok(cfg)
+}
+
+/// 쉬는 중인 프로젝트를 다시 시작 — 보관도 함께 푼다.
+#[tauri::command(async)]
+pub fn project_resume(project: String) -> DanbiResult<DanbiConfig> {
+    project_set_archived(project, false)
+}
+
+/// '쉬는 중' 기준 일수. 0 = 끔.
+#[tauri::command(async)]
+pub fn dormant_days_set(days: u32) -> DanbiResult<DanbiConfig> {
+    let (root, mut cfg, _) = pulse_ctx()?;
+    cfg.dormant_days = Some(days.min(3650));
+    config::save_config(&root, &cfg)?;
+    Ok(cfg)
+}
+
+#[tauri::command(async)]
+pub fn time_split(days: Option<i64>) -> DanbiResult<crate::pulse::TimeSplit> {
+    let (_, cfg, vault_path) = pulse_ctx()?;
+    crate::pulse::time_split(&vault_path, &cfg, days.unwrap_or(7))
+}
+
+/// 코드 폴더를 프로젝트에 직접 묶기 (시간 분배용). project = None 이면 풀기.
+#[tauri::command(async)]
+pub fn folder_project_set(folder: String, project: Option<String>) -> DanbiResult<DanbiConfig> {
+    let (root, mut cfg, vault_path) = pulse_ctx()?;
+    let folder = folder.trim().trim_end_matches('/').to_string();
+    if folder.is_empty() || !std::path::Path::new(&folder).is_absolute() {
+        return Err(DanbiError::Config("폴더는 절대 경로여야 해요.".into()));
+    }
+    match project {
+        Some(p) => {
+            if !vault::project_exists(&vault_path, &p) {
+                return Err(DanbiError::Config(format!("unknown project: {p}")));
+            }
+            cfg.folder_projects.insert(folder, p);
+        }
+        None => {
+            cfg.folder_projects.remove(&folder);
+        }
+    }
+    config::save_config(&root, &cfg)?;
+    Ok(cfg)
+}
+
+#[tauri::command(async)]
+pub fn similar_for_doc(
+    project: String,
+    domain: String,
+) -> DanbiResult<Vec<crate::pulse::SimilarHit>> {
+    let (_, _, vault_path) = pulse_ctx()?;
+    crate::pulse::similar_for_doc(&vault_path, &project, &domain, 5)
+}
+
+/// 첫 로딩 진행률 조회 — `task` 는 "usage"(Claude Code 기록 파싱) 또는
+/// "search"(검색 색인). 프런트 `Warmup` 이 로딩 중일 때만 300ms 간격으로 부른다.
+/// 한 번도 돈 적 없는 작업은 None.
+#[tauri::command]
+pub fn warmup_progress(task: String) -> Option<crate::warmup::WarmupProgress> {
+    crate::warmup::snapshot(&task)
 }
 
 // ---------- Goals ----------------------------------------------------------

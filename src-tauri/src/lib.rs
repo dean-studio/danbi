@@ -33,6 +33,7 @@ mod project_context;
 mod project_qa;
 mod reviews;
 mod providers;
+mod pulse;
 mod routing;
 mod search;
 mod secrets;
@@ -46,6 +47,7 @@ mod usage;
 mod vault;
 mod vcs;
 mod vector;
+mod warmup;
 mod watcher;
 #[cfg(test)]
 mod perf_bench;
@@ -584,6 +586,18 @@ pub fn run() {
             commands::project_briefing,
             commands::extract_file_path,
             commands::extract_file_bytes,
+            commands::pulse_list,
+            commands::resume_card,
+            commands::next_step_set,
+            commands::todo_inbox,
+            commands::todo_set_done,
+            commands::project_set_archived,
+            commands::project_resume,
+            commands::dormant_days_set,
+            commands::time_split,
+            commands::folder_project_set,
+            commands::similar_for_doc,
+            commands::warmup_progress,
             commands::goals_list,
             commands::goals_add,
             commands::goals_edit,

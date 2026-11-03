@@ -28,6 +28,7 @@ import { ProjectHome } from "@/main/ProjectHome";
 import { ReviewView } from "@/main/ReviewView";
 import { Settings } from "@/main/Settings";
 import { ShortcutsHelp } from "@/main/ShortcutsHelp";
+import { TodoView } from "@/main/TodoView";
 import { TrashPanel } from "@/main/TrashPanel";
 import { UsageView } from "@/main/UsageView";
 import { Sidebar, markVaultAllRead } from "@/main/Sidebar";
@@ -305,6 +306,9 @@ export function Workspace() {
       } else if (key === "u" && e.shiftKey) {
         e.preventDefault();
         setView(useApp.getState().view === "usage" ? "home" : "usage");
+      } else if (key === "t" && e.shiftKey) {
+        e.preventDefault();
+        setView(useApp.getState().view === "todos" ? "home" : "todos");
       } else if (key === "d" && e.shiftKey) {
         e.preventDefault();
         openTodayNote();
@@ -761,6 +765,7 @@ export function Workspace() {
     { id: "new-note", label: "새 노트", shortcut: "⌘N", run: newNote },
     { id: "new-project", label: "새 프로젝트", run: () => openDialog({ kind: "add-project" }) },
     { id: "home", label: "오늘(홈)으로", shortcut: "⌘J", run: () => useApp.getState().clearSelection() },
+    { id: "todos", label: "할 일함", shortcut: "⌘⇧T", run: () => setView("todos"), keywords: ["todo", "할일", "체크리스트"] },
     { id: "review", label: "검토함", shortcut: "⌘⇧R", run: () => setView("review") },
     { id: "usage", label: "사용량", shortcut: "⌘⇧U", run: () => setView("usage") },
     { id: "graph", label: "그래프", shortcut: "⌘G", run: () => { setGraphProject(useApp.getState().selection.project); setGraphOpen(true); } },
@@ -912,6 +917,8 @@ export function Workspace() {
               />
             ) : view === "usage" ? (
               <UsageView />
+            ) : view === "todos" ? (
+              <TodoView key={selection.project ?? ""} />
             ) : selection.project && selection.domain ? (
               <div className="flex-1 min-h-0">
                 <DocView

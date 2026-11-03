@@ -366,6 +366,33 @@ pub struct DanbiConfig {
     /// 스캐너 결과를 보여줄 때 걸러낸다 — 리뷰 큐에 복제하지 않는다.
     #[serde(default)]
     pub review_excluded_paths: Vec<String>,
+    /// 사용자가 "보관" 한 프로젝트. 사이드바 '쉬는 중' 아래로 내려가고
+    /// 할 일함·시간 분배에서 빠진다. 파일은 그대로 둔다.
+    #[serde(default)]
+    pub project_archived: Vec<String>,
+    /// "다시 시작" 누른 시각 (Unix 초). 손대지 않은 지 오래된 프로젝트도
+    /// 이 시각부터 다시 활동 중으로 친다.
+    #[serde(default)]
+    pub project_resumed_at: std::collections::HashMap<String, i64>,
+    /// 이 일수 넘게 손대지 않은 프로젝트를 '쉬는 중' 으로 접는다.
+    /// 비어 있으면 [`DEFAULT_DORMANT_DAYS`], 0 = 끔. (`Default` 파생으로
+    /// 만든 새 설정도 기본값을 따르도록 Option 으로 둔다.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dormant_days: Option<u32>,
+    /// 연결 파일 없이 사용자가 직접 프로젝트에 묶은 코드 폴더
+    /// (절대 경로 → 프로젝트). 시간 분배에서 이 폴더 안의 Claude Code
+    /// 작업을 그 프로젝트로 센다. 하위 폴더도 포함.
+    #[serde(default)]
+    pub folder_projects: std::collections::HashMap<String, String>,
+}
+
+pub const DEFAULT_DORMANT_DAYS: u32 = 30;
+
+impl DanbiConfig {
+    /// 0 이면 '쉬는 중' 자동 접기를 쓰지 않는다.
+    pub fn dormant_days(&self) -> u32 {
+        self.dormant_days.unwrap_or(DEFAULT_DORMANT_DAYS)
+    }
 }
 
 /// 한 개의 프로젝트 그룹. 그룹은 순서를 갖고, 그 안의 프로젝트들도

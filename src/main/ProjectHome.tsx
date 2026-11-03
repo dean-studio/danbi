@@ -25,6 +25,7 @@ import {
 import { ActivityFeed } from "@/main/ActivityFeed";
 import { ConnectStatusBand } from "@/main/ConnectSheet";
 import { ReviewMini } from "@/main/ReviewMini";
+import { ResumeCard } from "@/main/ResumeCard";
 import { projectIconOf } from "@/components/ProjectIconPicker";
 import { ReindexProgressCard } from "@/main/Settings";
 import { cn } from "@/lib/utils";
@@ -35,7 +36,7 @@ import { McpInboundProjectMini } from "./McpInboundProjectMini";
 const NO_GROUPS: ProjectGroup[] = [];
 
 /** 프로젝트 홈. 헤더(이름 · [+ 새 노트] 흰 CTA 1개) → 히어로(아이콘·
- *  이름·목표 한 줄) → 에이전트 상태 띠(연결 시트 입구) → 이 프로젝트
+ *  이름·목표 한 줄) → 재진입 카드(다음 한 걸음·열린 할 일) → 에이전트 상태 띠(연결 시트 입구) → 이 프로젝트
  *  액션 → 지난 7일 → MCP mini → 받아 적은 것. 연결/스킬 버튼 8개와
  *  ConnectCard 는 연결 시트(ConnectSheet)로 흡수됐다. */
 export function ProjectHome({
@@ -92,6 +93,9 @@ export function ProjectHome({
       <div className="flex-1 min-h-0 overflow-auto">
         <div className="mx-auto max-w-[820px] px-6 py-8">
           <ProjectHero project={project} />
+          <div className="mt-5">
+            <ResumeCard project={project} node={projectNode} />
+          </div>
           <div className="mt-5">
             <ConnectStatusBand
               project={project}

@@ -1007,7 +1007,7 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "danbi_context",
-            "description": "질문 하나로 답에 필요한 맥락을 한 번에 가져옵니다. 하이브리드 검색 상위 문서에서 질문과 관련된 섹션만 글자 예산 안에서 잘라 주고, 그 문서들에 [[위키링크]]로 연결된 문서 목록(관계 종류 포함)도 같이 줍니다. 문서마다 type·status 가 붙고, 다른 결정에 대체된(superseded) 문서는 뒤로 밀립니다. search → read 를 여러 번 반복하는 대신 먼저 이걸 부르세요. 전체 본문이 필요하면 그다음 danbi_read.",
+            "description": "질문 하나로 답에 필요한 맥락을 한 번에 가져옵니다. 하이브리드 검색 상위 문서에서 질문과 관련된 섹션만 글자 예산 안에서 잘라 주고, 그 문서들에 [[위키링크]]로 연결된 문서 목록(관계 종류 포함)도 같이 줍니다. 문서마다 type·status·stale·verified 가 붙고, 다른 결정에 대체된(superseded) 문서와 유효 기한(stale_after)이 지난 문서는 뒤로, 사람이 확인한(verified) 문서는 조금 앞으로 옵니다. stale: true 인 문서는 지금도 맞는지 확인하고 쓰세요. search → read 를 여러 번 반복하는 대신 먼저 이걸 부르세요. 전체 본문이 필요하면 그다음 danbi_read.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1081,13 +1081,14 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "danbi_log",
-            "description": "지정한 프로젝트의 오늘 daily/YYYY-MM-DD.md 파일에 새 문단을 append합니다. 시각·호출자 머리말이 자동으로 붙고, 같은 날 같은 본문을 다시 보내면 쓰지 않고 deduped:true 를 돌려줍니다. 응답의 commit 이 null 이고 warning 이 있으면 파일은 저장된 것이니 재시도하지 마세요.",
+            "description": "지정한 프로젝트의 오늘 daily/YYYY-MM-DD.md 파일에 새 문단을 append합니다. 시각·호출자 머리말이 자동으로 붙고, 같은 날 같은 본문을 다시 보내면 쓰지 않고 deduped:true 를 돌려줍니다. 응답의 commit 이 null 이고 warning 이 있으면 파일은 저장된 것이니 재시도하지 마세요. 세션을 마칠 땐 next_step 에 다음에 할 첫 일을 한 줄로. 버그·원인 기록이면 응답의 elsewhere 에 다른 프로젝트의 비슷한 기록이 올 수 있어요 — 같은 문제면 본문에 [[프로젝트/문서.md]] 로 연결하세요.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "project": { "type": "string" },
                     "content": { "type": "string", "description": "추가할 markdown. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결" },
-                    "stamp": { "type": "boolean", "default": true, "description": "false 면 자동 시각·호출자 줄(`_HH:MM · client_`)을 붙이지 않음" }
+                    "stamp": { "type": "boolean", "default": true, "description": "false 면 자동 시각·호출자 줄(`_HH:MM · client_`)을 붙이지 않음" },
+                    "next_step": { "type": "string", "description": "작업을 마칠 때 '다음에 제일 먼저 할 일' 한 줄. 프로젝트 홈 맨 위와 다음 세션 브리핑에 보입니다. 빈 문자열이면 지움" }
                 },
                 "required": ["project", "content"],
                 "additionalProperties": false
@@ -1188,7 +1189,7 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "danbi_set_meta",
-            "description": "문서의 frontmatter 에 종류(type)·상태(status)·문서 단위 관계를 넣습니다. 본문과 다른 frontmatter 키는 그대로 둡니다. 값은 danbi_schema 의 단어 목록 안에서만 — 밖이면 거절하고 쓸 수 있는 값을 알려줍니다.",
+            "description": "문서의 frontmatter 에 종류(type)·상태(status)·유효 기한(stale_after)·확인(verified_by)·문서 단위 관계를 넣습니다. 본문과 다른 frontmatter 키는 그대로 둡니다. 값은 danbi_schema 의 단어 목록 안에서만 — 밖이면 거절하고 쓸 수 있는 값을 알려줍니다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1196,6 +1197,8 @@ fn tool_catalog() -> Vec<Value> {
                     "domain": { "type": "string", "description": ".md로 끝나는 파일명 (하위 폴더면 notes/x.md 형태)" },
                     "type": { "type": "string", "description": "예: decision" },
                     "status": { "type": "string", "description": "active · superseded · done" },
+                    "stale_after": { "type": "string", "description": "이 날짜(YYYY-MM-DD)가 지나면 다시 확인이 필요한 문서 — 지나면 검색에서 뒤로 밀림. 가격·일정·버전처럼 바뀌는 사실에 붙이세요." },
+                    "verified_by": { "type": "string", "description": "사람이 내용을 확인했을 때만, 확인한 사람 이름 (예: hckim). `verified: { by, at: 오늘 }` 로 기록되고 검색에서 조금 앞으로 옴. 에이전트가 스스로 확인했다고 넣지 마세요." },
                     "relations": {
                         "type": "array",
                         "description": "추가할 관계 (이미 있으면 건너뜀)",
@@ -1548,6 +1551,8 @@ async fn context_dispatch(args: Value) -> Result<Dispatched, DanbiError> {
             "domain": hit.domain,
             "type": meta.doc_type,
             "status": meta.effective_status,
+            "stale": hit.stale,
+            "verified": hit.verified,
             "matched": hit.matched,
             "relevance": hit.relevance,
             "total_chars": md.chars().count(),
@@ -1649,7 +1654,8 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 .unwrap_or(8) as usize;
             let doc_type = opt_string_arg(&args, "type");
             let depth = if doc_type.is_some() { limit.saturating_mul(4) } else { limit };
-            let mut hits = search::full_search(&vault_path, &query, depth)?;
+            let pool = search::full_search(&vault_path, &query, depth.max(limit.saturating_mul(2)))?;
+            let mut hits = search::trust_rerank(&vault_path, pool, depth);
             if let Some(t) = doc_type.as_deref() {
                 let mut types = TypeLookup::new(&vault_path)?;
                 hits.retain(|h| types.is(&h.project, &h.domain, t));
@@ -1737,6 +1743,25 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 })?;
                 update.set.push(("status".into(), canon));
             }
+            if let Some(d) = opt_string_arg(&args, "stale_after") {
+                let date = ontology::date_part(&d).ok_or_else(|| {
+                    DanbiError::Config(format!("stale_after 는 YYYY-MM-DD 날짜여야 해요 (받은 값: {d})."))
+                })?;
+                update.set.push(("stale_after".into(), date));
+            }
+            if let Some(by) = opt_string_arg(&args, "verified_by") {
+                let by = by.trim();
+                if by.is_empty() || by.contains(['{', '}', ',', '\n']) {
+                    return Err(DanbiError::Config("verified_by 는 사람 이름 한 개여야 해요 (예: hckim).".into()));
+                }
+                let today = chrono::Local::now().format("%Y-%m-%d");
+                let by = if by.contains(": ") || by.starts_with(['"', '\'']) {
+                    format!("\"{}\"", by.replace('"', ""))
+                } else {
+                    by.to_string()
+                };
+                update.set_raw.push(("verified".into(), format!("{{ by: {by}, at: {today} }}")));
+            }
             for r in args.get("relations").and_then(|v| v.as_array()).into_iter().flatten() {
                 let rel = r.get("relation").and_then(|v| v.as_str()).unwrap_or("").trim();
                 // `x.md|별칭` / `x.md#헤딩` → the file itself.
@@ -1762,8 +1787,10 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 })?;
                 update.add_items.push((canon, format!("[[{}]]", normalize_md(target))));
             }
-            if update.set.is_empty() && update.add_items.is_empty() {
-                return Err(DanbiError::Config("type · status · relations 중 하나는 있어야 해요.".into()));
+            if update.set.is_empty() && update.set_raw.is_empty() && update.add_items.is_empty() {
+                return Err(DanbiError::Config(
+                    "type · status · stale_after · verified_by · relations 중 하나는 있어야 해요.".into(),
+                ));
             }
             let next = ontology::set_frontmatter(&current, &update).map_err(DanbiError::Config)?;
             if next == current {
@@ -1785,7 +1812,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 json!({
                     "project": project,
                     "domain": domain_norm,
-                    "set": update.set.iter().map(|(k, v)| json!({ k: v })).collect::<Vec<_>>(),
+                    "set": update.set.iter().chain(update.set_raw.iter()).map(|(k, v)| json!({ k: v })).collect::<Vec<_>>(),
                     "added_relations": update.add_items.iter().map(|(k, v)| json!({ "relation": k, "target": v })).collect::<Vec<_>>(),
                     "bytes": next.len(),
                 }),
@@ -1875,16 +1902,19 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 &format!("danbi: mcp log · {project}/{domain}"),
             &client,
             );
-            Ok(write_result(
-                json!({
-                    "project": project,
-                    "domain": domain,
-                    "stamped": stamp,
-                    "bytes": next.len(),
-                }),
-                commit,
-                warning,
-            ))
+            let mut out = json!({
+                "project": project,
+                "domain": domain,
+                "stamped": stamp,
+                "bytes": next.len(),
+            });
+            if let Some(step) = args.get("next_step").and_then(|v| v.as_str()) {
+                if let Ok(saved) = crate::pulse::set_next(&vault_path, &project, step, &client) {
+                    out["next_step"] = saved.map(|n| Value::String(n.text)).unwrap_or(Value::Null);
+                }
+            }
+            attach_elsewhere(&vault_path, &project, body, &mut out);
+            Ok(write_result(out, commit, warning))
         }
         "danbi_append" => {
             let project = string_arg(&args, "project")?;
@@ -1894,7 +1924,7 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
             let domain_norm = normalize_md(&domain);
             let current =
                 vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
-            let op = EditOp::Append { content };
+            let op = EditOp::Append { content: content.clone() };
             edit_ops::validate(&op)?;
             let next = edit_ops::apply(&current, &op)?;
 
@@ -1911,15 +1941,13 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 &format!("danbi: mcp append · {project}/{domain_norm}"),
             &client,
             );
-            Ok(write_result(
-                json!({
-                    "project": project,
-                    "domain": domain_norm,
-                    "bytes": next.len(),
-                }),
-                commit,
-                warning,
-            ))
+            let mut out = json!({
+                "project": project,
+                "domain": domain_norm,
+                "bytes": next.len(),
+            });
+            attach_elsewhere(&vault_path, &project, &content, &mut out);
+            Ok(write_result(out, commit, warning))
         }
         "danbi_replace_section" => {
             let project = string_arg(&args, "project")?;
@@ -2595,6 +2623,17 @@ fn read_doc_tool(
             if let Some(st) = &meta.effective_status {
                 note.push_str(&format!(" · status {st}"));
             }
+            let trust = ontology::doc_trust(&md, &Local::now().format("%Y-%m-%d").to_string());
+            match (&trust.stale_after, trust.stale) {
+                (Some(d), true) => note.push_str(&format!(" · stale (기한 {d} 지남 — 지금도 맞는지 확인)")),
+                (Some(d), false) => note.push_str(&format!(" · 기한 {d}")),
+                _ => {}
+            }
+            if trust.verified {
+                let who = trust.verified_by.as_deref().unwrap_or("?");
+                let at = trust.verified_at.as_deref().map(|a| format!(" {a}")).unwrap_or_default();
+                note.push_str(&format!(" · verified {who}{at}"));
+            }
             let rels = ontology::relations_of(&idx, &vocab, &id);
             if !rels.is_empty() {
                 let shown: Vec<String> = rels.iter().take(8).map(|r| format!("{} {}", r.relation, r.doc)).collect();
@@ -2753,6 +2792,26 @@ fn commit_or_warn(
             )),
         ),
     }
+}
+
+/// 버그·원인 성격의 기록이면 다른 프로젝트의 비슷한 기록을 응답에 붙인다
+/// (`elsewhere`). 키워드 검색만 — LLM·임베딩 호출 없음.
+fn attach_elsewhere(vault: &std::path::Path, project: &str, body: &str, out: &mut Value) {
+    if !crate::pulse::looks_like_problem(body) {
+        return;
+    }
+    let hits = crate::pulse::similar_elsewhere(vault, project, body, 3);
+    if hits.is_empty() {
+        return;
+    }
+    let first = format!("[[{}/{}]]", hits[0].project, hits[0].domain);
+    out["elsewhere"] = json!(hits
+        .iter()
+        .map(|h| json!({ "project": h.project, "domain": h.domain, "snippet": h.snippet }))
+        .collect::<Vec<_>>());
+    out["elsewhere_hint"] = Value::String(format!(
+        "다른 프로젝트에 비슷한 기록이 있어요. 같은 문제였다면 그쪽 해결법을 먼저 확인하고, 이 기록에 `관련:: {first}` 처럼 연결해 두세요."
+    ));
 }
 
 fn write_result(mut body: Value, commit: Option<String>, warning: Option<String>) -> String {
@@ -2992,6 +3051,32 @@ mod tests {
     fn today_note(vault: &std::path::Path, project: &str) -> String {
         let domain = format!("daily/{}.md", chrono::Local::now().format("%Y-%m-%d"));
         vault::read_doc(vault, project, &domain).unwrap()
+    }
+
+    #[test]
+    fn log_sets_next_step_and_points_to_similar_records_elsewhere() {
+        let vault = temp_vault("next");
+        std::fs::write(
+            vault.join("Projects/상식이/tray.md"),
+            "# 트레이\n- TrayIconEvent rect 모니터 좌표가 틀어짐 → 클릭 위치로 해결\n",
+        )
+        .unwrap();
+        let out = dispatch_in(
+            &vault,
+            "danbi_log",
+            json!({ "project": "보니", "content": "### 버그 원인: 팝오버\n- TrayIconEvent rect 모니터 좌표", "next_step": "클릭 위치 기준으로 고치기", "_client": "claude_code" }),
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["next_step"], "클릭 위치 기준으로 고치기");
+        assert_eq!(crate::pulse::load_next(&vault, "보니").unwrap().by, "claude-code");
+        assert_eq!(v["elsewhere"][0]["project"], "상식이", "{v}");
+        assert!(v["elsewhere_hint"].as_str().unwrap().contains("[[상식이/tray.md]]"));
+
+        // 버그 성격이 아니면 찾지 않는다.
+        let plain = log(&vault, "보니", "### 회의 메모\n- TrayIconEvent rect 이야기");
+        assert!(plain.get("elsewhere").is_none());
+        let _ = std::fs::remove_dir_all(&vault);
     }
 
     #[test]
@@ -3436,6 +3521,29 @@ mod read_tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("decision"), "{err}");
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn set_meta_writes_okf_freshness_fields() {
+        let v = ontology_vault();
+        dispatch_in(
+            &v,
+            "danbi_set_meta",
+            json!({ "project": "P", "domain": "ui.md", "stale_after": "2027-01-31", "verified_by": "hckim" }),
+        )
+        .unwrap();
+        let md = std::fs::read_to_string(v.join("Projects/P/ui.md")).unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_eq!(md, format!("---\nstale_after: 2027-01-31\nverified: {{ by: hckim, at: {today} }}\n---\n\n# UI\n"));
+        let t = ontology::doc_trust(&md, &today);
+        assert!(t.verified && !t.stale);
+
+        for bad in [json!({ "stale_after": "다음달" }), json!({ "verified_by": "a, b" })] {
+            let mut args = json!({ "project": "P", "domain": "ui.md" });
+            args.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            assert!(dispatch_in(&v, "danbi_set_meta", args).is_err());
+        }
         std::fs::remove_dir_all(v).ok();
     }
 

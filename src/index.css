@@ -293,3 +293,89 @@ body {
 .danbi-bg-progress-bar {
   animation: danbi-bg-progress 1.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
+
+/* 첫 로딩 "준비 중" 패널 (src/main/Warmup.tsx) — 앱이 새로 뜬 뒤 처음 한 번
+   오래 걸리는 작업(대화 기록 파싱·검색 색인)을 기다리는 동안.
+   색은 토큰(surface-elevated·hairline)과 프로젝트 색(일러스트성)만 쓴다. */
+@keyframes danbi-warm-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+/* 단계 문구가 바뀔 때 — key 가 바뀌어 다시 마운트되며 한 번 재생 */
+.danbi-warm-in {
+  animation: danbi-warm-in 260ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+/* 결과가 도착해 패널을 대체할 때 — 번쩍 바뀌지 않고 아래서 올라오며 나타남 */
+.danbi-warm-reveal {
+  animation: danbi-warm-in 320ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+/* 총량을 모르는 단계 — 막대 위를 왕복하는 띠 */
+@keyframes danbi-warm-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
+}
+.danbi-warm-sweep {
+  animation: danbi-warm-sweep 1.6s cubic-bezier(0.45, 0, 0.3, 1) infinite;
+}
+/* 진행 막대 위를 지나가는 광택 — 멈춘 게 아니라는 신호 */
+@keyframes danbi-warm-gloss {
+  0%   { transform: translateX(-120%); }
+  100% { transform: translateX(260%); }
+}
+.danbi-warm-gloss {
+  animation: danbi-warm-gloss 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+/* 유령 행의 점 — 서로 어긋나게 숨 쉬듯 */
+@keyframes danbi-warm-breathe {
+  0%, 100% { opacity: 0.25; transform: scale(0.85); }
+  50%      { opacity: 1;    transform: scale(1); }
+}
+.danbi-warm-breathe {
+  animation: danbi-warm-breathe 1.5s ease-in-out infinite;
+}
+/* 유령 행의 글줄 — 희미한 빛이 흘러감 */
+@keyframes danbi-warm-shimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+.danbi-warm-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-elevated) 0%,
+    var(--color-hairline) 50%,
+    var(--color-surface-elevated) 100%
+  );
+  background-size: 200% 100%;
+  animation: danbi-warm-shimmer 2.2s linear infinite;
+}
+/* 모든 단계가 끝나고 결과를 조립하는 동안 — 꽉 찬 막대가 천천히 숨 쉼 */
+@keyframes danbi-warm-settle {
+  0%, 100% { opacity: 0.55; }
+  50%      { opacity: 1; }
+}
+.danbi-warm-settle {
+  animation: danbi-warm-settle 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .danbi-warm-in,
+  .danbi-warm-reveal,
+  .danbi-warm-sweep,
+  .danbi-warm-gloss,
+  .danbi-warm-breathe,
+  .danbi-warm-shimmer,
+  .danbi-warm-settle {
+    animation: none !important;
+  }
+  /* 왕복 띠는 움직이지 않으면 의미가 없으니 옅게 깐 띠로 */
+  .danbi-warm-sweep {
+    transform: none !important;
+    width: 100% !important;
+    opacity: 0.45;
+  }
+  .danbi-warm-breathe {
+    opacity: 0.7;
+  }
+  .danbi-warm-gloss {
+    display: none;
+  }
+}

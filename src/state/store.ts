@@ -8,6 +8,7 @@ import type {
   ProjectGroup,
   ProjectJournalView,
   ProjectNode,
+  ProjectPulse,
   RoutingResult,
   VaultTree,
 } from "@/lib/ipc";
@@ -20,7 +21,7 @@ export type Selection = {
 /** 메인 영역 화면. "home" 은 selection 에 따라 오늘(홈)/프로젝트 홈/문서로
  *  갈라지고, 검토함·사용량은 selection 과 무관한 전용 화면. 사이드바
  *  내비 행과 ⌘⇧R / ⌘⇧U 가 바꾼다. */
-export type MainView = "home" | "review" | "usage";
+export type MainView = "home" | "review" | "usage" | "todos";
 
 export type ChatTurn = {
   id: string;
@@ -158,6 +159,14 @@ export type AppStore = {
    *  떠도 된다 (Z-스택 분리). */
   toast: { tone: "ok" | "err"; text: string; id: number } | null;
   showToast: (tone: "ok" | "err", text: string) => void;
+
+  /** 프로젝트별 활동 상태(활동 중·쉬는 중·보관). 사이드바가 tree·설정이
+   *  바뀔 때 다시 받아 온다. */
+  pulse: Record<string, ProjectPulse>;
+  setPulse: (rows: ProjectPulse[]) => void;
+  /** 할 일을 완료/되돌리면 올린다 — 재진입 카드·할 일함이 다시 읽는다. */
+  todoRev: number;
+  bumpTodos: () => void;
 };
 
 export type UpdateInfo =
@@ -313,6 +322,10 @@ export const SELF_SAVE_WINDOW_MS = 1500;
 export const useApp = create<AppStore>((set) => ({
   cfg: null,
   setCfg: (cfg) => set({ cfg }),
+  pulse: {},
+  setPulse: (rows) => set({ pulse: Object.fromEntries(rows.map((r) => [r.project, r])) }),
+  todoRev: 0,
+  bumpTodos: () => set((s) => ({ todoRev: s.todoRev + 1 })),
   tree: null,
   setTree: (t) => set({ tree: t }),
   patchTreeProject: (name, node) =>

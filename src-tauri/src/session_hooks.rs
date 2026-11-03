@@ -52,6 +52,14 @@ pub fn session_brief(vault: &Path, project: Option<&str>, max_chars: usize) -> D
             if !goals.is_empty() {
                 lines.push(format!("진행 중 목표: {}", goals.join(" / ")));
             }
+            // 지난번에 멈춘 곳 — 세션은 여기서 시작하는 게 자연스럽다.
+            if let Some(next) = crate::pulse::next_view(vault, name) {
+                let from = match next.todo.as_ref() {
+                    Some(t) => format!(" ({})", t.domain),
+                    None => String::new(),
+                };
+                lines.push(format!("다음 한 걸음: {}{from}", next.text));
+            }
 
             let mut docs = flatten_domains(node);
             docs.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
@@ -213,7 +221,7 @@ fn is_daily(domain: &str) -> bool {
 
 /// One line for a daily note: its last three section headings, or the
 /// first content lines when the note has no headings.
-fn daily_one_liner(md: &str) -> Option<String> {
+pub(crate) fn daily_one_liner(md: &str) -> Option<String> {
     let mut headings = Vec::new();
     let mut first_lines = Vec::new();
     let mut in_comment = false;

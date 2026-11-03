@@ -40,7 +40,17 @@ type SearchState = "idle" | "local" | "full" | "ai-running" | "ai-done" | "ai-er
 
 /** 한 줄 결과. 종류별로 섹션에 묶고, 키보드 이동은 평탄한 인덱스로. */
 type Row =
-  | { kind: "doc"; key: string; project: string; domain: string; snippet?: string; mtime?: number | null; matched?: "keyword" | "semantic" }
+  | {
+      kind: "doc";
+      key: string;
+      project: string;
+      domain: string;
+      snippet?: string;
+      mtime?: number | null;
+      matched?: "keyword" | "semantic";
+      stale?: boolean;
+      verified?: boolean;
+    }
   | { kind: "project"; key: string; name: string; current: boolean }
   | { kind: "command"; key: string; cmd: PaletteCommand };
 
@@ -218,6 +228,8 @@ export function CommandPalette({
         snippet: h.snippet,
         mtime: recency.docs.get(`${h.project}/${h.domain}`) ?? null,
         matched: search === "ai-done" ? "semantic" : "keyword",
+        stale: h.stale,
+        verified: h.verified,
       }));
     };
     const recentDocRows = (limit: number): Row[] => {
@@ -525,6 +537,21 @@ function PaletteRow({
                 {row.matched === "semantic" ? "의미" : "키워드"}
               </span>
             )}
+            {row.stale ? (
+              <span
+                className="shrink-0 rounded-xs border border-hairline px-1 py-px text-[9px] tracking-[0.2px] text-stone"
+                title="문서에 적힌 유효 기한(stale_after)이 지났어요 — 지금도 맞는지 확인하세요. 그래서 아래로 내렸어요."
+              >
+                기한 지남
+              </span>
+            ) : row.verified ? (
+              <span
+                className="shrink-0 rounded-xs border border-hairline px-1 py-px text-[9px] tracking-[0.2px] text-mute"
+                title="사람이 확인한 문서예요 (frontmatter verified)."
+              >
+                확인됨
+              </span>
+            ) : null}
             {row.mtime ? (
               <span className="ml-auto shrink-0 text-caption-sm text-stone">
                 {timeAgo(row.mtime)}

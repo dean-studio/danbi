@@ -21,7 +21,7 @@ pub struct VaultDocIndex {
     pub headings: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct SearchHit {
     pub project: String,
     pub domain: String,
@@ -34,6 +34,16 @@ pub struct SearchHit {
     /// loose embedding neighbour. Empty for non-hybrid paths.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub matched: String,
+    /// `stale_after` in the doc's frontmatter is past — ranked lower.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stale: bool,
+    /// The doc carries `verified:` (a person checked it) — ranked a bit higher.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub verified: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -437,13 +447,19 @@ fn build_corpus(vault: &Path, snapshot: VaultSnapshot) -> DanbiResult<IndexedCor
         .register("danbi_ngram", ngram_analyzer);
 
     let mut writer = open_writer(&index)?;
-    for (id, (path, _)) in &snapshot.files {
+    // 첫 로딩 진행률 — 인스펙터 "다른 프로젝트의 비슷한 기록" 이 읽는다.
+    crate::warmup::phase(crate::warmup::TASK_SEARCH, "indexing", snapshot.files.len());
+    for (i, (id, (path, _))) in snapshot.files.iter().enumerate() {
         if let Some(doc) = make_doc(&fields, id, path) {
             writer
                 .add_document(doc)
                 .map_err(|e| DanbiError::Other(format!("tantivy add: {e}")))?;
         }
+        if i % 16 == 15 {
+            crate::warmup::step(crate::warmup::TASK_SEARCH, i + 1);
+        }
     }
+    crate::warmup::phase(crate::warmup::TASK_SEARCH, "committing", 0);
     writer
         .commit()
         .map_err(|e| DanbiError::Other(format!("tantivy commit: {e}")))?;
@@ -548,7 +564,14 @@ fn ensure_corpus_fresh(vault: &Path) -> DanbiResult<Option<Arc<IndexedCorpus>>> 
     // Snapshot again under the lock: one taken before it could be older
     // than the corpus another builder just swapped in, and applying it
     // would roll that corpus back (a new file would be "removed").
-    let snapshot = snapshot_vault(vault)?;
+    if current_corpus()?.is_none() {
+        // 아직 코퍼스가 없다 = 첫 빌드가 곧 시작된다. 문서 목록을 훑는 단계부터 알린다.
+        crate::warmup::phase(crate::warmup::TASK_SEARCH, "scanning", 0);
+    }
+    let snapshot = snapshot_vault(vault).inspect_err(|_| {
+        // 훑다가 실패해도 진행 표시가 "scanning" 에 멈춰 있지 않게.
+        crate::warmup::finish(crate::warmup::TASK_SEARCH);
+    })?;
     // Another thread may have finished exactly this build while we waited.
     let current = current_corpus()?;
     if let Some(c) = current.as_ref().filter(|c| is_fresh(c, &snapshot)) {
@@ -577,7 +600,11 @@ fn ensure_corpus_fresh(vault: &Path) -> DanbiResult<Option<Arc<IndexedCorpus>>> 
             if let Ok(mut slot) = CORPUS.lock() {
                 *slot = None;
             }
-            Arc::new(build_corpus(vault, snapshot)?)
+            // 전체 빌드는 첫 로딩 진행률을 알린다(증분은 금방 끝나서 생략).
+            // 실패해도 active 를 내려야 프런트가 "n / m" 에 멈춰 있지 않는다.
+            let built = build_corpus(vault, snapshot);
+            crate::warmup::finish(crate::warmup::TASK_SEARCH);
+            Arc::new(built?)
         }
     };
     let mut slot = CORPUS
@@ -713,7 +740,7 @@ fn search_corpus(corpus: &IndexedCorpus, trimmed: &str, limit: usize) -> DanbiRe
             domain,
             relevance: (score / max_score).min(1.0),
             snippet,
-            matched: String::new(),
+            ..Default::default()
         });
     }
 
@@ -721,6 +748,8 @@ fn search_corpus(corpus: &IndexedCorpus, trimmed: &str, limit: usize) -> DanbiRe
 }
 
 fn excerpt_for_query(body: &str, query: &str) -> String {
+    // 미리보기에 `stale_after: …` 같은 frontmatter 가 끼지 않게 본문만.
+    let body = crate::ontology::strip_frontmatter(body);
     excerpt_match(body, query).unwrap_or_else(|| body.chars().take(80).collect())
 }
 
@@ -907,7 +936,7 @@ pub fn local_search(
             domain: doc.domain.clone(),
             relevance: (score as f32 / 20.0).min(1.0),
             snippet,
-            matched: String::new(),
+            ..Default::default()
         })
         .collect()
 }
@@ -1053,9 +1082,8 @@ pub fn rrf_merge(
                 SearchHit {
                     project: hit.project.clone(),
                     domain: hit.domain.clone(),
-                    relevance: 0.0,
-                    snippet: String::new(),
                     matched: "semantic".into(),
+                    ..Default::default()
                 },
             );
         }
@@ -1158,7 +1186,9 @@ pub fn full_search_mode(
     } else {
         bm25
     };
-    let mut hits = rrf_merge(&bm25, &vector_hits, limit);
+    // Merge deeper than `limit` so demoting a stale doc lets the next one in.
+    let merged = rrf_merge(&bm25, &vector_hits, depth);
+    let mut hits = trust_rerank(vault, merged, limit);
     // Semantic-only hits carry no BM25 excerpt; fill one from the file so
     // callers never get an empty snippet to judge the hit by.
     for hit in hits.iter_mut().filter(|h| h.snippet.is_empty()) {
@@ -1167,6 +1197,68 @@ pub fn full_search_mode(
         }
     }
     Ok(hits)
+}
+
+// ---------- Freshness / trust rerank (OKF `stale_after` · `verified`) ----------
+
+// Weights apply to RRF-normalized relevance, where rank r scores about
+// 61/(60+r) of the top hit — so small factors already move docs by ranks.
+/// Past `stale_after`: the doc may no longer hold. ×0.8 drops a top hit to
+/// about 16th — still findable, after current docs.
+const STALE_WEIGHT: f32 = 0.8;
+/// `status: superseded` / `deprecated` declared in the doc itself.
+const RETIRED_WEIGHT: f32 = 0.8;
+/// A person checked it (`verified:`) and it isn't stale — a nudge of about
+/// two ranks, so it only overtakes docs of close relevance.
+const VERIFIED_WEIGHT: f32 = 1.03;
+
+fn trust_weight(trust: &crate::ontology::DocTrust, retired: bool) -> f32 {
+    let mut w = 1.0;
+    if trust.stale {
+        w *= STALE_WEIGHT;
+    } else if trust.verified {
+        w *= VERIFIED_WEIGHT;
+    }
+    if retired {
+        w *= RETIRED_WEIGHT;
+    }
+    w
+}
+
+/// Reorders `hits` by relevance × trust weight (stable for equal scores),
+/// marks `stale` / `verified`, keeps the top `limit` and renormalizes
+/// relevance so the first hit is 1.0 again. Reads each candidate's
+/// frontmatter from disk — only the top few dozen hits, never the vault.
+pub fn trust_rerank(vault: &Path, hits: Vec<SearchHit>, limit: usize) -> Vec<SearchHit> {
+    if hits.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut scored: Vec<(f32, SearchHit)> = hits
+        .into_iter()
+        .map(|mut h| {
+            let mut w = 1.0;
+            if let Ok(md) = crate::vault::read_doc(vault, &h.project, &h.domain) {
+                let trust = crate::ontology::doc_trust(&md, &today);
+                let retired = crate::ontology::declared_status(&md)
+                    .is_some_and(|s| crate::ontology::is_retired_status(&s));
+                w = trust_weight(&trust, retired);
+                h.stale = trust.stale;
+                h.verified = trust.verified && !trust.stale;
+            }
+            (h.relevance * w, h)
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+    let max = scored.first().map(|(s, _)| *s).unwrap_or(1.0).max(1e-6);
+    scored
+        .into_iter()
+        .map(|(s, mut h)| {
+            h.relevance = (s / max).min(1.0);
+            h
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1358,7 +1450,7 @@ mod tests {
             domain: domain.into(),
             relevance: 1.0,
             snippet: "… hit …".into(),
-            matched: String::new(),
+            ..Default::default()
         }
     }
 
@@ -1450,5 +1542,60 @@ mod tests {
         assert!(ex.ends_with("…(생략)"));
         assert!(ex.chars().count() <= 100 + "\n…(생략)".chars().count());
         assert!(!complete);
+    }
+
+    fn hit(project: &str, domain: &str, relevance: f32) -> SearchHit {
+        SearchHit { project: project.into(), domain: domain.into(), relevance, ..Default::default() }
+    }
+
+    #[test]
+    fn trust_rerank_demotes_stale_and_nudges_verified() {
+        let v = temp_vault("trust");
+        write(&v, "A/old.md", "---\nstale_after: 2001-01-01\n---\n가격 정책\n");
+        write(&v, "A/plain.md", "가격 정책\n");
+        write(&v, "A/checked.md", "---\nverified: { by: hckim, at: 2026-11-04 }\n---\n가격 정책\n");
+        write(&v, "A/gone.md", "---\nstatus: deprecated\n---\n가격 정책\n");
+        write(&v, "A/future.md", "---\nstale_after: 2999-01-01\n---\n가격 정책\n");
+        // RRF-shaped relevance: rank r ≈ 61/(60+r).
+        let r = |rank: f32| 61.0 / (60.0 + rank);
+        let hits = vec![
+            hit("A", "old.md", r(1.0)),
+            hit("A", "gone.md", r(2.0)),
+            hit("A", "plain.md", r(3.0)),
+            hit("A", "future.md", r(4.0)),
+            hit("A", "checked.md", r(5.0)),
+        ];
+        let out = trust_rerank(&v, hits, 10);
+        let order: Vec<&str> = out.iter().map(|h| h.domain.as_str()).collect();
+        // stale / deprecated drop to the back; verified (rank 5) passes
+        // future.md (rank 4) but not plain.md (rank 3).
+        assert_eq!(order, vec!["plain.md", "checked.md", "future.md", "old.md", "gone.md"]);
+        assert!((out[0].relevance - 1.0).abs() < 1e-6);
+        assert!(out.iter().find(|h| h.domain == "old.md").unwrap().stale);
+        assert!(out.iter().find(|h| h.domain == "checked.md").unwrap().verified);
+        assert!(!out.iter().find(|h| h.domain == "future.md").unwrap().stale);
+        // limit keeps the reordered top.
+        let top2 = trust_rerank(&v, vec![hit("A", "old.md", 1.0), hit("A", "plain.md", 0.9)], 1);
+        assert_eq!(top2.len(), 1);
+        assert_eq!(top2[0].domain, "plain.md");
+        // Missing files keep their place and weight.
+        let missing = trust_rerank(&v, vec![hit("A", "nope.md", 1.0)], 5);
+        assert_eq!(missing.len(), 1);
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    /// 실제 vault 복사본으로 순위 확인 (수동):
+    /// `TRUST_VAULT=<복사본> TRUST_QUERY=<검색어> cargo test --lib trust_rerank_on_real_copy -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn trust_rerank_on_real_copy() {
+        let (Ok(v), Ok(q)) = (std::env::var("TRUST_VAULT"), std::env::var("TRUST_QUERY")) else {
+            return;
+        };
+        let hits = full_search_mode(Path::new(&v), &q, 10, None, SearchMode::Keyword).unwrap();
+        for (i, h) in hits.iter().enumerate() {
+            let tag = if h.stale { " [기한 지남]" } else if h.verified { " [확인됨]" } else { "" };
+            println!("{:>2}. {:.3} {}/{}{tag}", i + 1, h.relevance, h.project, h.domain);
+        }
     }
 }

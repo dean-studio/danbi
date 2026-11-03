@@ -10,6 +10,7 @@ const GROUPS: { title: string; rows: { keys: string[]; label: string }[] }[] = [
       { keys: ["⌘", "K"], label: "통합 팔레트 — 문서·프로젝트·명령 (`>` 명령 · `@` 프로젝트 · `#` daily)" },
       { keys: ["⌘", "P"], label: "팔레트를 @ 프로젝트 모드로" },
       { keys: ["⌘", "J"], label: "오늘(홈)으로" },
+      { keys: ["⌘", "⇧", "T"], label: "할 일함" },
       { keys: ["⌘", "⇧", "R"], label: "검토함" },
       { keys: ["⌘", "⇧", "U"], label: "사용량" },
       { keys: ["⌘", "G"], label: "그래프" },

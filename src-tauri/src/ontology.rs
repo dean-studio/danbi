@@ -425,6 +425,9 @@ pub struct FmEntry {
     pub value: String,
     /// Block-list items under the key (`  - x`), raw.
     pub items: Vec<String>,
+    /// Indented `sub: value` lines under the key (a block map, e.g.
+    /// `verified:\n  by: x\n  at: y`), raw values.
+    pub fields: Vec<(String, String)>,
 }
 
 /// Line range of the frontmatter block: (first content line, closing `---`
@@ -454,6 +457,23 @@ fn frontmatter_bounds(lines: &[&str]) -> Option<(usize, usize)> {
     yaml_like.then_some((1, close))
 }
 
+/// `md` without its leading frontmatter block (and the blank lines right
+/// after it) — for previews, where `stale_after: …` is noise.
+pub fn strip_frontmatter(md: &str) -> &str {
+    let lines: Vec<&str> = md.lines().collect();
+    let Some((_, close)) = frontmatter_bounds(&lines) else {
+        return md;
+    };
+    let mut off = 0;
+    for (i, l) in md.split_inclusive('\n').enumerate() {
+        off += l.len();
+        if i == close {
+            break;
+        }
+    }
+    md[off..].trim_start_matches(['\n', '\r'])
+}
+
 pub fn parse_frontmatter(md: &str) -> Vec<FmEntry> {
     let lines: Vec<&str> = md.lines().collect();
     let Some((start, end)) = frontmatter_bounds(&lines) else {
@@ -472,6 +492,7 @@ pub fn parse_frontmatter(md: &str) -> Vec<FmEntry> {
                     key: k.trim().to_string(),
                     value: v.trim().to_string(),
                     items: Vec::new(),
+                    fields: Vec::new(),
                 });
             }
             continue;
@@ -480,6 +501,8 @@ pub fn parse_frontmatter(md: &str) -> Vec<FmEntry> {
             if let Some(last) = out.last_mut() {
                 last.items.push(item.trim().to_string());
             }
+        } else if let (true, Some((k, v)), Some(last)) = (indented, t.split_once(':'), out.last_mut()) {
+            last.fields.push((k.trim().to_string(), v.trim().to_string()));
         }
     }
     out
@@ -588,6 +611,127 @@ pub fn doc_meta(vocab: &Vocabulary, domain: &str, md: &str) -> DocMeta {
         effective_status: status.clone(),
         status,
     }
+}
+
+// ---- Freshness / trust (OKF `stale_after` · `verified`) ----
+
+/// How far a document can be trusted right now, from two OKF v0.2 fields:
+/// `stale_after: 2026-12-31` (past it, the doc may no longer hold) and
+/// `verified: { by: hckim, at: 2026-11-04 }` (a person checked it). Search
+/// pushes stale docs down and lifts verified ones a little.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct DocTrust {
+    /// `YYYY-MM-DD` part of `stale_after`, when it parses as a date.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_after: Option<String>,
+    /// `stale_after` is before today.
+    pub stale: bool,
+    pub verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
+}
+
+/// `2026-11-04`, `2026-11-04T09:00:00Z`, `"2026-11-04 09:00"` → `2026-11-04`.
+pub fn date_part(raw: &str) -> Option<String> {
+    let v = unquote(raw);
+    let head = v.get(..10)?;
+    chrono::NaiveDate::parse_from_str(head, "%Y-%m-%d").ok()?;
+    let rest = &v[10..];
+    (rest.is_empty() || rest.starts_with(['T', 't', ' '])).then(|| head.to_string())
+}
+
+/// `{ by: x, at: y }` → [("by","x"), ("at","y")]. Commas inside quotes are
+/// not split; nested maps aren't expected here.
+fn flow_pairs(v: &str) -> Option<Vec<(String, String)>> {
+    let inner = v.trim().strip_prefix('{')?.strip_suffix('}')?;
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for c in inner.chars().chain(std::iter::once(',')) {
+        match (quote, c) {
+            (Some(q), _) if c == q => {
+                quote = None;
+                cur.push(c);
+            }
+            (None, '"' | '\'') => {
+                quote = Some(c);
+                cur.push(c);
+            }
+            (None, ',') => {
+                if let Some((k, val)) = cur.split_once(':') {
+                    out.push((k.trim().to_string(), val.trim().to_string()));
+                }
+                cur.clear();
+            }
+            _ => cur.push(c),
+        }
+    }
+    Some(out)
+}
+
+/// `today` is `YYYY-MM-DD` — passed in so tests (and one search request)
+/// don't depend on the clock.
+pub fn doc_trust(md: &str, today: &str) -> DocTrust {
+    let fm = parse_frontmatter(md);
+    if fm.is_empty() {
+        return DocTrust::default();
+    }
+    let stale_after = fm_scalar(&fm, "stale_after").and_then(|v| date_part(&v));
+    let stale = stale_after.as_deref().is_some_and(|d| d < today);
+
+    let (mut verified, mut by, mut at) = (false, None, None);
+    if let Some(e) = fm.iter().find(|e| e.key.eq_ignore_ascii_case("verified")) {
+        let raw = e.value.split(" #").next().unwrap_or("").trim();
+        let fields = flow_pairs(raw).unwrap_or_else(|| e.fields.clone());
+        if !fields.is_empty() {
+            for (k, v) in fields {
+                let v = unquote(&v).to_string();
+                if v.is_empty() {
+                    continue;
+                }
+                match k.to_ascii_lowercase().as_str() {
+                    "by" => by = Some(v),
+                    "at" => at = Some(date_part(&v).unwrap_or(v)),
+                    _ => {}
+                }
+            }
+            verified = by.is_some() || at.is_some();
+        } else {
+            let v = unquote(raw);
+            let lower = v.to_ascii_lowercase();
+            verified = !v.is_empty() && !matches!(lower.as_str(), "false" | "no" | "off" | "null" | "~" | "0");
+            if verified && !matches!(lower.as_str(), "true" | "yes" | "on" | "1") {
+                // `verified: 2026-11-04` or `verified: hckim`.
+                match date_part(v) {
+                    Some(d) => at = Some(d),
+                    None => by = Some(v.to_string()),
+                }
+            }
+        }
+    }
+    // `verified_by:` / `verified_at:` — the flat spelling some tools write.
+    if let Some(v) = fm_scalar(&fm, "verified_by").filter(|v| !v.is_empty()) {
+        by.get_or_insert(v);
+        verified = true;
+    }
+    if let Some(v) = fm_scalar(&fm, "verified_at").and_then(|v| date_part(&v)) {
+        at.get_or_insert(v);
+        verified = true;
+    }
+    DocTrust { stale_after, stale, verified, verified_by: by, verified_at: at }
+}
+
+/// Status values that mean "don't follow this one any more" — Danbi's
+/// `superseded` plus OKF's `deprecated`.
+pub fn is_retired_status(raw: &str) -> bool {
+    matches!(unquote(raw).to_lowercase().as_str(), "superseded" | "deprecated" | "대체됨" | "폐기")
+}
+
+/// Declared `status:` straight from frontmatter (no vocabulary needed).
+pub fn declared_status(md: &str) -> Option<String> {
+    fm_scalar(&parse_frontmatter(md), "status").filter(|s| !s.is_empty())
 }
 
 // ---- Relation context per line ----
@@ -762,6 +906,9 @@ pub fn doc_issues(vocab: &Vocabulary, md: &str) -> DocIssues {
 #[derive(Debug, Default, Clone)]
 pub struct MetaUpdate {
     pub set: Vec<(String, String)>,
+    /// Like `set`, but the value is written as-is (already valid YAML, e.g.
+    /// a flow map `{ by: hckim, at: 2026-11-04 }`). Replaces a block map too.
+    pub set_raw: Vec<(String, String)>,
     /// (key, item) appended to a list key; skipped when already present.
     pub add_items: Vec<(String, String)>,
 }
@@ -896,22 +1043,24 @@ pub fn set_frontmatter(md: &str, update: &MetaUpdate) -> Result<String, String> 
         }
     };
 
-    for (key, value) in &update.set {
+    let scalars = update.set.iter().map(|(k, v)| (k, v, yaml_scalar(v)));
+    let raws = update.set_raw.iter().map(|(k, v)| (k, v, v.trim().to_string()));
+    for (key, value, written) in scalars.chain(raws) {
         match key_span(&lines, s, e, key)? {
             Some((a, b)) => {
                 let text = lines[a].text.clone();
                 let (orig_key, rest) = text.split_once(':').unwrap_or((key.as_str(), ""));
                 let (cur, comment) = split_comment(rest);
-                if b == a + 1 && unquote(cur) == value {
+                if b == a + 1 && (unquote(cur) == value || cur.trim() == written) {
                     continue;
                 }
-                let new_text = format!("{}: {}{}", orig_key.trim_end(), yaml_scalar(value), comment);
+                let new_text = format!("{}: {}{}", orig_key.trim_end(), written, comment);
                 let end = lines[b - 1].end.clone();
                 lines.splice(a..b, std::iter::once(Line { text: new_text, end }));
                 e -= b - a - 1;
             }
             None => {
-                lines.insert(e, line(format!("{key}: {}", yaml_scalar(value))));
+                lines.insert(e, line(format!("{key}: {written}")));
                 e += 1;
             }
         }
@@ -1224,6 +1373,7 @@ pub fn schema_summary(vault: &Path, project: &str) -> crate::error::DanbiResult<
         "typed_links": typed_links,
         "how_to": [
             "문서 종류·상태: frontmatter `type: decision` · `status: active|superseded|done` — danbi_set_meta 로 본문을 건드리지 않고 넣을 수 있어요. 안 적으면 폴더(decisions/·notes/·daily/)로 판단해요.",
+            "신선도 (OKF): `stale_after: 2026-12-31` 이 지나면 검색에서 뒤로 밀리고, `verified: { by: 이름, at: 날짜 }` 는 사람이 확인한 문서라 조금 앞으로 와요 — danbi_set_meta 의 stale_after · verified_by.",
             "관계: 본문 한 줄에 `원인:: [[notes/x.md]]` · `영향:: [[release.md]]` (한글/영문 이름 둘 다 됨). `## 관련` 아래 링크는 relates_to.",
             "기존 문서의 관계 정리: danbi_propose_link 로 제안 → 사용자가 단비 앱에서 승인하면 그때 markdown 에 기록돼요.",
             "단어 추가: schema.md 의 `## 온톨로지` 아래 ```yaml 블록 (types / relations / folders / inherit)."
@@ -1339,6 +1489,7 @@ mod tests {
             md,
             &MetaUpdate {
                 set: vec![("status".into(), "active".into())],
+                set_raw: vec![],
                 add_items: vec![("affects".into(), "[[b.md]]".into())],
             },
         )
@@ -1352,6 +1503,7 @@ mod tests {
             &out,
             &MetaUpdate {
                 set: vec![("type".into(), "decision".into())],
+                set_raw: vec![],
                 add_items: vec![("affects".into(), "[[b.md]]".into()), ("affects".into(), "[[c.md]]".into())],
             },
         )
@@ -1364,19 +1516,19 @@ mod tests {
     #[test]
     fn set_frontmatter_creates_block_and_handles_inline_lists() {
         assert_eq!(
-            set_frontmatter("# 제목\n", &MetaUpdate { set: vec![("type".into(), "bug".into())], add_items: vec![] }).unwrap(),
+            set_frontmatter("# 제목\n", &MetaUpdate { set: vec![("type".into(), "bug".into())], set_raw: vec![], add_items: vec![] }).unwrap(),
             "---\ntype: bug\n---\n\n# 제목\n"
         );
         let out = set_frontmatter(
             "---\naffects: [\"[[a.md]]\"] # c\n---\n",
-            &MetaUpdate { set: vec![], add_items: vec![("affects".into(), "[[b.md]]".into())] },
+            &MetaUpdate { set: vec![], set_raw: vec![], add_items: vec![("affects".into(), "[[b.md]]".into())] },
         )
         .unwrap();
         assert_eq!(out, "---\naffects: [\"[[a.md]]\", \"[[b.md]]\"] # c\n---\n");
     }
 
     fn set(md: &str, key: &str, v: &str) -> Result<String, String> {
-        set_frontmatter(md, &MetaUpdate { set: vec![(key.into(), v.into())], add_items: vec![] })
+        set_frontmatter(md, &MetaUpdate { set: vec![(key.into(), v.into())], set_raw: vec![], add_items: vec![] })
     }
 
     #[test]
@@ -1396,7 +1548,7 @@ mod tests {
         );
         assert_eq!(set("---\r\ntype: note\r\n---\r\n본문", "status", "done").unwrap(), "---\r\ntype: note\r\nstatus: done\r\n---\r\n본문");
         // B3: a flow map is refused, not nested.
-        assert!(set_frontmatter("---\naffects: {a: 1}\n---\n", &MetaUpdate { set: vec![], add_items: vec![("affects".into(), "[[b.md]]".into())] }).is_err());
+        assert!(set_frontmatter("---\naffects: {a: 1}\n---\n", &MetaUpdate { set: vec![], set_raw: vec![], add_items: vec![("affects".into(), "[[b.md]]".into())] }).is_err());
         // C1 same value keeps the line (and comment); C2 duplicate keys refused.
         assert_eq!(set("---\ntype: note # 주석\n---\n", "type", "note").unwrap(), "---\ntype: note # 주석\n---\n");
         assert!(set("---\ntype: a\ntype: b\n---\n", "type", "bug").is_err());
@@ -1406,7 +1558,7 @@ mod tests {
         // C5: an aliased link counts as already there.
         let md = "---\naffects:\n  - \"[[b.md|별칭]]\"\n---\n";
         assert_eq!(
-            set_frontmatter(md, &MetaUpdate { set: vec![], add_items: vec![("affects".into(), "[[b.md]]".into())] }).unwrap(),
+            set_frontmatter(md, &MetaUpdate { set: vec![], set_raw: vec![], add_items: vec![("affects".into(), "[[b.md]]".into())] }).unwrap(),
             md
         );
     }
@@ -1432,5 +1584,56 @@ mod tests {
         assert_eq!(i.unknown_type.as_deref(), Some("experiment"));
         assert_eq!(i.unknown_status.as_deref(), Some("wip"));
         assert_eq!(i.unknown_relations, vec!["참고자료".to_string()]);
+    }
+
+    #[test]
+    fn doc_trust_reads_okf_fields() {
+        let today = "2026-11-04";
+        let t = doc_trust("---\nstale_after: 2026-11-03T00:00:00Z\nverified: { by: \"human:hckim\", at: 2026-08-12T10:00:00Z }\n---\n본문", today);
+        assert_eq!(t.stale_after.as_deref(), Some("2026-11-03"));
+        assert!(t.stale);
+        assert!(t.verified);
+        assert_eq!(t.verified_by.as_deref(), Some("human:hckim"));
+        assert_eq!(t.verified_at.as_deref(), Some("2026-08-12"));
+        // Same day isn't stale yet.
+        assert!(!doc_trust("---\nstale_after: 2026-11-04\n---\n", today).stale);
+        // Block map.
+        let b = doc_trust("---\nverified:\n  by: hckim\n  at: 2026-11-01\n---\n", today);
+        assert_eq!((b.verified, b.verified_by.as_deref(), b.verified_at.as_deref()), (true, Some("hckim"), Some("2026-11-01")));
+        // Scalars and flat keys.
+        assert!(doc_trust("---\nverified: true\n---\n", today).verified);
+        assert!(!doc_trust("---\nverified: false\n---\n", today).verified);
+        assert_eq!(doc_trust("---\nverified: 2026-10-01\n---\n", today).verified_at.as_deref(), Some("2026-10-01"));
+        assert_eq!(doc_trust("---\nverified_by: hckim\n---\n", today).verified_by.as_deref(), Some("hckim"));
+        // Junk dates and no frontmatter → nothing.
+        assert_eq!(doc_trust("---\nstale_after: 다음달\n---\n", today), DocTrust::default());
+        assert_eq!(doc_trust("본문만\nstale_after: 2001-01-01\n", today), DocTrust::default());
+        assert!(is_retired_status("Deprecated") && is_retired_status("superseded") && !is_retired_status("active"));
+    }
+
+    #[test]
+    fn set_frontmatter_raw_replaces_block_map() {
+        let md = "---\ntype: note\nverified:\n  by: old\n  at: 2020-01-01\nstatus: active\n---\n본문\n";
+        let up = MetaUpdate {
+            set: vec![("stale_after".into(), "2027-01-01".into())],
+            set_raw: vec![("verified".into(), "{ by: hckim, at: 2026-11-04 }".into())],
+            add_items: vec![],
+        };
+        let out = set_frontmatter(md, &up).unwrap();
+        assert_eq!(
+            out,
+            "---\ntype: note\nverified: { by: hckim, at: 2026-11-04 }\nstatus: active\nstale_after: 2027-01-01\n---\n본문\n"
+        );
+        // Writing the same again is a no-op.
+        assert_eq!(set_frontmatter(&out, &up).unwrap(), out);
+        let t = doc_trust(&out, "2026-11-04");
+        assert_eq!((t.verified_by.as_deref(), t.stale), (Some("hckim"), false));
+    }
+
+    #[test]
+    fn strip_frontmatter_keeps_body_only() {
+        assert_eq!(strip_frontmatter("---\nstale_after: 2026-10-01\n---\n\n# 제목\n본문"), "# 제목\n본문");
+        assert_eq!(strip_frontmatter("# 제목\n---\n본문\n---\n"), "# 제목\n---\n본문\n---\n");
+        assert_eq!(strip_frontmatter("---\r\ntype: note\r\n---\r\n본문"), "본문");
     }
 }

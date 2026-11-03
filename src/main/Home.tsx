@@ -8,6 +8,7 @@ import {
 import { ActivityFeed, clientLabel, type ActivityStats } from "@/main/ActivityFeed";
 import { useMcpSummary } from "@/main/ConnectSheet";
 import { ReviewMini } from "@/main/ReviewMini";
+import { TimeSplitCard } from "@/main/TimeSplitCard";
 import { Keycap } from "@/main/ShortcutsHelp";
 import { markVaultAllRead } from "@/main/Sidebar";
 import { cn } from "@/lib/utils";
@@ -130,6 +131,7 @@ export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
                     onOpenAll={() => setView("review")}
                     onCount={setReviewCount}
                   />
+                  <TimeSplitCard />
                   <PastTodayCard onOpen={selectDomain} />
                   <AgentsCard
                     stats={stats}

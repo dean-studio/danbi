@@ -414,6 +414,10 @@ enum CacheUpdate {
 /// 이후의 새 바이트만 파싱한다. 파일이 줄거나(size < parsed_bytes) 사라진
 /// 뒤 새로 생기면 전체 재파싱으로 안전하게 폴백.
 fn refresh_cache() {
+    use crate::warmup::{self, TASK_USAGE};
+
+    // 첫 로딩 진행률 — 프런트 "준비 중" 카드가 300ms 마다 읽는다.
+    warmup::phase(TASK_USAGE, "listing", 0);
     let mut accounts = account_dirs();
     let files: Vec<(PathBuf, &'static str)> = accounts
         .iter()
@@ -434,8 +438,10 @@ fn refresh_cache() {
         }
     }
 
-    // 2) 락 없이 변경분만 파싱.
-    let mut work: Vec<(PathBuf, CacheUpdate)> = Vec::new();
+    // 2) 먼저 어떤 파일을 어디부터 읽을지만 정한다(metadata 만, 빠름) —
+    //    그래야 파싱 단계의 "n / 총 m" 이 실제 남은 양을 가리킨다.
+    //    `from` = Some(offset) 이면 tail 만, None 이면 전체.
+    let mut plan: Vec<(&PathBuf, &'static str, Option<u64>, i64, u64)> = Vec::new();
     let mut oldest: HashMap<&'static str, i64> = HashMap::new();
     for (path, account) in &files {
         let account = *account;
@@ -448,7 +454,18 @@ fn refresh_cache() {
             // 변화 없음 → skip.
             Some(&(pm, ps, _)) if pm == m && ps == s => {}
             // append-only 성장(또는 mtime 만 갱신) → tail 만.
-            Some(&(_, _, parsed)) if s >= parsed => {
+            Some(&(_, _, parsed)) if s >= parsed => plan.push((path, account, Some(parsed), m, s)),
+            // 신규 or 잘림/회전 → 전체.
+            _ => plan.push((path, account, None, m, s)),
+        }
+    }
+
+    // 3) 락 없이 변경분만 파싱.
+    warmup::phase(TASK_USAGE, "parsing", plan.len());
+    let mut work: Vec<(PathBuf, CacheUpdate)> = Vec::with_capacity(plan.len());
+    for (i, (path, account, from, m, s)) in plan.into_iter().enumerate() {
+        match from {
+            Some(parsed) => {
                 if let Ok((events, new_parsed)) = parse_from(path, parsed, account) {
                     work.push((
                         path.clone(),
@@ -462,8 +479,7 @@ fn refresh_cache() {
                     ));
                 }
             }
-            // 신규 or 잘림/회전 → 전체.
-            _ => {
+            None => {
                 if let Ok((events, new_parsed)) = parse_from(path, 0, account) {
                     work.push((
                         path.clone(),
@@ -477,7 +493,9 @@ fn refresh_cache() {
                 }
             }
         }
+        warmup::step(TASK_USAGE, i + 1);
     }
+    warmup::phase(TASK_USAGE, "merging", 0);
 
     for a in &mut accounts {
         a.oldest_mtime_ms = oldest.get(a.account).copied();
@@ -532,6 +550,7 @@ fn refresh_cache() {
         cache.files.retain(|p, _| alive.contains(p.as_path()));
         cache.accounts = accounts;
     }
+    warmup::finish(TASK_USAGE);
 }
 
 /// 캐시를 최신화한 뒤 read-lock 을 잡은 채, 시간순 정렬된 **참조** 슬라이스로
@@ -762,6 +781,52 @@ pub struct CcSummary {
 
 const DISCLAIMER_TOKENS: &str =
     "이 숫자는 ~/.claude · ~/.claude-* 의 projects transcript 를 직접 읽어 집계한 토큰량입니다. OAuth endpoint 호출 없이 자기 디스크의 자기 파일만 사용합니다.";
+
+/// 작업 시간 칸 — 이 칸 안에 응답이 하나라도 있으면 그 칸만큼 일한 것으로 본다.
+pub const WORK_SLOT_MINUTES: i64 = 5;
+
+/// cwd 하나의 기간 안 활동. `minutes` 는 응답이 있었던 5분 칸 수 × 5
+/// — 같은 폴더에서 세션 두 개를 동시에 돌려도 한 번만 센다.
+#[derive(Debug, Clone, Serialize)]
+pub struct CwdActivity {
+    pub cwd: String,
+    pub minutes: u64,
+    pub tokens: u64,
+    pub sessions: u64,
+}
+
+/// 기간 `[from_ms, to_ms)` 의 cwd 별 작업 시간·토큰 (시간 순 정렬 아님).
+pub fn cwd_activity(from_ms: i64, to_ms: i64) -> Vec<CwdActivity> {
+    with_events(|events, _| cwd_activity_of(events, from_ms, to_ms))
+}
+
+fn cwd_activity_of(events: &[&CcEvent], from_ms: i64, to_ms: i64) -> Vec<CwdActivity> {
+    let slot_ms = WORK_SLOT_MINUTES * 60_000;
+    let mut slots: HashMap<&'static str, std::collections::HashSet<i64>> = HashMap::new();
+    let mut tokens: HashMap<&'static str, u64> = HashMap::new();
+    let mut sessions: HashMap<&'static str, std::collections::HashSet<&'static str>> =
+        HashMap::new();
+    for &ev in events {
+        if ev.ts_ms < from_ms || ev.ts_ms >= to_ms || ev.cwd.is_empty() {
+            continue;
+        }
+        slots.entry(ev.cwd).or_default().insert(ev.ts_ms / slot_ms);
+        *tokens.entry(ev.cwd).or_default() += ev.input_tokens
+            + ev.output_tokens
+            + ev.cache_creation_tokens
+            + ev.cache_read_tokens;
+        sessions.entry(ev.cwd).or_default().insert(ev.session_id);
+    }
+    slots
+        .into_iter()
+        .map(|(cwd, s)| CwdActivity {
+            cwd: cwd.to_string(),
+            minutes: s.len() as u64 * WORK_SLOT_MINUTES as u64,
+            tokens: tokens.get(cwd).copied().unwrap_or(0),
+            sessions: sessions.get(cwd).map(|s| s.len() as u64).unwrap_or(0),
+        })
+        .collect()
+}
 
 pub fn summarize(range: Range) -> CcSummary {
     let (from_ms, to_ms) = range.window();
@@ -1195,6 +1260,27 @@ mod tests {
             cache_read_tokens: cr,
             dedup_key: 0,
         }
+    }
+
+    #[test]
+    fn cwd_activity_counts_five_minute_slots_once() {
+        let m = 60_000;
+        let base = 1_000 * 5 * m; // 칸 경계에 맞춘 시각
+        let a = ev(base, "m", "anthropic_api", 1, 1, 0, 0);
+        let b = ev(base + 2 * m, "m", "anthropic_api", 1, 1, 0, 0); // 같은 칸
+        let c = ev(base + 7 * m, "m", "anthropic_api", 1, 1, 0, 0); // 다음 칸
+        let mut other = ev(base + m, "m", "anthropic_api", 5, 5, 0, 0);
+        other.cwd = "/x/other";
+        let late = ev(base + 100 * m, "m", "anthropic_api", 1, 1, 0, 0); // 기간 밖
+        let refs = vec![&a, &b, &c, &other, &late];
+        let mut rows = cwd_activity_of(&refs, base, base + 30 * m);
+        rows.sort_by(|x, y| x.cwd.cmp(&y.cwd));
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].cwd, "/x/danbi");
+        assert_eq!(rows[0].minutes, 10);
+        assert_eq!(rows[0].tokens, 6);
+        assert_eq!(rows[0].sessions, 1);
+        assert_eq!(rows[1].minutes, 5);
     }
 
     #[test]

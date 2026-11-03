@@ -6,13 +6,16 @@ import {
   type DocDiff,
   type DomainNode,
   type GhostLink,
+  type SimilarHit,
   type WikiLink,
 } from "@/lib/ipc";
+import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
 import { inverseRelation, relationLabel } from "@/lib/ontology";
 import { useProjectColor } from "@/lib/projectColor";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 import { buildNeighbors, LinkMap } from "./LinkMap";
+import { WarmupPanel, useWarmup, useWarmupAccents } from "./Warmup";
 
 /**
  * 문서 화면 우측 인스펙터 (⌘I) — 변경 · 링크 · 정보 세 탭.
@@ -528,7 +531,99 @@ function LinksTab({
           <div className="text-caption-sm text-accent-red">{ghostErr}</div>
         )}
       </Section>
+      <SimilarElsewhere project={project} domain={domain} onOpenDoc={onOpenDoc} />
     </div>
+  );
+}
+
+/** 다른 프로젝트에서 비슷한 문제를 다룬 기록 — 키워드 검색(LLM 없음).
+ *  같은 스택의 앱을 여러 개 돌릴 때 "이거 저쪽에서 고친 적 있는데" 를
+ *  찾아 준다. [링크 복사] 로 `관련:: [[프로젝트/문서]]` 를 붙여 넣는다. */
+function SimilarElsewhere({
+  project,
+  domain,
+  onOpenDoc,
+}: {
+  project: string;
+  domain: string;
+  onOpenDoc: (project: string, domain: string) => void;
+}) {
+  const [hits, setHits] = useState<SimilarHit[] | null>(null);
+  const showToast = useApp((s) => s.showToast);
+  const projectColor = useProjectColor();
+  // 첫 검색은 vault 전체 색인을 만들어 오래 걸린다 — 색인 진행률(문서 n / m)을 보여 준다.
+  const warm = useWarmup("search", hits === null);
+  const warmAccents = useWarmupAccents(4, project);
+  useEffect(() => {
+    let alive = true;
+    setHits(null);
+    // 문서를 열 때마다 바로 검색하지 않게 살짝 늦춘다.
+    const t = window.setTimeout(() => {
+      ipc
+        .similarForDoc(project, domain)
+        .then((h) => alive && setHits(h))
+        .catch(() => alive && setHits([]));
+    }, 250);
+    return () => {
+      alive = false;
+      window.clearTimeout(t);
+    };
+  }, [project, domain]);
+
+  async function copyLink(h: SimilarHit) {
+    const text = `관련:: [[${h.project}/${h.domain}]]`;
+    try {
+      await clipboardWriteText(text);
+      showToast("ok", `복사했어요 — ${text}`);
+    } catch (e) {
+      showToast("err", String(e));
+    }
+  }
+
+  return (
+    <Section label={`다른 프로젝트의 비슷한 기록${hits ? ` ${hits.length}` : ""}`}>
+      {hits === null ? (
+        // 600ms 안에 오면 아무것도 안 그린다(번쩍임 방지). 그 전까지는 자리만 잡아 둔다.
+        warm.visible ? (
+          <WarmupPanel state={warm} rows={2} rowHeight="h-6" accents={warmAccents} className="px-1 py-1" />
+        ) : (
+          <div className="h-[118px]" aria-hidden />
+        )
+      ) : hits.length === 0 ? (
+        <Empty>
+          <span className={warm.revealClass}>다른 프로젝트에서 비슷한 기록을 찾지 못했어요.</span>
+        </Empty>
+      ) : (
+        hits.map((h) => (
+          <div
+            key={`${h.project}/${h.domain}`}
+            className={cn("rounded-md border border-hairline bg-surface-elevated px-2.5 py-2", warm.revealClass)}
+          >
+            <button
+              type="button"
+              onClick={() => onOpenDoc(h.project, h.domain)}
+              className="flex w-full min-w-0 items-center gap-1.5 text-left text-[12px] text-body hover:text-on-dark"
+              title={`${h.project}/${h.domain}`}
+            >
+              <span
+                className="h-1.5 w-1.5 shrink-0 rounded-full"
+                style={{ background: projectColor(h.project) }}
+              />
+              <span className="shrink-0 text-mute">{h.project}</span>
+              <span className="text-stone">/</span>
+              <span className="truncate font-mono">{h.domain}</span>
+            </button>
+            {h.snippet && (
+              <div className="mt-0.5 line-clamp-2 text-caption-sm text-mute">{h.snippet}</div>
+            )}
+            <div className="mt-1.5 flex items-center gap-1">
+              <SmallBtn onClick={() => onOpenDoc(h.project, h.domain)}>열기</SmallBtn>
+              <SmallBtn onClick={() => copyLink(h)}>링크 복사</SmallBtn>
+            </div>
+          </div>
+        ))
+      )}
+    </Section>
   );
 }
 

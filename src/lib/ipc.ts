@@ -225,6 +225,10 @@ export type SearchHit = {
   domain: string;
   relevance: number;
   snippet: string;
+  /** frontmatter `stale_after` 가 지남 — 검색에서 뒤로 밀린 문서. */
+  stale?: boolean;
+  /** frontmatter `verified:` — 사람이 확인한 문서. */
+  verified?: boolean;
 };
 
 export type SearchResponse = {
@@ -263,6 +267,14 @@ export type DanbiConfig = {
   preset?: "claude_code" | "builtin" | "minimal" | null;
   /** 검토함에서 "제외" 한 고아 문서 (`<project>/<domain>`). */
   review_excluded_paths?: string[];
+  /** 보관한 프로젝트 — 사이드바 '쉬는 중' 아래, 할 일함에서 빠짐. */
+  project_archived?: string[];
+  /** "다시 시작" 누른 시각 (Unix 초). */
+  project_resumed_at?: Record<string, number>;
+  /** 이 일수 넘게 손대지 않으면 '쉬는 중'. 비어 있으면 30, 0 = 끔. */
+  dormant_days?: number | null;
+  /** 직접 프로젝트에 묶은 코드 폴더 (절대 경로 → 프로젝트). */
+  folder_projects?: Record<string, string>;
 };
 
 export type AwsProfile = {
@@ -1435,6 +1447,35 @@ export const ipc = {
       limit: args.limit ?? null,
     }),
 
+  // ---- 다시 시작하기 (0.10) ----
+  pulseList: () => invoke<ProjectPulse[]>("pulse_list"),
+  resumeCard: (project: string) => invoke<ResumeCard>("resume_card", { project }),
+  /** 빈 문자열 = 완료(지움). */
+  nextStepSet: (project: string, text: string) =>
+    invoke<NextStep | null>("next_step_set", { project, text }),
+  todoInbox: (days: number | null, project: string | null = null) =>
+    invoke<TodoInbox>("todo_inbox", { days, project }),
+  todoSetDone: (t: Pick<TodoItem, "project" | "domain" | "line" | "raw">, done: boolean) =>
+    invoke<string>("todo_set_done", {
+      project: t.project,
+      domain: t.domain,
+      line: t.line,
+      raw: t.raw,
+      done,
+    }),
+  projectSetArchived: (project: string, archived: boolean) =>
+    invoke<DanbiConfig>("project_set_archived", { project, archived }),
+  projectResume: (project: string) => invoke<DanbiConfig>("project_resume", { project }),
+  dormantDaysSet: (days: number) => invoke<DanbiConfig>("dormant_days_set", { days }),
+  timeSplit: (days: number) => invoke<TimeSplit>("time_split", { days }),
+  folderProjectSet: (folder: string, project: string | null) =>
+    invoke<DanbiConfig>("folder_project_set", { folder, project }),
+  similarForDoc: (project: string, domain: string) =>
+    invoke<SimilarHit[]>("similar_for_doc", { project, domain }),
+  /** 첫 로딩 진행률 — `Warmup` 이 로딩 중일 때만 300ms 간격으로 조회. */
+  warmupProgress: (task: WarmupTask) =>
+    invoke<WarmupProgress | null>("warmup_progress", { task }),
+
   goalsList: (project: string, includeArchived = false) =>
     invoke<Goal[]>("goals_list", { project, includeArchived }),
   goalsAdd: (project: string, title: string, note?: string | null) =>
@@ -1733,3 +1774,122 @@ export type QuickCaptureResult =
       candidate_domains: string[];
       project: string | null;
     };
+
+// ---------- 다시 시작하기 (0.10) ----------
+
+export type PulseState = "active" | "resting" | "archived";
+
+export type ProjectPulse = {
+  project: string;
+  last_activity_ms?: number;
+  idle_days?: number;
+  state: PulseState;
+  next?: string;
+};
+
+export type NextStep = {
+  text: string;
+  set_at: number;
+  by: string;
+};
+
+export type TodoKind = "checkbox" | "section" | "inline";
+
+export type TodoItem = {
+  project: string;
+  domain: string;
+  /** 0부터 센 줄 번호. */
+  line: number;
+  raw: string;
+  text: string;
+  kind: TodoKind;
+  heading?: string;
+  at_ms: number;
+  modified_ms: number;
+  daily: boolean;
+};
+
+export type Checklist = {
+  project: string;
+  domain: string;
+  title?: string;
+  open: number;
+  done: number;
+  at_ms: number;
+};
+
+export type TodoInbox = {
+  items: TodoItem[];
+  checklists: Checklist[];
+  total_items: number;
+  truncated: boolean;
+  days?: number;
+  archived_skipped: number;
+};
+
+export type NextView = {
+  text: string;
+  /** set = 사용자/에이전트가 적음, note = daily 노트의 '다음 할 일' 줄. */
+  origin: "set" | "note";
+  by?: string;
+  at_ms: number;
+  todo?: TodoItem;
+};
+
+export type ResumeCard = {
+  project: string;
+  state: PulseState;
+  last_activity_ms?: number;
+  idle_days?: number;
+  next?: NextView;
+  last_note?: { domain: string; summary: string };
+  todos: TodoItem[];
+  todo_total: number;
+  checklists: Checklist[];
+  decisions: { project: string; domain: string; modified: string }[];
+  recent_docs: { domain: string; title?: string; modified_ms: number }[];
+};
+
+export type TimeRow = {
+  project: string;
+  minutes: number;
+  tokens: number;
+  sessions: number;
+  records: number;
+  mcp_calls: number;
+  share: number;
+};
+
+export type TimeSplit = {
+  days: number;
+  rows: TimeRow[];
+  unmatched: { cwd: string; label: string; minutes: number; tokens: number }[];
+  total_minutes: number;
+  unmatched_minutes: number;
+  total_records: number;
+  by_minutes: boolean;
+  tracking: boolean;
+  connected_folders: number;
+  manual_folders: number;
+};
+
+export type SimilarHit = {
+  project: string;
+  domain: string;
+  snippet: string;
+  relevance: number;
+};
+
+/** 프로세스가 새로 뜬 뒤 처음 한 번만 오래 걸리는 작업 — Rust `warmup.rs` 와 같은 이름. */
+export type WarmupTask = "usage" | "search";
+
+export type WarmupProgress = {
+  task: WarmupTask;
+  /** usage: listing · parsing · merging / search: scanning · indexing · committing */
+  phase: string;
+  done: number;
+  total: number;
+  active: boolean;
+  started_ms: number;
+  updated_ms: number;
+};
