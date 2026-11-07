@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/%E2%AC%87%20%EB%8B%A8%EB%B9%84%20macOS%20%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-0.10.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="단비 macOS 다운로드 0.10.0" />
+    <img src="https://img.shields.io/badge/%E2%AC%87%20%EB%8B%A8%EB%B9%84%20macOS%20%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-0.11.0-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="단비 macOS 다운로드 0.11.0" />
   </a>
 </p>
 
@@ -40,6 +40,8 @@
 > 에이전트는 기억을 쌓기만 했습니다. 이제 단비가 쉬는 시간에 쌓인 기억을 다시 훑어 정리 거리를 찾습니다. 확실한 것은 단비와 에이전트가 처리하고, 판단이 필요한 것만 사람에게 남깁니다. 남은 것도 검토함의 **추천대로 적용** 버튼 하나로 정리할 수 있습니다.
 
 사람이 잠자는 동안 그날 기억을 정리하듯, 단비도 vault 가 조용해지면 기억을 다시 봅니다. 그래서 이름이 dreaming 입니다.
+
+> 💡 **아이디어 출처** — Anthropic Research, [“The components of agent memory”](https://www.anthropic.com/research/components-of-agent-memory). 에이전트가 쉬는 시간에 기억을 다시 훑어 틀린 것은 고치고 깨진 링크를 잇는 "dreaming" 단계가 기억 품질을 지켰다는 실험 결과(위키의 없는 문서를 가리키던 링크 9개를 있는 문서로 고친 사례 포함)를 단비에 옮겼습니다.
 
 ### 왜 넣었나
 
@@ -364,6 +366,7 @@ AI 호출은 모두 사용자가 직접 눌렀을 때만 일어납니다. 백그
 
 ## 최근 업데이트
 
+- **v0.11.0** — 쉬는 시간 정리(dreaming). 깨진 링크·daily 에 묻힌 결정·기한 지난 문서를 단비가 찾아 두고, 확실한 링크는 바로 고칩니다. 에이전트는 `danbi_tidy` 로 정리를 돕고, 사람은 검토함의 "추천대로 적용" 한 번으로 끝냅니다. 기록이 불어나는 프로젝트도 알려 줍니다.
 - **v0.10.0** — 사이드 프로젝트를 여러 개 오가는 분께. 프로젝트 홈의 "다음 한 걸음", 모든 프로젝트 할 일함, 쉬는 프로젝트 접기, 어디에 시간을 썼나, 다른 프로젝트에서 비슷한 문제를 다룬 기록. 검색은 기한 지난 문서를 뒤로 보냅니다.
 - **v0.9.4** — 문서 인스펙터 링크 탭에 연결 지도. 이 문서가 어느 프로젝트의 어떤 문서와 이어졌는지 한눈에 봅니다.
 - **v0.9.3** — 그래프가 배치가 끝나면 화면에 꼭 맞게 잡힙니다.
