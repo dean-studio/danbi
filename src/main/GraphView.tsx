@@ -4,7 +4,7 @@ import ForceGraph2D, {
   type LinkObject,
   type NodeObject,
 } from "react-force-graph-2d";
-import { Filter, GitBranch, Lightbulb, Palette, Search, X } from "lucide-react";
+import { ArrowLeft, Filter, Lightbulb, Maximize2, Minimize2, Search, SlidersHorizontal, X } from "lucide-react";
 import {
   ipc,
   type GhostSuggestion,
@@ -181,6 +181,12 @@ export function GraphView({
   onClose: () => void;
 }) {
   const selectDomain = useApp((s) => s.selectDomain);
+  // 기본은 메인 영역 안(사이드바가 남아 다른 화면과 같은 방식으로 나간다).
+  // 넓게 볼 때만 전체 화면 — 그때도 왼쪽 위 "작게 보기" 로 돌아온다.
+  const [full, setFull] = useState(false);
+  useEffect(() => {
+    if (!open) setFull(false);
+  }, [open]);
   const [data, setData] = useState<GraphData | null>(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -232,6 +238,19 @@ export function GraphView({
   const [minDegree] = useState<number>(0);
   const [minScore] = useState<number>(0);
   const [insightsOpen, setInsightsOpen] = useState(false);
+  const [viewOpen, setViewOpen] = useState(false);
+  // 기본(확정·제안 선, 모든 관계, 주제군 색)에서 바꾼 수 — "보기" 옆 숫자.
+  const viewChanged =
+    Number(!showConfirmed) + Number(!showGhost) + Number(showSoft) + Number(relFilter !== "") + Number(colorMode !== "community");
+  const viewRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!viewOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (viewRef.current && !viewRef.current.contains(e.target as Node)) setViewOpen(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [viewOpen]);
   const [query, setQuery] = useState("");
   const [hovered, setHovered] = useState<GNode | null>(null);
   const [popup, setPopup] = useState<{
@@ -401,12 +420,20 @@ export function GraphView({
           setPopup(null);
           return;
         }
+        if (viewOpen) {
+          setViewOpen(false);
+          return;
+        }
+        if (full) {
+          setFull(false);
+          return;
+        }
         onClose();
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose, popup]);
+  }, [open, onClose, popup, full, viewOpen]);
 
   // 프로젝트 색 — vault 트리 기준이라 문서 인스펙터의 링크 그래프와 같다.
   const projectColor = useProjectColor();
@@ -924,20 +951,33 @@ export function GraphView({
 
   return (
     <div
-      className="fixed inset-0 z-30 flex flex-col bg-canvas"
-      onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
+      className={cn(
+        "flex flex-col bg-canvas",
+        full ? "fixed inset-0 z-30" : "absolute inset-0 z-20",
+      )}
     >
       {/* Toolbar */}
       <header
         data-tauri-drag-region
-        className="flex h-10 shrink-0 items-center justify-between border-b border-hairline bg-surface/80 px-3 backdrop-blur"
+        className={cn(
+          "flex h-10 shrink-0 items-center justify-between border-b border-hairline bg-surface/80 px-3 backdrop-blur",
+          // 전체 화면에선 macOS 신호등 버튼 자리를 비운다.
+          full && "pl-[84px]",
+        )}
       >
         <div className="flex items-center gap-2 text-[13px] text-ink">
+          <button
+            onClick={full ? () => setFull(false) : onClose}
+            className="inline-flex h-7 items-center gap-1 rounded-sm px-1.5 text-[12px] text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
+            title={full ? "작게 보기 (Esc)" : "그래프 닫기 (Esc)"}
+          >
+            <ArrowLeft size={13} />
+            {full ? "작게 보기" : "돌아가기"}
+          </button>
+          <span className="h-3.5 w-px bg-hairline" />
           <span className="font-medium">그래프</span>
-          <span className="text-caption-sm text-stone">
-            {data?.nodes.length ?? 0} 노드 · {data?.edges.length ?? 0} 링크
+          <span className="text-caption-sm tabular-nums text-stone" title="문서 · 링크 수">
+            문서 {(data?.nodes.length ?? 0).toLocaleString()} · 링크 {(data?.edges.length ?? 0).toLocaleString()}
           </span>
           {loading && (
             <span className="text-caption-sm text-stone">로딩…</span>
@@ -971,81 +1011,89 @@ export function GraphView({
             </select>
           </div>
 
-          <label className="inline-flex items-center gap-1.5 text-caption-md text-body">
-            <input
-              type="checkbox"
-              checked={showConfirmed}
-              onChange={(e) => setShowConfirmed(e.target.checked)}
-              className="accent-on-dark"
-            />
-            <span>
-              <span className="mr-1 inline-block h-0.5 w-3 bg-on-dark-mute align-middle" />
-              확정
-            </span>
-          </label>
-          <label className="inline-flex items-center gap-1.5 text-caption-md text-body">
-            <input
-              type="checkbox"
-              checked={showGhost}
-              onChange={(e) => setShowGhost(e.target.checked)}
-              className="accent-accent-blue"
-            />
-            <span>
-              <span className="mr-1 inline-block h-0.5 w-3 border-t border-dashed border-accent-blue align-middle" />
-              제안
-            </span>
-          </label>
-          <label className="inline-flex items-center gap-1.5 text-caption-md text-body">
-            <input
-              type="checkbox"
-              checked={showSoft}
-              onChange={(e) => setShowSoft(e.target.checked)}
-              className="accent-accent-yellow"
-            />
-            <span>
-              <span className="mr-1 inline-block h-0.5 w-3 border-t border-dashed border-accent-yellow align-middle" />
-              관련
-            </span>
-          </label>
-
-          <div
-            className="inline-flex items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 py-0.5 text-[12px]"
-            title="관계로 선 거르기"
-          >
-            <GitBranch size={11} className="text-stone" />
-            <select
-              value={relFilter}
-              onChange={(e) => setRelFilter(e.target.value)}
-              className="bg-transparent text-body outline-none"
+          {/* 선 종류·관계·색 기준은 자주 바꾸지 않으니 "보기" 하나에 모은다. */}
+          <div className="relative" ref={viewRef}>
+            <button
+              onClick={() => setViewOpen((v) => !v)}
+              title="선 · 색 보기 설정"
+              className={cn(
+                "inline-flex h-7 items-center gap-1.5 rounded-sm border px-2 text-[12px] transition-colors",
+                viewOpen
+                  ? "border-hairline bg-surface-card text-ink"
+                  : "border-hairline bg-surface-elevated text-body hover:text-on-dark",
+              )}
             >
-              <option value="">모든 선</option>
-              <option value={REL_TYPED}>
-                관계 있는 선만 ({typedEdgeTotal})
-              </option>
-              {relationCounts.map(([name, n]) => (
-                <option key={name} value={name}>
-                  {relKo(name)} ({n})
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div
-            className="inline-flex items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 py-0.5 text-[12px]"
-            title="노드 색 기준"
-          >
-            <Palette size={11} className="text-stone" />
-            <select
-              value={colorMode}
-              onChange={(e) => setColorMode(e.target.value as ColorMode)}
-              className="bg-transparent text-body outline-none"
-            >
-              {(Object.keys(COLOR_MODE_LABEL) as ColorMode[]).map((m) => (
-                <option key={m} value={m}>
-                  색: {COLOR_MODE_LABEL[m]}
-                </option>
-              ))}
-            </select>
+              <SlidersHorizontal size={11} className="text-stone" />
+              보기
+              {viewChanged > 0 && (
+                <span className="rounded-xs bg-surface-card px-1 font-mono text-[10px] text-mute">{viewChanged}</span>
+              )}
+            </button>
+            {viewOpen && (
+              <div className="absolute right-0 top-8 z-40 w-[240px] rounded-lg border border-hairline bg-surface-elevated p-3 text-[12px]">
+                <div className="mb-1.5 text-caption-sm uppercase tracking-[0.4px] text-stone">선</div>
+                <div className="flex flex-col gap-1.5">
+                  {(
+                    [
+                      ["확정", showConfirmed, setShowConfirmed, "h-0.5 bg-on-dark-mute"],
+                      ["제안", showGhost, setShowGhost, "border-t border-dashed border-accent-blue"],
+                      ["관련", showSoft, setShowSoft, "border-t border-dashed border-accent-yellow"],
+                    ] as const
+                  ).map(([label, on, set, line]) => (
+                    <label key={label} className="flex cursor-pointer items-center gap-2 text-body">
+                      <input
+                        type="checkbox"
+                        checked={on}
+                        onChange={(e) => set(e.target.checked)}
+                        className="accent-on-dark"
+                      />
+                      <span className={cn("inline-block w-4 align-middle", line)} />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <div className="mb-1.5 mt-3 text-caption-sm uppercase tracking-[0.4px] text-stone">관계</div>
+                <select
+                  value={relFilter}
+                  onChange={(e) => setRelFilter(e.target.value)}
+                  className="h-7 w-full rounded-sm border border-hairline bg-surface px-1.5 text-body outline-none"
+                >
+                  <option value="">모든 선</option>
+                  <option value={REL_TYPED}>관계 있는 선만 ({typedEdgeTotal})</option>
+                  {relationCounts.map(([name, n]) => (
+                    <option key={name} value={name}>
+                      {relKo(name)} ({n})
+                    </option>
+                  ))}
+                </select>
+                <div className="mb-1.5 mt-3 text-caption-sm uppercase tracking-[0.4px] text-stone">색</div>
+                <select
+                  value={colorMode}
+                  onChange={(e) => setColorMode(e.target.value as ColorMode)}
+                  className="h-7 w-full rounded-sm border border-hairline bg-surface px-1.5 text-body outline-none"
+                >
+                  {(Object.keys(COLOR_MODE_LABEL) as ColorMode[]).map((m) => (
+                    <option key={m} value={m}>
+                      {COLOR_MODE_LABEL[m]}
+                    </option>
+                  ))}
+                </select>
+                {viewChanged > 0 && (
+                  <button
+                    onClick={() => {
+                      setShowConfirmed(true);
+                      setShowGhost(true);
+                      setShowSoft(false);
+                      setRelFilter("");
+                      setColorMode("community");
+                    }}
+                    className="mt-3 text-[11px] text-mute hover:text-on-dark"
+                  >
+                    기본으로 되돌리기
+                  </button>
+                )}
+              </div>
+            )}
           </div>
 
           <button
@@ -1054,7 +1102,7 @@ export function GraphView({
             className={cn(
               "inline-flex h-7 items-center gap-1 rounded-sm border px-2 text-[12px] transition-colors",
               insightsOpen
-                ? "border-accent-yellow bg-accent-yellow-soft text-accent-yellow"
+                ? "border-hairline bg-surface-card text-ink"
                 : "border-hairline bg-surface-elevated text-body hover:text-on-dark",
             )}
           >
@@ -1063,11 +1111,11 @@ export function GraphView({
           </button>
 
           <button
-            onClick={onClose}
+            onClick={() => setFull((v) => !v)}
             className="grid h-7 w-7 place-items-center rounded-sm text-mute transition-colors hover:bg-surface-elevated hover:text-on-dark"
-            title="닫기 (Esc)"
+            title={full ? "작게 보기" : "전체 화면으로 크게 보기"}
           >
-            <X size={14} />
+            {full ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
           </button>
         </div>
       </header>

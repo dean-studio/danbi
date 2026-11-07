@@ -19,8 +19,10 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { writeText as clipboardWriteText } from "@tauri-apps/plugin-clipboard-manager";
 import {
+  DEFAULT_DREAMING,
   ipc,
   type DanbiConfig,
+  type DreamStatus,
   type McpStatus,
 } from "@/lib/ipc";
 import { cn, openExternal } from "@/lib/utils";
@@ -35,6 +37,7 @@ type Section =
   | "editor"
   | "mcp"
   | "backup"
+  | "dreaming"
   | "vector"
   | "about";
 
@@ -45,6 +48,7 @@ const SECTIONS_ALL: { id: Section; label: string; icon: typeof Moon }[] = [
   { id: "editor", label: "편집", icon: Pencil },
   { id: "mcp", label: "MCP", icon: Plug },
   { id: "backup", label: "백업", icon: HardDrive },
+  { id: "dreaming", label: "정리", icon: Moon },
   { id: "about", label: "정보", icon: Info },
 ];
 
@@ -156,6 +160,7 @@ export function Settings({
             {section === "editor" && <EditorPanel cfg={cfg} />}
             {section === "mcp" && <McpPanel />}
             {section === "backup" && <BackupPanel cfg={cfg} />}
+            {section === "dreaming" && <DreamingPanel cfg={cfg} />}
             {section === "vector" && <VectorPanel />}
             {section === "about" && <AboutPanel cfg={cfg} />}
           </div>
@@ -1256,6 +1261,149 @@ function BackupPanel({ cfg }: { cfg: DanbiConfig }) {
           <li>
             다른 기기에서 같이 쓰고 싶다면 백업 대신 git remote 방식이 더
             안전해요 (향후 지원 예정).
+          </li>
+        </ul>
+      </div>
+    </>
+  );
+}
+
+/**
+ * 쉬는 시간 정리 — vault 가 조용해지면 깨진 링크·오래된 문서·daily 에 묻힌
+ * 결정을 찾아 검토함에 올린다. 자동으로 고치는 건 없다.
+ */
+function DreamingPanel({ cfg }: { cfg: DanbiConfig }) {
+  const dreaming = cfg.dreaming ?? DEFAULT_DREAMING;
+  const hasAi = !!cfg.embed_provider;
+  const [status, setStatus] = useState<DreamStatus | null>(null);
+  const [running, setRunning] = useState(false);
+  const [result, setResult] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    ipc.dreamStatus().then(setStatus).catch(() => setStatus(null));
+  }, []);
+
+  async function patch(next: Partial<typeof dreaming>) {
+    setErr(null);
+    try {
+      await saveCfg(patchCfg(cfg, { dreaming: { ...dreaming, ...next } }));
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  async function runNow() {
+    setRunning(true);
+    setErr(null);
+    try {
+      const r = await ipc.dreamRunNow();
+      setResult(r.message);
+      setStatus(await ipc.dreamStatus());
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const lastAt = status?.last_run_at ? timeAgo(status.last_run_at * 1000) : null;
+
+  return (
+    <>
+      <SectionTitle
+        title="정리"
+        hint="vault 가 한동안 조용하면 단비가 정리할 거리를 찾아 검토함에 올립니다. 깨진 [[링크]] 고치기, 기한이 지난 문서 다시 확인하기, daily 에 묻힌 결정·원인·노하우를 주제 문서로 옮기기. 검토함에서 고른 것만 기록되고 git 에 남아요. 에이전트(Claude Code 등)도 작업을 마칠 때 danbi_tidy 로 확실한 것을 처리하고, 애매한 건 검토함에 남깁니다."
+      />
+      <Row
+        label="자동 정리"
+        hint="앱이 켜져 있는 동안, 파일 변경이 멈추고 아래 시간이 지나면 한 번 돕니다. 바뀐 프로젝트만 다시 봐요."
+      >
+        <Toggle value={dreaming.enabled} onChange={(v) => patch({ enabled: v })} />
+      </Row>
+      <Row label="조용해진 뒤" hint="마지막 수정 뒤 이만큼 지나야 정리를 시작합니다.">
+        <Segmented
+          value={String(dreaming.idle_minutes)}
+          options={[
+            { value: "10", label: "10분" },
+            { value: "20", label: "20분" },
+            { value: "60", label: "1시간" },
+          ]}
+          onChange={(v) => patch({ idle_minutes: Number(v) })}
+        />
+      </Row>
+      <Row label="한 번에 올리는 수" hint="검토함이 쌓여 피로해지지 않게 한 번에 올리는 건수를 제한합니다. 전체 대기는 20건까지.">
+        <Segmented
+          value={String(dreaming.max_per_run)}
+          options={[
+            { value: "4", label: "4" },
+            { value: "8", label: "8" },
+            { value: "15", label: "15" },
+          ]}
+          onChange={(v) => patch({ max_per_run: Number(v) })}
+        />
+      </Row>
+      <Row
+        label="확실한 링크는 바로 고치기"
+        hint="같은 문서로 딱 정해지는 링크 수리(이름이 바뀐 파일, 대소문자·구분자만 다른 링크)는 검토함에 올리지 않고 바로 고칩니다. 단비 이름으로 커밋되어 되돌릴 수 있고 log.md 에도 남아요. 애매한 것은 그대로 검토함으로."
+      >
+        <Toggle value={dreaming.auto_fix_links ?? true} onChange={(v) => patch({ auto_fix_links: v })} />
+      </Row>
+      <Row
+        label="AI 로 제목 다듬기"
+        hint={
+          hasAi
+            ? "daily 섹션을 주제 문서로 옮길 때 AI 연동의 가벼운 모델로 제목만 다듬습니다. 꺼도 모든 기능이 그대로 동작해요."
+            : "AI 연동을 켜면 쓸 수 있어요. 없어도 정리는 전부 동작합니다."
+        }
+      >
+        <Toggle value={hasAi && dreaming.use_llm} onChange={(v) => hasAi && patch({ use_llm: v })} />
+      </Row>
+      <Row label="지금 정리" hint="조용해질 때까지 기다리지 않고 모든 프로젝트를 한 번 봅니다. 결과는 검토함에 쌓여요.">
+        <button
+          onClick={runNow}
+          disabled={running}
+          className={cn(
+            "inline-flex h-7 items-center gap-1 rounded-sm border border-hairline bg-surface-elevated px-2 text-[12px] text-body hover:text-on-dark",
+            running && "opacity-50",
+          )}
+        >
+          <RefreshCw size={11} className={running ? "animate-spin" : ""} />
+          {running ? "보는 중…" : "지금 정리"}
+        </button>
+      </Row>
+      <Row label="마지막 실행" hint="마지막으로 정리를 돈 시각과 결과.">
+        <div className="flex flex-col items-end gap-0.5 text-right">
+          <code className="rounded-sm border border-hairline bg-surface-elevated px-2 py-1 font-mono text-[11px] text-on-dark-mute">
+            {lastAt ?? "아직 없음"}
+            {status && status.pending > 0 ? ` · 대기 ${status.pending}` : ""}
+          </code>
+          {(result ?? status?.last_message) && (
+            <span className="text-caption-sm text-mute">{result ?? status?.last_message}</span>
+          )}
+        </div>
+      </Row>
+
+      {err && (
+        <div className="mt-3 rounded-md border border-hairline bg-surface-elevated p-2 font-mono text-[11px] text-accent-red">
+          {err}
+        </div>
+      )}
+
+      <div className="mt-5 rounded-md border border-hairline bg-surface-elevated p-3 text-caption-sm leading-[1.6] text-mute">
+        <div className="mb-1 text-body">찾는 것</div>
+        <ul className="list-disc space-y-0.5 pl-4">
+          <li>
+            <span className="text-on-dark">깨진 링크</span> — 없는 문서를 가리키는 [[링크]]. 이름이 비슷한 파일, 옮겨진 폴더, git 에 남은 이름 변경 이력으로 바꿀 후보를 제시해요.
+          </li>
+          <li>
+            <span className="text-on-dark">다시 확인</span> — <code className="text-on-dark">stale_after</code> 가 지난 문서, 대체된 결정을 아직 인용하는 문서.
+          </li>
+          <li>
+            <span className="text-on-dark">승격</span> — daily 의 결정·원인·노하우 섹션을 decisions/ · bugs/ · notes/ 로 옮기고 daily 엔 링크 한 줄만 남겨요.
+          </li>
+          <li>
+            한 번 "그대로 두기" 한 항목은 다시 올라오지 않아요. 상태는 <code className="text-on-dark">.danbi/dreaming.json</code> 에 있어요.
           </li>
         </ul>
       </div>

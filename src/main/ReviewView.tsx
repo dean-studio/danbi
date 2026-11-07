@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Inbox, RefreshCw } from "lucide-react";
+import { Check, Inbox, RefreshCw, Sparkles } from "lucide-react";
 import {
   ipc,
   onReviewsChanged,
   onVaultChanged,
   type DanbiConfig,
   type DashboardSnapshot,
+  type DreamAction,
+  type DreamChoice,
   type GhostSuggestion,
   type ReviewItem,
   type VaultSuggestion,
@@ -23,6 +25,7 @@ import { useApp } from "@/state/store";
 
 export type Filter =
   | "all"
+  | "dream"
   | "ghost"
   | "orphan"
   | "empty"
@@ -32,6 +35,7 @@ export type Filter =
 
 const FILTERS: Array<{ key: Filter; label: string }> = [
   { key: "all", label: "전체" },
+  { key: "dream", label: "정리" },
   { key: "ghost", label: "GHOST" },
   { key: "orphan", label: "고아" },
   { key: "empty", label: "빈 파일" },
@@ -70,17 +74,30 @@ export type ReviewRow = {
   tag?: string;
   ghost?: GhostSuggestion;
   review?: ReviewItem;
+  /** 쉬는 시간 정리 항목 — 선택지가 여럿이라 `choices` 로 그린다. */
+  dream?: DreamAction;
+  /** 정리 항목의 선택지. 첫 번째가 `approve`(A 키)와 같다. */
+  choices?: DreamChoiceButton[];
 };
 type Row = ReviewRow;
 
-/** 표시 순서: ghost → 저신뢰 → 온톨로지 → 큰 파일 → 빈 파일 → 고아(최근 수정 우선). */
+export type DreamChoiceButton = {
+  label: string;
+  choice: DreamChoice;
+  /** 파일을 바꾸는 선택인지 (버튼 톤). */
+  writes: boolean;
+  hint?: string;
+};
+
+/** 표시 순서: 정리 → ghost → 저신뢰 → 온톨로지 → 큰 파일 → 빈 파일 → 고아(최근 수정 우선). */
 const FILTER_ORDER: Record<Exclude<Filter, "all">, number> = {
-  ghost: 0,
-  review: 1,
-  ontology: 2,
-  large: 3,
-  empty: 4,
-  orphan: 5,
+  dream: 0,
+  ghost: 1,
+  review: 2,
+  ontology: 3,
+  large: 4,
+  empty: 5,
+  orphan: 6,
 };
 
 /**
@@ -96,10 +113,14 @@ export function useReviewRows(project?: string | null): {
   err: string | null;
   counts: Record<Exclude<Filter, "all">, number>;
   pendingTotal: number;
+  /** 손이 필요한 것만(정리·관계 제안·저신뢰·온톨로지) — 사이드바 숫자. 고아·빈/큰 파일 같은 참고용은 뺀다. */
+  actionable: number;
   actions: {
     open: (row: ReviewRow) => { project: string; domain: string } | null;
     approve: (row: ReviewRow) => Promise<void>;
     dismiss: (row: ReviewRow) => Promise<void>;
+    /** 정리 항목의 선택지 하나를 실행한다 (파일 수정은 git 커밋됨). */
+    choose: (row: ReviewRow, choice: DreamChoice) => Promise<void>;
     reload: () => void;
     /** 고아 제외 목록 전체 교체 (제외 해제에 쓴다). */
     persistExcluded: (next: string[]) => Promise<void>;
@@ -143,9 +164,12 @@ export function useReviewRows(project?: string | null): {
       if (alive) offs.push(fn);
       else fn();
     });
+    const onLocal = () => load();
+    window.addEventListener(LOCAL_REVIEWS_EVENT, onLocal);
     return () => {
       alive = false;
       for (const fn of offs) fn();
+      window.removeEventListener(LOCAL_REVIEWS_EVENT, onLocal);
     };
   }, [load]);
 
@@ -205,6 +229,11 @@ export function useReviewRows(project?: string | null): {
     for (const it of reviews) {
       if (it.status !== "pending") continue;
       if (project && it.project !== project) continue;
+      const dreamRow = it.kind.startsWith("dream_") ? dreamRowOf(it) : null;
+      if (dreamRow) {
+        out.push(dreamRow);
+        continue;
+      }
       out.push({
         key: `review:${it.id}`,
         filter: "review",
@@ -225,6 +254,7 @@ export function useReviewRows(project?: string | null): {
 
   const counts = useMemo(() => {
     const c: Record<Exclude<Filter, "all">, number> = {
+      dream: 0,
       ghost: 0,
       orphan: 0,
       empty: 0,
@@ -256,16 +286,34 @@ export function useReviewRows(project?: string | null): {
     return null;
   }, []);
 
+  const choose = useCallback(
+    async (r: Row, choice: DreamChoice) => {
+      if (!r.review) return;
+      setErr(null);
+      try {
+        await ipc.dreamApply(r.review.id, choice);
+        setHidden((s) => new Set(s).add(r.key));
+        notifyReviewsChanged();
+      } catch (e) {
+        setErr(String(e));
+      }
+    },
+    [load],
+  );
+
   const approve = useCallback(
     async (r: Row) => {
       try {
-        if (r.ghost) {
+        if (r.dream && r.choices?.[0]) {
+          await choose(r, r.choices[0].choice);
+        } else if (r.ghost) {
           await ipc.ghostAccept(r.ghost.project, r.ghost.id);
           setHidden((s) => new Set(s).add(r.key));
-          load();
+          notifyReviewsChanged();
         } else if (r.review) {
           const next = await ipc.reviewsResolve(r.review.id, "resolved");
           setReviews(next.items);
+          notifyReviewsChanged();
         } else if (r.filter === "orphan" && r.domain) {
           const path = `${r.project}/${r.domain}`;
           const list = cfg?.review_excluded_paths ?? [];
@@ -275,19 +323,23 @@ export function useReviewRows(project?: string | null): {
         setErr(String(e));
       }
     },
-    [cfg?.review_excluded_paths, load, persistExcluded],
+    [cfg?.review_excluded_paths, choose, load, persistExcluded],
   );
 
   const dismiss = useCallback(
     async (r: Row) => {
       try {
-        if (r.ghost) {
+        if (r.dream) {
+          // "그대로 두기" — 아무것도 안 바꾸고 다시 묻지 않는다.
+          await choose(r, { choice: "keep" });
+        } else if (r.ghost) {
           await ipc.ghostReject(r.ghost.project, r.ghost.id);
           setHidden((s) => new Set(s).add(r.key));
-          load();
+          notifyReviewsChanged();
         } else if (r.review) {
           const next = await ipc.reviewsResolve(r.review.id, "dismissed");
           setReviews(next.items);
+          notifyReviewsChanged();
         } else {
           // 빈 파일·큰 파일·고아 "무시" 는 세션 한정 숨김 — 다음 스캔에서
           // 그대로면 다시 보인다.
@@ -297,7 +349,7 @@ export function useReviewRows(project?: string | null): {
         setErr(String(e));
       }
     },
-    [load],
+    [choose, load],
   );
 
   return {
@@ -307,7 +359,8 @@ export function useReviewRows(project?: string | null): {
     err,
     counts,
     pendingTotal: rows.length,
-    actions: { open, approve, dismiss, reload: load, persistExcluded },
+    actionable: rows.filter((r) => r.filter === "dream" || r.filter === "ghost" || r.filter === "review" || r.filter === "ontology").length,
+    actions: { open, approve, dismiss, choose, reload: load, persistExcluded },
   };
 }
 
@@ -326,6 +379,61 @@ export function ReviewView({
   const [filter, setFilter] = useState<Filter>("all");
   const [active, setActive] = useState(0);
   const [showOldOrphans, setShowOldOrphans] = useState(false);
+  // "추천대로 적용" — 확인 한 번 → 순서대로 실행 → 결과 한 줄.
+  const recommended = useMemo(
+    () => rows.map((r) => ({ r, rec: recommendationOf(r) })).filter((x): x is { r: Row; rec: Recommendation } => x.rec !== null),
+    [rows],
+  );
+  const [bulk, setBulk] = useState<
+    | { phase: "idle" }
+    | { phase: "confirm" }
+    | { phase: "running"; done: number; total: number }
+    | { phase: "done"; ok: number; failed: number }
+    | { phase: "finding" }
+  >({ phase: "idle" });
+  const applyRecommended = useCallback(async () => {
+    const recs = recommended.map((x) => x.rec);
+    const dreams = recs.flatMap((r) => (r.dream ? [r.dream] : []));
+    const ghosts = recs.flatMap((r) => (r.ghost ? [r.ghost] : []));
+    const total = recs.length;
+    let ok = 0;
+    let failed = 0;
+    setBulk({ phase: "running", done: 0, total });
+    // 정리 항목은 백엔드에서 한꺼번에 — (pre) 스냅샷 하나·커밋 하나라 한 번에 되돌릴 수 있다.
+    if (dreams.length > 0) {
+      try {
+        const res = await ipc.dreamApplyMany(dreams);
+        ok += res.ok;
+        failed += res.failed.length;
+      } catch {
+        failed += dreams.length;
+      }
+      setBulk({ phase: "running", done: dreams.length, total });
+    }
+    for (const [i, g] of ghosts.entries()) {
+      try {
+        await ipc.ghostAccept(g.project, g.id);
+        ok += 1;
+      } catch {
+        // 이미 처리됐거나 문서가 바뀐 제안 — 남겨 두고 계속.
+        failed += 1;
+      }
+      setBulk({ phase: "running", done: dreams.length + i + 1, total });
+    }
+    setBulk({ phase: "done", ok, failed });
+    notifyReviewsChanged();
+  }, [recommended]);
+  // 검토함은 20건까지만 올라온다 — 다 처리하면 다음 정리 거리를 바로 찾는다.
+  const findMore = useCallback(async () => {
+    setBulk({ phase: "finding" });
+    try {
+      await ipc.dreamRunNow();
+    } catch {
+      /* 아래 새로고침으로 충분 */
+    }
+    setBulk({ phase: "idle" });
+    notifyReviewsChanged();
+  }, []);
   const [showExcluded, setShowExcluded] = useState(false);
 
   // 필터 적용 + 고아는 ORPHAN_VISIBLE 개 뒤를 접는다 (rows 는 이미 정렬됨).
@@ -442,8 +550,20 @@ export function ReviewView({
 
       <div className="flex-1 min-h-0 overflow-auto">
         <div className="mx-auto max-w-[1040px] px-6 py-6">
+          {(recommended.length > 0 || bulk.phase !== "idle") && (
+            <RecommendBanner
+              items={recommended.map((x) => x.rec)}
+              leftover={rows.length - recommended.length}
+              state={bulk}
+              onAsk={() => setBulk({ phase: "confirm" })}
+              onCancel={() => setBulk({ phase: "idle" })}
+              onApply={applyRecommended}
+              onFindMore={findMore}
+              onDismissResult={() => setBulk({ phase: "idle" })}
+            />
+          )}
           <div className="text-caption-md text-mute">
-            GHOST {counts.ghost} · 고아 {counts.orphan} · 빈 파일 {counts.empty}{" "}
+            정리 {counts.dream} · GHOST {counts.ghost} · 고아 {counts.orphan} · 빈 파일 {counts.empty}{" "}
             · 큰 파일 {counts.large} · 온톨로지 {counts.ontology} · 저신뢰{" "}
             {counts.review}
           </div>
@@ -490,7 +610,7 @@ export function ReviewView({
               <Inbox size={22} className="text-stone" />
               <div className="text-[13px] text-mute">검토할 것이 없어요.</div>
               <div className="text-caption-sm text-stone">
-                에이전트가 쓰거나 ghost 스캔이 돌면 여기에 쌓여요.
+                에이전트가 쓰거나 ghost 스캔·쉬는 시간 정리가 돌면 여기에 쌓여요.
               </div>
             </div>
           ) : (
@@ -504,6 +624,7 @@ export function ReviewView({
                   onOpen={() => open(r)}
                   onApprove={r.approveLabel ? () => approve(r) : undefined}
                   onDismiss={() => dismiss(r)}
+                  onChoose={r.dream ? (c) => actions.choose(r, c) : undefined}
                   onGraph={
                     r.ghost && onOpenGraph
                       ? () => onOpenGraph(r.ghost!.project)
@@ -586,6 +707,7 @@ function ReviewRow({
   onOpen,
   onApprove,
   onDismiss,
+  onChoose,
   onGraph,
 }: {
   row: Row;
@@ -594,9 +716,21 @@ function ReviewRow({
   onOpen: () => void;
   onApprove?: () => void;
   onDismiss: () => void;
+  onChoose?: (choice: DreamChoice) => void;
   onGraph?: () => void;
 }) {
   const canOpen = !!row.domain;
+  if (row.dream && row.choices && onChoose) {
+    return (
+      <DreamRow
+        row={row}
+        active={active}
+        onHover={onHover}
+        onOpen={canOpen ? onOpen : undefined}
+        onChoose={onChoose}
+      />
+    );
+  }
   return (
     <li
       onMouseEnter={onHover}
@@ -661,6 +795,376 @@ function ReviewRow({
         </ActionButton>
       </div>
     </li>
+  );
+}
+
+/**
+ * 쉬는 시간 정리 항목 한 행. 이유 아래에 선택지를 전부 펼친다 — 링크 후보
+ * 여러 개, "아직 맞아요/대체됨", "옮기기" 처럼 한 가지 승인으로 끝나지
+ * 않는 항목이라서. 마지막 "그대로 두기" 는 아무것도 안 바꾸고 다시 묻지
+ * 않는다.
+ */
+function DreamRow({
+  row,
+  active,
+  onHover,
+  onOpen,
+  onChoose,
+}: {
+  row: Row;
+  active: boolean;
+  onHover: () => void;
+  onOpen?: () => void;
+  onChoose: (choice: DreamChoice) => void;
+}) {
+  const d = row.dream!;
+  const [expanded, setExpanded] = useState(false);
+  const batchItems = d.kind === "fix_link_batch" ? d.items : null;
+  return (
+    <li
+      onMouseEnter={onHover}
+      className={cn(
+        "flex flex-col gap-2 border-b border-hairline px-4 py-3 last:border-b-0 transition-colors",
+        active ? "bg-surface-elevated" : "hover:bg-surface-elevated/60",
+      )}
+    >
+      <div className="flex items-center gap-3">
+        <span
+          className={cn(
+            "shrink-0 rounded-xs bg-surface-elevated px-1.5 py-0.5 text-[10px] uppercase tracking-[0.4px]",
+            row.badgeTone,
+          )}
+        >
+          {row.badge}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 text-caption-md">
+            <span className="text-mute">{row.project}</span>
+            {row.domain && (
+              <>
+                <span className="text-stone">/</span>
+                <span className="truncate font-mono text-[12px] text-body">
+                  {row.domain}
+                </span>
+              </>
+            )}
+            {d.kind === "fix_link" && d.sources.length > 1 && (
+              <span className="text-stone">외 {d.sources.length - 1}곳</span>
+            )}
+          </div>
+          <div className="text-[13px] text-ink" title={row.reason}>
+            {dreamHeadline(d)}
+          </div>
+          <div className="text-caption-sm text-stone">{dreamDetail(d)}</div>
+        </div>
+        {onOpen && <ActionButton onClick={onOpen}>열기</ActionButton>}
+      </div>
+      {batchItems && (
+        <div className="pl-[46px]">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded((v) => !v);
+            }}
+            className="text-caption-md text-mute hover:text-on-dark"
+          >
+            {expanded ? "목록 접기" : `${batchItems.length}종 펼쳐보기`}
+          </button>
+          {expanded && (
+            <ul className="mt-1.5 overflow-hidden rounded-md border border-hairline bg-surface">
+              {batchItems.map((it) => (
+                <li
+                  key={it.key}
+                  className="flex items-center gap-2 border-b border-hairline px-3 py-1.5 text-[12px] last:border-b-0"
+                  title={`${it.why} · ${it.sources.join(", ")}`}
+                >
+                  <span className="truncate font-mono text-body">[[{it.broken}]]</span>
+                  <span className="shrink-0 text-stone">→</span>
+                  <span className="truncate font-mono text-on-dark">{it.target}</span>
+                  <span className="ml-auto shrink-0 text-caption-sm text-stone">
+                    문서 {it.sources.length}곳
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-1.5 pl-[46px]">
+        {row.choices!.map((c, i) => (
+          <button
+            key={i}
+            onClick={(e) => {
+              e.stopPropagation();
+              onChoose(c.choice);
+            }}
+            title={c.hint}
+            className={cn(
+              "inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[12px] transition-colors",
+              c.writes
+                ? "border-hairline bg-surface-elevated text-body hover:border-hairline-strong hover:text-on-dark"
+                : "border-transparent text-stone hover:text-on-dark",
+            )}
+          >
+            {c.writes && i === 0 && <Check size={11} />}
+            {c.label}
+          </button>
+        ))}
+      </div>
+    </li>
+  );
+}
+
+function dreamHeadline(d: DreamAction): string {
+  switch (d.kind) {
+    case "fix_link":
+      return `[[${d.broken}]] 가 가리키는 문서가 없어요.`;
+    case "fix_link_batch": {
+      const docs = new Set(d.items.flatMap((i) => i.sources)).size;
+      return `폴더가 빠지거나 표기만 다른 링크 ${d.items.length}종(문서 ${docs}곳)을 한 번에 고칠까요?`;
+    }
+    case "stale":
+      return `stale_after: ${d.stale_after} 이 지났어요 — 아직 맞는 내용인가요?`;
+    case "cites_superseded":
+      return `대체된 문서 ${d.target} 를 아직 인용하고 있어요.`;
+    case "promote":
+      return `'${d.title}' 을 ${d.target} 로 옮길까요?`;
+  }
+}
+
+function dreamDetail(d: DreamAction): string {
+  switch (d.kind) {
+    case "fix_link":
+      return d.options.length
+        ? "비슷한 문서를 찾았어요. 고르면 링크를 바꾸고 git 에 기록해요."
+        : "비슷한 문서를 못 찾았어요. 링크를 풀거나 그대로 둘 수 있어요.";
+    case "fix_link_batch":
+      return `예: [[${d.items[0]?.broken}]] → ${d.items[0]?.target}. 후보가 하나뿐인 확실한 것만 모았어요. 승인하면 전부 고치고 커밋 1개로 남겨요.`;
+    case "stale":
+      return "\"아직 맞아요\" 를 고르면 확인 표시를 남기고 90일 뒤로 미뤄요.";
+    case "cites_superseded":
+      return d.replacement
+        ? `새 문서: ${d.replacement}`
+        : "어떤 문서로 대체됐는지는 못 찾았어요.";
+    case "promote":
+      return `daily 의 "${d.heading.replace(/^#+\s*/, "")}" 섹션 — daily 엔 링크 한 줄만 남아요.`;
+  }
+}
+
+/** `dream_*` 검토 항목 → 행 + 선택지. payload 가 깨져 있으면 null. */
+/** "추천대로 적용" 이 실행할 선택 — 판단 없이 맞다고 볼 수 있는 것만.
+ *  오래된 문서 확인(내용이 맞는지는 사람만 앎)·애매한 링크(후보가 둘 이상
+ *  비슷함)·후보 없는 링크·고아/빈 파일 같은 정보성 항목은 null → 남긴다. */
+export type Recommendation = {
+  kind: "link" | "promote" | "relation";
+  /** 정리 항목 — 백엔드에서 한꺼번에(커밋 하나) 실행. */
+  dream?: { id: string; choice: DreamChoice };
+  /** 관계 제안 — 하나씩 승인. */
+  ghost?: { project: string; id: string };
+};
+
+/** 검토함이 바뀌었다고 같은 창의 다른 화면(사이드바 숫자·홈 카드)에 알린다. */
+const LOCAL_REVIEWS_EVENT = "danbi:reviews-local";
+export function notifyReviewsChanged() {
+  window.dispatchEvent(new Event(LOCAL_REVIEWS_EVENT));
+}
+
+function recommendationOf(r: Row): Recommendation | null {
+  const d = r.dream;
+  const id = r.review?.id;
+  if (d && id) {
+    switch (d.kind) {
+      case "fix_link": {
+        const [best, next] = d.options;
+        if (d.ambiguous || !best) return null;
+        // 둘째 후보가 거의 같은 점수면 고를 근거가 없다.
+        if (next && best.confidence - next.confidence < 0.1) return null;
+        return { kind: "link", dream: { id, choice: { choice: "relink", target: best.target } } };
+      }
+      case "fix_link_batch":
+        return { kind: "link", dream: { id, choice: { choice: "apply_all" } } };
+      case "cites_superseded":
+        return d.replacement ? { kind: "link", dream: { id, choice: { choice: "relink", target: d.replacement } } } : null;
+      case "promote":
+        return { kind: "promote", dream: { id, choice: { choice: "promote" } } };
+      default:
+        return null;
+    }
+  }
+  if (r.ghost) {
+    return { kind: "relation", ghost: { project: r.ghost.project, id: r.ghost.id } };
+  }
+  return null;
+}
+
+function dreamRowOf(it: ReviewItem): Row | null {
+  const d = it.payload;
+  if (!d || !("kind" in d)) return null;
+  const base = {
+    key: `dream:${it.id}`,
+    filter: "dream" as const,
+    badge: "정리",
+    badgeTone: "text-accent-green",
+    project: it.project ?? "—",
+    domain: it.domain,
+    reason: it.reason,
+    ts: it.created_at * 1000,
+    review: it,
+    dream: d as DreamAction,
+  };
+  const keep: DreamChoiceButton = {
+    label: "그대로 두기",
+    choice: { choice: "keep" },
+    writes: false,
+    hint: "아무것도 바꾸지 않고 다시 묻지 않아요",
+  };
+  let choices: DreamChoiceButton[];
+  switch (d.kind) {
+    case "fix_link":
+      choices = [
+        ...d.options.map<DreamChoiceButton>((o) => ({
+          label: `→ ${o.target}`,
+          choice: { choice: "relink", target: o.target },
+          writes: true,
+          hint: `${o.why} (${Math.round(o.confidence * 100)}%)`,
+        })),
+        { label: "링크 풀기", choice: { choice: "remove" }, writes: true, hint: "대괄호를 빼고 글자만 남겨요" },
+        keep,
+      ];
+      break;
+    case "fix_link_batch":
+      choices = [
+        { label: `모두 고치기 (${d.items.length}종)`, choice: { choice: "apply_all" }, writes: true, hint: "목록의 링크를 전부 바꾸고 커밋 1개" },
+        { ...keep, hint: "묶음 전체를 보류하고 다시 묻지 않아요" },
+      ];
+      break;
+    case "stale":
+      choices = [
+        { label: "아직 맞아요", choice: { choice: "verify" }, writes: true, hint: "verified 표시 + stale_after 90일 연장" },
+        { label: "대체됨", choice: { choice: "supersede" }, writes: true, hint: "status: superseded 로 표시" },
+        keep,
+      ];
+      break;
+    case "cites_superseded":
+      choices = [
+        ...(d.replacement
+          ? [{ label: `→ ${d.replacement}`, choice: { choice: "relink", target: d.replacement } as DreamChoice, writes: true, hint: "새 문서를 가리키게 바꿔요" }]
+          : []),
+        { label: "링크 풀기", choice: { choice: "remove" }, writes: true, hint: "대괄호를 빼고 글자만 남겨요" },
+        keep,
+      ];
+      break;
+    case "promote":
+      choices = [
+        { label: "옮기기", choice: { choice: "promote" }, writes: true, hint: `${d.target} 를 만들고 daily 엔 링크만` },
+        keep,
+      ];
+      break;
+    default:
+      return null;
+  }
+  // A 키·미니 카드의 "승인" 은 첫 선택지 — 단, 링크를 푸는 것만 남은 항목은
+  // 실수로 누르기 쉬워 전체 화면에서 직접 고르게 둔다.
+  const first = choices[0];
+  const approveLabel = first.writes && first.choice.choice !== "remove" ? first.label : null;
+  return { ...base, approveLabel, choices };
+}
+
+function RecommendBanner({
+  items,
+  leftover,
+  state,
+  onAsk,
+  onCancel,
+  onApply,
+  onFindMore,
+  onDismissResult,
+}: {
+  items: Recommendation[];
+  leftover: number;
+  state:
+    | { phase: "idle" }
+    | { phase: "confirm" }
+    | { phase: "running"; done: number; total: number }
+    | { phase: "done"; ok: number; failed: number }
+    | { phase: "finding" };
+  onAsk: () => void;
+  onCancel: () => void;
+  onApply: () => void;
+  onFindMore: () => void;
+  onDismissResult: () => void;
+}) {
+  const n = (k: Recommendation["kind"]) => items.filter((i) => i.kind === k).length;
+  const parts = [
+    n("link") && `링크 고치기 ${n("link")}`,
+    n("promote") && `daily → 주제 문서 옮기기 ${n("promote")}`,
+    n("relation") && `관계 연결 ${n("relation")}`,
+  ].filter(Boolean);
+  return (
+    <section className="mb-5 rounded-lg border border-hairline bg-surface-elevated px-5 py-4">
+      {state.phase === "finding" ? (
+        <div className="text-[14px] text-body">다음 정리 거리를 찾는 중…</div>
+      ) : state.phase === "done" ? (
+        <div className="flex items-center justify-between gap-4">
+          <div className="text-[14px] text-ink">
+            추천대로 {state.ok}건을 적용했어요.
+            {state.failed > 0 && <span className="ml-1 text-mute">{state.failed}건은 이미 바뀌어 건너뛰었어요.</span>}
+            <div className="mt-0.5 text-caption-md text-mute">
+              정리 항목은 커밋 하나로 묶여 한 번에 되돌릴 수 있어요. 검토함에는 20건씩 올라오니, 더 정리하려면 다음 정리 거리를 찾으세요.
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-3">
+            <button onClick={onDismissResult} className="text-[12px] text-mute hover:text-on-dark">
+              닫기
+            </button>
+            <button
+              onClick={onFindMore}
+              className="h-10 rounded-md border border-hairline bg-surface-card px-4 text-[13px] text-ink transition-colors hover:bg-surface"
+            >
+              다음 정리 거리 찾기
+            </button>
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between gap-6">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-[15px] font-medium text-ink">
+              <Sparkles size={15} className="text-mute" />
+              추천대로 {items.length}건을 한 번에 정리할 수 있어요
+            </div>
+            <div className="mt-1 text-caption-md text-mute">
+              {parts.join(" · ")}
+              {leftover > 0 && ` — 판단이 필요한 ${leftover}건(오래된 문서·애매한 링크 등)은 그대로 남겨요.`}
+            </div>
+          </div>
+          {state.phase === "running" ? (
+            <div className="shrink-0 text-[13px] tabular-nums text-body">
+              적용 중 {state.done}/{state.total}
+            </div>
+          ) : state.phase === "confirm" ? (
+            <div className="flex shrink-0 items-center gap-2">
+              <button onClick={onCancel} className="h-10 px-3 text-[13px] text-mute hover:text-on-dark">
+                취소
+              </button>
+              <button
+                onClick={onApply}
+                className="h-10 rounded-md bg-primary px-5 text-[14px] font-medium text-on-primary transition-colors hover:bg-primary-pressed"
+              >
+                {items.length}건 적용하기
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={onAsk}
+              disabled={items.length === 0}
+              className="h-10 shrink-0 rounded-md bg-primary px-5 text-[14px] font-medium text-on-primary transition-colors hover:bg-primary-pressed disabled:opacity-40"
+            >
+              추천대로 적용
+            </button>
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -856,6 +1360,11 @@ function kindLabel(kind: string): string {
       return "링크";
     case "ghost_candidate":
       return "제안";
+    case "dream_fix_link":
+    case "dream_fix_link_batch":
+    case "dream_recheck":
+    case "dream_promote":
+      return "정리";
     default:
       return kind;
   }

@@ -500,8 +500,15 @@ pub fn accept(
     // and, for a typed suggestion, with that same relation — just mark it
     // accepted.
     let rels = crate::ontology::line_relations(&vocab, &existing);
+    // `[[x.md]]` already counts when it resolves to `notes/x.md`.
+    let docs = links::project_docs(vault, project).ok();
     let present = links::extract_links_at(&existing, project).into_iter().any(|(at, l)| {
+        let resolved = docs.as_ref().and_then(|d| match d.resolve(&link.source_domain, &l.domain) {
+            links::Resolution::Found(r) if l.project == project => Some(r),
+            _ => None,
+        });
         let same_target = (l.project == project && l.domain == link.target_domain)
+            || resolved.as_deref() == Some(link.target_domain.as_str())
             || format!("{}/{}", l.project, l.domain) == link.target_domain;
         same_target && relation.map_or(true, |r| rels.at(at) == Some(r))
     });

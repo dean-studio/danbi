@@ -108,3 +108,75 @@ export function parseWikiHref(href: string): { project: string | null; domain: s
   }
   return { project: null, domain: target };
 }
+
+// ---- 링크 해석 (백엔드 links.rs 의 ProjectDocs::resolve 와 같은 규칙) ----
+
+type TreeLike = {
+  projects: {
+    name: string;
+    domains: { name: string }[];
+    subfolders: { name: string; domains: { name: string }[]; subfolders?: { domains: { name: string }[] }[] }[];
+  }[];
+} | null | undefined;
+
+/** 파일 이름 비교 키: NFC → 소문자 → `.md` 제거 → 공백·`_`·`-`·`.`·`·` 제거. `/` 는 유지. */
+export function normLinkName(s: string): string {
+  const lower = s.normalize("NFC").toLowerCase();
+  const stem = lower.endsWith(".md") ? lower.slice(0, -3) : lower;
+  return stem.replace(/[\s_\-.·]/g, "");
+}
+
+function projectDocNames(tree: TreeLike, project: string): string[] {
+  const p = tree?.projects?.find((x) => x.name === project);
+  if (!p) return [];
+  const out: string[] = p.domains.map((d) => d.name);
+  for (const sf of p.subfolders) {
+    for (const d of sf.domains) out.push(d.name);
+    for (const sf2 of sf.subfolders ?? []) for (const d of sf2.domains) out.push(d.name);
+  }
+  return out;
+}
+
+function resolveRelative(srcDir: string, link: string): string | null {
+  const segs = srcDir.split("/").filter(Boolean);
+  for (const seg of link.split("/")) {
+    if (seg === "" || seg === ".") continue;
+    if (seg === "..") {
+      if (segs.length === 0) return null;
+      segs.pop();
+      continue;
+    }
+    segs.push(seg);
+  }
+  return segs.length ? segs.join("/") : null;
+}
+
+/**
+ * `[[링크]]` 가 가리키는 문서를 트리에서 찾는다. 순서: ① 적힌 경로 ②
+ * 상대경로(소스 폴더 기준) ③ `.md`·대소문자·구분자·NFC 만 다른 하나 ④
+ * 같은 파일명이 프로젝트에 딱 하나. 둘 이상(모호)이거나 없으면 적힌 대로
+ * 돌려준다 — 문서를 고치지 않고 해석만 한다.
+ */
+export function resolveWikiTarget(
+  tree: TreeLike,
+  project: string,
+  srcDomain: string | null,
+  domain: string,
+): string {
+  const raw = domain.endsWith(".md") ? domain : `${domain}.md`;
+  const docs = projectDocNames(tree, project);
+  if (docs.length === 0) return raw;
+  const set = new Set(docs);
+  if (set.has(raw)) return raw;
+  if (/^\.\.?\//.test(raw) || raw.includes("/../") || raw.includes("/./")) {
+    const srcDir = srcDomain?.includes("/") ? srcDomain.slice(0, srcDomain.lastIndexOf("/")) : "";
+    const r = resolveRelative(srcDir, raw);
+    if (r && set.has(r)) return r;
+  }
+  const byPath = docs.filter((d) => normLinkName(d) === normLinkName(raw));
+  if (byPath.length === 1) return byPath[0];
+  if (byPath.length > 1) return raw;
+  const base = normLinkName(raw.slice(raw.lastIndexOf("/") + 1));
+  const byName = docs.filter((d) => normLinkName(d.slice(d.lastIndexOf("/") + 1)) === base);
+  return byName.length === 1 ? byName[0] : raw;
+}

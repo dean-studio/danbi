@@ -15,7 +15,7 @@ import { DocInspector } from "@/main/DocInspector";
 import { cn } from "@/lib/utils";
 import { useApp } from "@/state/store";
 import { resolveTheme, type ThemeChoice } from "@/lib/theme";
-import { isWikiHref, parseWikiHref } from "@/main/wikiLinks";
+import { isWikiHref, parseWikiHref, resolveWikiTarget } from "@/main/wikiLinks";
 
 /** 마지막 입력 뒤 이만큼 조용하면 자동 저장. */
 const AUTOSAVE_DELAY_MS = 1500;
@@ -421,8 +421,10 @@ export function DocView({
       }
       const finalProject = proj ?? selection.project;
       if (!finalProject) return;
-      // .md 가 빠진 형태도 받아준다.
-      const finalDomain = dom.endsWith(".md") ? dom : `${dom}.md`;
+      // .md 가 빠진 형태·폴더가 빠진 이름·상대경로도 백엔드 색인과 같은
+      // 규칙으로 푼다 (같은 이름이 둘 이상이면 적힌 대로).
+      const srcDomain = proj ? null : selection.domain;
+      const finalDomain = resolveWikiTarget(tree, finalProject, srcDomain, dom);
       selectDomain(finalProject, finalDomain);
     }
     const root = document.querySelector(".danbi-editor");
@@ -430,7 +432,7 @@ export function DocView({
     root.addEventListener("click", onClick as EventListener, true);
     return () =>
       root.removeEventListener("click", onClick as EventListener, true);
-  }, [selection.project, tree, selectDomain]);
+  }, [selection.project, selection.domain, tree, selectDomain]);
 
   // ---- In-doc find (⌘F) ----
   // We highlight matches by walking text nodes inside `.danbi-editor`,

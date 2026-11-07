@@ -226,6 +226,51 @@ fn default_backup_excludes() -> Vec<String> {
     vec![".git".into(), ".danbi".into(), ".DS_Store".into()]
 }
 
+/// 쉬는 시간 정리 (dreaming). vault 가 한동안 조용하면 프로젝트별로
+/// 깨진 링크·오래된 문서·daily 에 묻힌 결정을 찾아 검토함에 올린다.
+/// 문서는 절대 자동으로 고치지 않는다 — 사용자가 승인한 것만 기록.
+/// 실행 시각·거절 기억은 `.danbi/dreaming.json` 에 있다 (config 가 아님).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DreamingConfig {
+    /// 자동 실행 ON/OFF. 꺼도 Settings 의 "지금 정리" 는 동작한다.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// 승격 제목 다듬기 등에 AI 연동 (embed provider) 의 LLM 을 쓸지.
+    /// 기본 OFF — LLM 없이도 전 과정이 동작한다.
+    #[serde(default)]
+    pub use_llm: bool,
+    /// 마지막 vault 변경 뒤 이 분만큼 조용해야 한 번 돈다.
+    #[serde(default = "default_dream_idle_minutes")]
+    pub idle_minutes: u64,
+    /// 한 번에 검토함에 올리는 최대 건수 — 쌓여서 피로해지지 않게.
+    #[serde(default = "default_dream_max_per_run")]
+    pub max_per_run: usize,
+    /// 확실한 링크 수리(같은 문서로 정해지는 것)는 검토함에 올리지 않고
+    /// 바로 고친다. 단비 이름으로 커밋되어 되돌릴 수 있다. 기본 ON.
+    #[serde(default = "default_true")]
+    pub auto_fix_links: bool,
+}
+
+fn default_dream_idle_minutes() -> u64 {
+    20
+}
+
+fn default_dream_max_per_run() -> usize {
+    8
+}
+
+impl Default for DreamingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            use_llm: false,
+            idle_minutes: default_dream_idle_minutes(),
+            max_per_run: default_dream_max_per_run(),
+            auto_fix_links: true,
+        }
+    }
+}
+
 /// LLM 사용량 대시보드 설정. v0.8.0 부터 비용/환율 계산은 제거되고
 /// 토큰량만 집계·표시한다.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -330,6 +375,8 @@ pub struct DanbiConfig {
     pub backup: BackupConfig,
     #[serde(default)]
     pub usage: UsageConfig,
+    #[serde(default)]
+    pub dreaming: DreamingConfig,
     /// 사용자가 구성한 프로젝트 그룹. 순서는 사이드바 표시 순서 그대로.
     /// 그룹에 속하지 않은 프로젝트는 사이드바 상단 "Ungrouped" 영역에
     /// 표시된다. project_groups 가 비어 있으면 기존 평면 리스트 동작.
@@ -420,6 +467,11 @@ fn default_folders() -> Vec<String> {
 
 
 pub fn default_vault_path() -> DanbiResult<PathBuf> {
+    // 디버그 빌드 전용: 실제 vault 를 건드리지 않고 복제본으로 dev 앱을 띄울 때.
+    #[cfg(debug_assertions)]
+    if let Some(dir) = std::env::var_os("DANBI_DEV_VAULT").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
     let home = dirs::home_dir()
         .ok_or_else(|| DanbiError::Config("home directory not found".into()))?;
     Ok(home.join(DEFAULT_VAULT_DIRNAME))
@@ -490,4 +542,19 @@ pub fn save_config(vault: &std::path::Path, cfg: &DanbiConfig) -> DanbiResult<()
 fn migrate(cfg: DanbiConfig) -> DanbiConfig {
     // Place for future migrations. For now, v1 → v2 is purely a stamp bump.
     cfg
+}
+
+#[cfg(test)]
+mod dreaming_default_tests {
+    use super::DreamingConfig;
+
+    /// 예전 config(필드 없음)도, 새 기본값도 확실한 링크 자동 수리는 켜짐.
+    #[test]
+    fn auto_fix_links_defaults_on() {
+        assert!(DreamingConfig::default().auto_fix_links);
+        let old: DreamingConfig = serde_json::from_str(r#"{"enabled":true,"use_llm":false,"idle_minutes":20,"max_per_run":8}"#).unwrap();
+        assert!(old.auto_fix_links);
+        let off: DreamingConfig = serde_json::from_str(r#"{"auto_fix_links":false}"#).unwrap();
+        assert!(!off.auto_fix_links);
+    }
 }

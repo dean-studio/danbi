@@ -9,201 +9,30 @@ name: danbi-{{PROJECT}}
 description: Use this skill when the user is working in the "{{PROJECT}}" project's Danbi vault. Triggers include past decisions ("어떻게 정했지", "예전에"), past debugging ("이 에러 본 적", "또 떴어"), session continuity ("어제 뭐 했지", "이어서"), or saving knowledge worth remembering. Also use when the user mentions "단비", "vault", "daily note", "{{PROJECT}}", or wiki-link cross-references. Reads run vault-wide; writes auto-clamp to "{{PROJECT}}".
 ---
 
-# Danbi vault — "{{PROJECT}}" 프로젝트의 영구 기억
+# 단비 vault — "{{PROJECT}}" 의 장기 기억
 
-이 단비 vault 는 **"{{PROJECT}}"** 프로젝트의 결정·디버깅·TODO·학습이 누적되는 외부 장기 기억이다. 다른 프로젝트의 노트도 검색은 가능하지만, 쓰기는 모두 이 프로젝트로 자동 clamp 된다.
+단비 vault 는 "{{PROJECT}}" 프로젝트의 장기 기억이다. 다음 세션의 나(또는 다른 에이전트)가 일을 이어받을 때 필요한 것 — 왜 그렇게 정했는지, 무엇이 왜 깨졌었는지, 어디까지 했고 다음에 무엇을 할지 — 를 남기고 찾아 쓰는 곳이다. 언제 무엇을 읽고 쓸지는 판단에 맡긴다. 읽기는 vault 전체, 쓰기는 "{{PROJECT}}" 로 자동 고정된다.
 
-MCP endpoint: `{{MCP_URL}}` (이미 등록돼 있으면 무시. 안 등록돼 있으면 단비 사이드바 → 프로젝트 우클릭 → "Claude Code 설치 명령 복사" 로 한 줄 받아 실행.)
+MCP endpoint: `{{MCP_URL}}` (등록 안 돼 있으면 단비 사이드바 → 프로젝트 우클릭 → "Claude Code 설치 명령 복사").
 
-
-# Danbi vault — Claude Code 의 영구 기억
-
-이 단비 vault 는 사용자의 모든 프로젝트가 누적되는 **외부 장기 기억**이다. 결정·디버깅·TODO·학습이 세션을 넘어 쌓인다.
-
-## 핵심 원칙
-
-1. **답변 전에 단비부터 물어본다** — 일반론 대신 vault 의 맥락으로 답한다.
-2. **중요한 건 즉시 기록한다** — 기술 결정·버그 원인·TODO 는 `danbi_log` 로 바로.
-3. **쓸 때는 연결한다** — 관련 문서를 `[[wiki-link]]` 로 걸어 그래프에 누적시킨다.
-
-## 도구 (모든 도구는 `mcp__danbi__` 접두사로 노출됨)
-
-**읽기** (vault 전체 조회 가능):
-- `danbi_briefing` — 오늘 daily·7일 활동·정리 제안 건수·ghost 제안을 한 JSON 으로 (project 생략 시 "{{PROJECT}}")
-- `danbi_recent` — 최근 수정된 문서 목록
-- `danbi_search` — tantivy 전문 검색 + Gemini 임베딩 RRF (한국어/영어 cross)
-- `danbi_context` — 질문 하나로 관련 문서의 해당 섹션 + 연결 문서 목록을 글자 예산 안에서 한 번에. **search → read 반복 대신 먼저**
-- `danbi_related` — 문서 하나의 링크·백링크·내용상 가까운 문서·같은 주제 묶음
-- `danbi_read` — 특정 프로젝트/도메인 파일. 큰 문서는 `heading` 으로 섹션만, `max_chars`/`offset` 으로 나눠서
-- `danbi_daily` — 오늘 + 1주/1달/1년 전 daily 노트
-- `danbi_list_projects` — 프로젝트 목록 (기본 요약형, `project` 를 주면 그 프로젝트의 파일 트리)
-- `danbi_query` — 문서 종류·상태·관계로 고르기 (검색어 없이). 예: `type=decision status=active`, `relation=caused_by target=notes/x.md`
-- `danbi_schema` — 이 프로젝트의 종류·관계·상태 단어 목록과 종류별 문서 수
-
-**쓰기** (현재 cwd 의 프로젝트로 자동 clamp — 다른 프로젝트로 잘못 쓸 위험 0):
-- `danbi_log` — 오늘 daily 노트에 append. project 파라미터 **생략**. `_시각 · 호출자_` 줄은 자동(첫 제목 바로 아래), 직전 기록과 같은 본문은 `deduped`. 응답에 `warning` 이 오면 저장은 된 것 — 재시도 금지.
-- `danbi_append` — 임의 도메인 파일에 append (없으면 자동 생성). project 파라미터 **생략**.
-- `danbi_create_folder` — 1~2단계 sub-folder 생성. 카테고리·시기별 누적용.
-- `danbi_create_file` — 폴더+파일+내용을 한 번에 보장. 매일 통계 자동 기록 같은 자동화에 적합.
-- `danbi_replace_section` — 지정 헤딩(`## ...`) 아래 본문 전체를 새 내용으로 **교체**. 같은 섹션이 자주 갱신되는 문서에 사용 (append 누적 X).
-- `danbi_upsert_item` — 리스트 섹션의 한 항목을 in-place 교체 (없으면 추가). `[#id]` 마커 또는 첫 줄 텍스트로 매칭. 진행 상태가 바뀌는 체크리스트·카드 리스트에 적합.
-- `danbi_set_meta` — 문서 frontmatter 에 `type`·`status`·문서 단위 관계만 넣기. 본문·다른 키는 그대로.
-- `danbi_propose_link` — 기존 문서 사이 관계를 **제안만** (사용자가 앱에서 승인하면 기록). 지난 기록 정리용.
-
-## Read — 언제 무엇을 읽는가
-
-### 세션 시작 (새 대화 첫 턴)
-
-반드시 이 순서:
-
-1. `danbi_briefing` 호출 → `daily.today_notes`, `activity.recent_summaries`, `ghost_suggestions` 확인
-2. 어제 daily 노트 있으면 `danbi_read` 한 줄 요약
-3. 진행 중이던 TODO 있으면 그것부터 이어서 제안
-
-### 질문 응답 중
-
-| 사용자 뉘앙스 | 호출 |
-|---|---|
-| "예전에 이거 어떻게 정했지?" | `danbi_context` (부족하면 `danbi_read`) |
-| "이 문서랑 관련된 건?" | `danbi_related` (`by_relation` 에 영향·원인·대체별 묶음) |
-| "지금 유효한 결정은?" | `danbi_query(type="decision", status="active")` |
-| "이 결정 바꾸면 어디에 영향?" | `danbi_query(relation="affected_by", target="decisions/x.md")` |
-| "같은 원인으로 난 버그 있었나?" | `danbi_query(relation="caused_by", target="notes/원인.md")` |
-| "지난주/어제 뭐 했지?" | `danbi_briefing` activity |
-| "1년 전 오늘" / "비슷한 거 한 적 있나" | `danbi_daily` |
-| "X 관련 기존 노트" | `danbi_search` |
-| "다른 프로젝트에선 어떻게?" | `danbi_list_projects` → `danbi_read` |
-
-**금지**: 일반론으로 답하기. 검색 안 돌리고 추측하기. "아마도" "일반적으로" 시작하기.
-
-## Write — 언제 무엇을 기록하는가
-
-`danbi_log` 트리거:
-
-| 트리거 | 기록 예시 |
-|---|---|
-| 기술 결정 확정 | "JWT refresh 7일로 정함. 모바일 세션 vs 보안 트레이드오프" |
-| 버그 원인 발견 | "CORS 에러는 /api/auth preflight 미설정. next.config.js headers" |
-| 세션 종료 전 TODO | "내일: RLS 정책 4개 마이그레이션, 스키마 dump 비교" |
-| 노하우 (되풀이) | "Supabase RLS 는 service_role 키 쓰면 자동 우회" |
-| 재발 방지 | "Tauri v2 webview 에서 window.prompt 작동 X → 인라인 input" |
-| 아키텍처 전환 | "REST → tRPC 시작. 타입 안전성 + codegen 불필요" |
-
-**기록 형식**: `###` 헤더 + 2-4줄 본문. 코드는 핵심만 5줄 이내. "결정/원인/TODO/노하우/재발 방지" 중 하나로 분류. 잡담 금지.
-
-**세션을 마칠 때**: `danbi_log` 의 `next_step` 에 "다음에 제일 먼저 할 일" 한 줄을 넣는다. 다음 세션 브리핑과 단비 프로젝트 홈 맨 위에 그대로 보인다. 할 일은 `- [ ] …` 체크박스로 적으면 단비 할 일함에 모인다.
-
-**다른 프로젝트의 비슷한 기록**: 버그·원인을 기록하면 응답의 `elsewhere` 에 다른 프로젝트에서 비슷한 문제를 다룬 문서가 올 수 있다. 같은 문제면 그 해결법을 먼저 읽고, 본문에 `관련:: [[프로젝트/문서.md]]` 로 연결한다.
-
-특정 도메인 파일 갱신은 `danbi_append`.
-
-### Append vs Replace vs Upsert — 어느 쓰기 도구를 고르나
-
-| 상황 | 도구 | 이유 |
-|---|---|---|
-| daily 일지 / 시간순 누적 / 새로운 사실 추가 | `danbi_log` · `danbi_append` | 누적이 곧 가치. 과거 항목은 그대로 보존. |
-| 한 섹션의 **현재 상태**를 갱신 (예: 알림톡 리스트 전체, 오늘의 KPI 표) | `danbi_replace_section` | 같은 내용이 append 로 쌓이면 가독성 망가짐. 헤딩 아래만 교체. |
-| 리스트 안의 **한 항목**만 갱신 (예: `- [#a] 결제 완료` 의 본문 변경) | `danbi_upsert_item` | 다른 항목 보존, 매칭 항목만 교체. 같은 key 로 다시 호출하면 또 update. |
-
-`danbi_upsert_item` 항목 ID 권장 형식 — `- [#kebab-slug] 제목 ...`. 첫 호출에는 `[#id]` 안 넣어도 텍스트 매칭으로 동작하지만, 자주 변경되는 항목은 ID 마커를 넣어두면 제목이 바뀌어도 추적된다.
-
-예시:
-```
-danbi_upsert_item(
-  domain="marketing/알림톡-리스트.md",
-  heading="## 알림톡 리스트",
-  key="checkout-success",
-  item="- [#checkout-success] 결제 완료\n  - body: 변경된 본문\n  - updated: 2026-06-20"
-)
-```
-
-### 폴더로 누적할 때
-
-같은 카테고리·날짜·주제로 `.md` 가 계속 쌓이면 sub-folder 분리. 단비는 폴더 최대 2단계 (`<folder>/<sub>/<file>.md`).
-
-| 시나리오 | 권장 구조 |
-|---|---|
-| 매일 통계·메트릭 자동 기록 | `daily/YYYY-MM/DD.md` 또는 `stats/YYYY-MM-DD.md` |
-| 주제별 리서치 누적 | `research/<topic>.md` |
-| 회의록 / 인터뷰 | `meetings/YYYY-MM-DD-<who>.md` |
-| 드래프트·임시 메모 | `drafts/<title>.md` |
-
-호출 — 두 옵션:
-
-**A. 한 번 호출 (권장 · 자동화에 적합)**
-```
-danbi_create_file(domain="stats/2026-05-17.md", content="...")
-```
-폴더 없으면 만들고, 파일 없으면 만들고, content 있으면 append. 모두 idempotent.
-
-**B. 두 호출로 분리**
-```
-1. danbi_create_folder(folder="stats")              ← 첫 날 한 번 (idempotent)
-2. danbi_append(domain="stats/2026-05-17.md", ...)  ← 매번 append
-```
-
-### 기록 타이밍
-
-- **즉시**: 트리거 순간이 오면 다른 일 끝나기 전에 바로
-- **세션 종료 시**: 누락된 트리거 있으면 몰아서
-- **이중 기록 방지**: 같은 세션 동일 내용 중복 호출 금지
-
-## Link — 언제 [[wiki-link]] 를 넣는가
-
-### 위키링크 문법
-- 같은 프로젝트: `[[파일명.md]]`
-- 다른 프로젝트: `[[프로젝트명/파일명.md]]`
-
-### 언제 삽입하나
-
-`danbi_log` / `danbi_append` 본문에 다음 중 하나라도 해당되면 `[[…]]` 자연스럽게 포함:
-
-1. 언급 개념이 기존 문서에 다뤄짐 (`danbi_search` 결과로 확인)
-2. 같은 프로젝트 내 관련 결정/토픽
-3. 답변 근거로 `danbi_read` 한 문서 인용
-
-예시:
-```markdown
-### JWT refresh 7일로 확정
-세션 만료 UX 개선 위해 1일 → 7일. 보안 이슈는 [[notes/auth-security.md]]
-의 리스크 매트릭스 기준 수용 가능. 토큰 만료 처리는 [[notes/token-refresh-flow.md]] 참조.
-```
-
-### 관계로 적기 (온톨로지)
-
-링크가 "그냥 관련"이 아니면 **관계 이름을 붙여** 적는다. 그래프와 `danbi_query` 가 이걸로 답한다.
-
-```markdown
-### 원인: 자동 업데이트가 안 뜸
-- 체크가 앱 시작 1회뿐
-원인:: [[notes/updater-throttle.md]]
-영향:: [[release.md]]
-```
-
-| 관계 | 쓰는 때 | 반대 방향(자동) |
-|---|---|---|
-| `영향::` (affects) | 이 결정·변경이 저 문서에 영향 | 영향받음 |
-| `원인::` (caused_by) | 이 버그·문제의 원인이 저 문서 | 결과 |
-| `대체::` (supersedes) | 이 결정이 옛 결정을 대체 → 옛 결정은 자동으로 superseded | 대체됨 |
-| `구현::` (implements) | 이 작업이 저 기능·결정을 구현 | 구현됨 |
-| `차단::` (blocks) | 이 문제가 저 작업을 막음 | 차단됨 |
-| `부분::` (part_of) | 이 문서가 저 문서의 일부 | 포함 |
-| `관련::` 또는 `## 관련` 아래 | 그 외 | 관련 |
-
-- 결정을 뒤집을 땐 새 결정에 `대체:: [[옛 결정]]` — 옛 것을 지우지 않는다. `danbi_briefing` 의 `active_decisions` 가 지금 유효한 결정이다.
-- 문서 종류는 폴더로 정해진다 (`decisions/` 결정, `notes/` 메모, `daily/` 일지). 다르게 하려면 `danbi_set_meta(type=...)`.
-- 단어 목록 밖의 관계 이름은 쓰지 않는다 — `danbi_schema` 로 확인. 프로젝트가 schema.md 의 `## 온톨로지` 에서 더 추가할 수 있다.
-- 지난 문서의 관계를 정리할 땐 직접 고치지 말고 `danbi_propose_link` 로 제안 → 사용자가 승인.
-
-### Ghost 제안 처리
-
-`danbi_briefing` 응답의 `ghost_suggestions` 는 단비가 제안한 "아직 확정 안 된 링크". 작업 중 source 문서 편집 시 제안 target 이 정말 관련 있으면 본문에 `[[target]]` 삽입. 점선 → 실선 승격.
-
-## 안티 패턴
-
-- **❌ `danbi_log` 누락**: 작은 결정일수록 나중에 찾기 어렵다. 기록한다.
-- **❌ 일반 지식으로 답**: 이 vault 의 결정이 중요하다. 먼저 검색.
-- **❌ 링크 없이 기록**: 관련 문서 있는데 `[[]]` 안 걺 → 그래프 안 자람.
-- **❌ 관계 이름 없이 원인·영향 기록**: "원인은 [[x]]" 대신 `원인:: [[x]]` — 그래야 같은 원인을 다시 찾는다.
-- **❌ project 파라미터 수동 지정**: scoped endpoint 가 자동 clamp. 생략이 맞다.
+- 시작할 때 `danbi_briefing` 으로 직전 맥락을, 답하기 전에 `danbi_context` 로 이미 정한 것을 본다. 더 필요하면 `danbi_read`·`danbi_related`·`danbi_query`·`danbi_search`·`danbi_daily`.
+- 남길 것은 `danbi_log`(오늘 daily) 나 `danbi_append`·`danbi_replace_section`·`danbi_upsert_item`(주제 문서)으로. 많이보다 정확하게 — 틀린 기록은 덧쌓지 말고 고치거나 새 기록에 `대체:: [[옛 문서.md]]` 로 뒤집는다.
+- 관련 문서는 `[[파일.md]]`(다른 프로젝트는 `[[프로젝트/파일.md]]`)로 잇고, 원인·영향처럼 뜻이 있는 연결은 `원인:: [[x.md]]` 처럼 관계 이름을 붙인다. 쓸 수 있는 이름은 `danbi_schema`.
+- 일을 마칠 때 `danbi_tidy` 로 이 프로젝트의 정리 거리(깨진 링크·daily 에 묻힌 결정·기한 지난 문서)를 보고, 확실한 것만 `danbi_tidy_apply` 로 처리한다. 애매하면 두면 사람이 고른다.
+- 마칠 때 `danbi_log` 의 `next_step` 에 다음에 제일 먼저 할 일 한 줄.
+- 쓰기 도구에는 project 인자를 넣지 않는다. 나머지 도구와 인자는 도구 설명을 본다.
 "####;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 주입 층은 작게 — 규칙이 길어지면 지시 준수가 떨어진다. 세부는 도구 설명으로.
+    #[test]
+    fn template_stays_small() {
+        let chars = DEFAULT_SKILL_TEMPLATE.chars().count();
+        assert!(chars < 2500, "SKILL 템플릿 {chars}자 — 세부는 도구 설명으로 내릴 것");
+        assert!(DEFAULT_SKILL_TEMPLATE.contains("{{MCP_URL}}"));
+        assert!(DEFAULT_SKILL_TEMPLATE.contains("danbi_context"));
+    }
+}

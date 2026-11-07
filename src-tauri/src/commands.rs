@@ -3467,6 +3467,33 @@ pub fn project_activity_overview(
     crate::dashboard::project_activity_overview(&vault_path, days.unwrap_or(30))
 }
 
+// ---------- Memory growth watch (기록 비대화 감시) ------------------------
+//
+// Both run off the main thread (`async` command → worker) and share one
+// cached vault-wide computation, so opening a project home right after
+// the global home costs a cache hit.
+
+/// Memory health of one project: size, daily share, orphan ratio, 7/30-day
+/// growth with who wrote, largest docs, repeated paragraphs, signals.
+#[tauri::command(async)]
+pub fn project_growth(project: String) -> DanbiResult<Option<crate::growth::ProjectGrowth>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    crate::growth::for_project(&vault_path, &project)
+}
+
+/// Every project, bloating first — the global home shows only those.
+#[tauri::command(async)]
+pub fn growth_overview() -> DanbiResult<Vec<crate::growth::ProjectGrowth>> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    Ok(crate::growth::overview(&vault_path)?.as_ref().clone())
+}
+
 // ---------- MCP inbound dashboard (v0.4.0) -----------------------------
 //
 // Three resolutions matching the UI's drill-down:
@@ -3902,12 +3929,150 @@ pub fn reviews_resolve(
             )))
         }
     };
-    let store = crate::reviews::resolve(&vault_path, &id, next)?;
+    let before = crate::reviews::load(&vault_path)?;
+    let item = crate::reviews::find(&before, &id).cloned();
+    let store = crate::reviews::resolve(&vault_path, &id, next.clone())?;
+    // 정리(dreaming) 항목은 답을 기억해 같은 후보를 다시 올리지 않는다.
+    if let Some(it) = item.as_ref() {
+        crate::dreaming::on_review_resolved(&vault_path, it, &next);
+    }
     // Sidebar badge and review lists listen for this instead of polling.
     use tauri::Emitter;
     let _ = app.emit(crate::reviews::REVIEWS_CHANGED_EVENT, ());
     Ok(store)
 }
+
+// ---------- 쉬는 시간 정리 (dreaming) ----------
+
+#[tauri::command(async)]
+pub fn dream_status() -> DanbiResult<crate::dreaming::DreamStatus> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    Ok(crate::dreaming::status(&vault_path))
+}
+
+/// Settings 의 "지금 정리" — 지문을 무시하고 모든 프로젝트를 본다.
+/// 자동 실행이 꺼져 있어도 동작한다.
+#[tauri::command(async)]
+pub fn dream_run_now(app: AppHandle) -> DanbiResult<crate::dreaming::DreamReport> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let report = run_dreaming(&vault_path, &cfg, true)?;
+    use tauri::Emitter;
+    let _ = app.emit(crate::reviews::REVIEWS_CHANGED_EVENT, ());
+    Ok(report)
+}
+
+/// 검토함의 "추천대로 적용" — 여러 항목을 커밋 하나로.
+#[derive(serde::Deserialize)]
+pub struct DreamPick {
+    pub id: String,
+    pub choice: serde_json::Value,
+}
+
+#[tauri::command(async)]
+pub fn dream_apply_many(app: AppHandle, picks: Vec<DreamPick>) -> DanbiResult<crate::dreaming::BulkResult> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let mut parsed = Vec::with_capacity(picks.len());
+    for p in picks {
+        let choice: crate::dreaming::Choice = serde_json::from_value(p.choice)
+            .map_err(|e| DanbiError::Config(format!("선택지를 읽을 수 없어요: {e}")))?;
+        parsed.push((p.id, choice));
+    }
+    let res = crate::dreaming::apply_many(&vault_path, parsed)?;
+    if res.ok > 0 {
+        let _ = journal::append_log(&vault_path, &format!("**dreaming 일괄** {} · {}", res.message, res.changed.join(", ")));
+    }
+    use tauri::Emitter;
+    let _ = app.emit(crate::reviews::REVIEWS_CHANGED_EVENT, ());
+    Ok(res)
+}
+
+/// 검토함에서 고른 선택지를 실행한다 (파일 수정 + git 커밋).
+#[tauri::command(async)]
+pub fn dream_apply(
+    app: AppHandle,
+    id: String,
+    choice: serde_json::Value,
+) -> DanbiResult<crate::dreaming::ApplyResult> {
+    let vault = default_vault_path()?;
+    let cfg = config::load_config(&vault)?
+        .ok_or_else(|| DanbiError::Config("config not found".into()))?;
+    let vault_path = require_vault(&cfg)?;
+    let choice: crate::dreaming::Choice = serde_json::from_value(choice)
+        .map_err(|e| DanbiError::Config(format!("선택지를 읽을 수 없어요: {e}")))?;
+    let res = crate::dreaming::apply(&vault_path, &id, choice)?;
+    if !res.changed.is_empty() {
+        let _ = journal::append_log(
+            &vault_path,
+            &format!("**dreaming** {} · {}", res.message, res.changed.join(", ")),
+        );
+    }
+    use tauri::Emitter;
+    let _ = app.emit(crate::reviews::REVIEWS_CHANGED_EVENT, ());
+    Ok(res)
+}
+
+/// 정리 한 바퀴. `use_llm` 이 켜져 있고 AI 연동이 있으면 승격 제목만
+/// LLM 으로 다듬는다 — 실패하면 휴리스틱 제목 그대로. watcher 의 유휴
+/// 실행과 "지금 정리" 가 같이 쓴다. 호출 스레드를 막으므로 메인 스레드에서
+/// 부르지 말 것.
+pub(crate) fn run_dreaming(
+    vault_path: &std::path::Path,
+    cfg: &DanbiConfig,
+    force: bool,
+) -> DanbiResult<crate::dreaming::DreamReport> {
+    let llm: Option<(Box<dyn Provider>, String)> = if cfg.dreaming.use_llm {
+        match (resolve_summarize_model(cfg), resolve_embed_provider(cfg)) {
+            (Some((model, _)), Ok(provider)) => Some((provider, model)),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let polish = llm.as_ref().map(|(provider, model)| {
+        move |title: &str, body: &str| -> Option<String> {
+            let prompt = format!(
+                "아래는 개발 일지의 한 섹션이에요. 주제 문서의 제목으로 쓸 한 줄을 한국어로 만들어 주세요. \
+                 40자 이내, 따옴표·마침표·설명 없이 제목만 답하세요.\n\n현재 제목: {title}\n\n본문:\n{}",
+                body.chars().take(1500).collect::<String>()
+            );
+            let fut = crate::usage::with_role(
+                "dreaming",
+                provider.converse_text(model, Some(DREAM_TITLE_SYSTEM), &prompt, 80, 0.2),
+            );
+            let out = tauri::async_runtime::block_on(fut).ok()?;
+            let line = out.lines().map(str::trim).find(|l| !l.is_empty())?;
+            Some(line.trim_matches(|c| c == '"' || c == '\'' || c == '“' || c == '”').to_string())
+        }
+    });
+    let opts = crate::dreaming::RunOptions {
+        max_per_run: cfg.dreaming.max_per_run,
+        force,
+        auto_fix_links: cfg.dreaming.auto_fix_links,
+        only_project: None,
+    };
+    let report = match polish.as_ref() {
+        Some(p) => crate::dreaming::run_with(vault_path, &opts, Some(p)),
+        None => crate::dreaming::run_with(vault_path, &opts, None),
+    }?;
+    for a in &report.auto_fixed {
+        let _ = journal::append_log(
+            vault_path,
+            &format!("**dreaming 자동 수리** {} · {} · {}", a.project, a.message, a.changed.join(", ")),
+        );
+    }
+    Ok(report)
+}
+
+const DREAM_TITLE_SYSTEM: &str = "You name short Korean knowledge-base documents. Reply with the title only.";
 
 #[tauri::command(async)]
 pub fn cache_clear() -> DanbiResult<()> {

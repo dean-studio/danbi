@@ -99,8 +99,7 @@ pub fn scan(vault: &Path) -> DanbiResult<Vec<Suggestion>> {
                 });
                 continue;
             }
-            // Don't flag daily notes as orphans — they're timestamped and rarely cross-linked.
-            if incoming == 0 && !is_index_like(&d.name) && !d.name.starts_with("daily/") {
+            if incoming == 0 && is_orphan_candidate(&d.name) {
                 out.push(Suggestion::Orphan {
                     project: p.name.clone(),
                     domain: d.name.clone(),
@@ -167,6 +166,13 @@ fn ontology_suggestions(
             });
         }
     }
+}
+
+/// Can this document be an orphan at all? Daily notes are timestamped and
+/// rarely cross-linked, and the scaffolding files are entry points — both
+/// are left out of the orphan count here and in `growth`.
+pub(crate) fn is_orphan_candidate(name: &str) -> bool {
+    !is_index_like(name) && !name.starts_with("daily/")
 }
 
 fn is_index_like(name: &str) -> bool {

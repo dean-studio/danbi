@@ -1233,12 +1233,17 @@ fn resolve_target(vault: &Path, project: Option<&str>, raw: &str) -> Option<Stri
         return None;
     }
     let t = md_name(t);
-    if let Some((first, _)) = t.split_once('/') {
-        if vault.join(PROJECTS_DIRNAME).join(first).is_dir() {
-            return Some(t);
-        }
-    }
-    project.map(|p| format!("{p}/{t}"))
+    let (p, d) = match t.split_once('/') {
+        Some((first, rest)) if vault.join(PROJECTS_DIRNAME).join(first).is_dir() => (first.to_string(), rest.to_string()),
+        _ => (project?.to_string(), t),
+    };
+    // `x.md` for `notes/x.md`, `Auth Flow` for `auth-flow.md` — same rules
+    // as the link index. Ambiguous or missing: keep what was asked for.
+    let d = match crate::links::resolve_doc(vault, &p, None, &d) {
+        Ok(crate::links::Resolution::Found(found)) => found,
+        _ => d,
+    };
+    Some(format!("{p}/{d}"))
 }
 
 fn modified_ms(vault: &Path, id: &str) -> Option<u128> {
@@ -1437,6 +1442,29 @@ mod tests {
         let t = std::time::Instant::now();
         let (rows, n) = query(&vault, &QueryArgs { doc_type: Some("decision".into()), limit: 5, ..Default::default() }).unwrap();
         println!("query(decision): {:?}, {n} hits, first {:?}", t.elapsed(), rows.first().map(|r| &r.domain));
+    }
+
+    #[test]
+    fn resolve_target_uses_the_link_resolver() {
+        let unique = format!("danbi-onto-resolve-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+        let vault = std::env::temp_dir().join(unique);
+        let w = |rel: &str| {
+            let p = vault.join(PROJECTS_DIRNAME).join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        };
+        w("P/notes/cause.md");
+        w("P/notes/dup.md");
+        w("P/bugs/dup.md");
+        w("Q/x.md");
+        assert_eq!(resolve_target(&vault, Some("P"), "cause").as_deref(), Some("P/notes/cause.md"));
+        assert_eq!(resolve_target(&vault, Some("P"), "[[notes/cause.md]]").as_deref(), Some("P/notes/cause.md"));
+        assert_eq!(resolve_target(&vault, Some("P"), "Q/x").as_deref(), Some("Q/x.md"));
+        // 모호하거나 없으면 적힌 대로.
+        assert_eq!(resolve_target(&vault, Some("P"), "dup.md").as_deref(), Some("P/dup.md"));
+        assert_eq!(resolve_target(&vault, Some("P"), "nope.md").as_deref(), Some("P/nope.md"));
+        assert_eq!(resolve_target(&vault, None, "nope.md"), None);
+        std::fs::remove_dir_all(vault).ok();
     }
 
     #[test]

@@ -839,6 +839,20 @@ const FEED_MAX_LIMIT: usize = 200;
 const FEED_WALK_CAP: usize = 5_000;
 const PREVIEW_CHARS: usize = 60;
 
+/// `agent` | `human` | `danbi` for a commit summary — the same rule the
+/// activity feed applies, exposed for callers that only have the summary
+/// (growth attribution walks thousands of commits without a tree diff).
+pub(crate) fn actor_of_summary(summary: &str) -> &'static str {
+    let (bare, token) = split_client(summary);
+    actor_for(token.unwrap_or(""), summary_head(bare))
+}
+
+/// `<project>/<domain>` named by a commit summary's second segment
+/// (`danbi: mcp log · P/daily/x.md [client]`), if it has one.
+pub(crate) fn doc_of_summary(summary: &str) -> Option<(String, String)> {
+    doc_from_summary(summary)
+}
+
 /// Who a legacy (token-less) commit came from, by its verb.
 fn actor_for(client: &str, head: &str) -> &'static str {
     match client {

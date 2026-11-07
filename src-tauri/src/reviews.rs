@@ -45,6 +45,11 @@ pub struct ReviewItem {
     pub created_at: i64,
     #[serde(default)]
     pub resolved_at: Option<i64>,
+    /// Structured data for kinds the UI acts on (dreaming's `dream_*`
+    /// items carry their action here). None for the classic free-text
+    /// kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -93,6 +98,20 @@ pub fn enqueue(
     domain: Option<String>,
     reason: String,
 ) -> DanbiResult<ReviewItem> {
+    enqueue_with_payload(vault, kind, project, domain, reason, None)
+}
+
+/// `enqueue` with a structured payload. Dedupe is still by (kind,
+/// project, domain, reason) — callers that need a finer key (dreaming's
+/// candidate `key`) check `pending_payload_keys` before calling.
+pub fn enqueue_with_payload(
+    vault: &Path,
+    kind: &str,
+    project: Option<String>,
+    domain: Option<String>,
+    reason: String,
+    payload: Option<serde_json::Value>,
+) -> DanbiResult<ReviewItem> {
     let mut store = load(vault)?;
     // Cheap deduplication — if the same (kind, project, domain, reason)
     // is already pending, don't add a second copy.
@@ -125,6 +144,7 @@ pub fn enqueue(
         status: ReviewStatus::Pending,
         created_at: Local::now().timestamp(),
         resolved_at: None,
+        payload,
     };
     store.items.push(item.clone());
     // Drop oldest resolved/dismissed entries when we cross MAX_ITEMS so
@@ -152,6 +172,21 @@ pub fn resolve(vault: &Path, id: &str, status: ReviewStatus) -> DanbiResult<Revi
     }
     save(vault, &store)?;
     Ok(store)
+}
+
+pub fn find<'a>(store: &'a ReviewStore, id: &str) -> Option<&'a ReviewItem> {
+    store.items.iter().find(|it| it.id == id)
+}
+
+/// `payload.key` of every item of a `kind` prefix, whatever its status —
+/// so a scanner never re-proposes what the user already answered.
+pub fn payload_keys(store: &ReviewStore, kind_prefix: &str) -> std::collections::HashSet<String> {
+    store
+        .items
+        .iter()
+        .filter(|it| it.kind.starts_with(kind_prefix))
+        .filter_map(|it| it.payload.as_ref()?.get("key")?.as_str().map(str::to_string))
+        .collect()
 }
 
 pub fn pending_count(store: &ReviewStore) -> usize {

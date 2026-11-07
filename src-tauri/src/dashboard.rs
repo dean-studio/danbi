@@ -417,6 +417,8 @@ pub struct BriefingSnapshot {
     /// Newest pending ghost links, capped.
     pub ghost_suggestions: Vec<GhostSuggestion>,
     pub healing: HealingSummary,
+    /// 쉬는 시간 정리가 검토함에 올려 둔 건수 (사용자 승인 대기).
+    pub tidy_pending: usize,
     pub daily: BriefingDaily,
     pub activity: ActivityWindow,
     /// Decisions still in force, most recently touched first — what an
@@ -425,6 +427,14 @@ pub struct BriefingSnapshot {
     /// Set by the MCP layer when the vector index mixes embedding models.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vector_warning: Option<String>,
+    /// Memory health of the scoped project (size, growth, orphans, one
+    /// warning) — so an agent can prefer fixing existing documents over
+    /// adding new ones when the project is swelling. Project scope only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<crate::growth::MemoryBrief>,
+    /// Vault-wide scope: projects whose memory is growing fast.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bloating_projects: Vec<String>,
     pub hint: &'static str,
 }
 
@@ -543,16 +553,30 @@ pub fn briefing(vault: &Path, project: Option<&str>) -> DanbiResult<BriefingSnap
             .collect(),
     };
 
+    let (memory, bloating_projects) = match project {
+        Some(p) => (
+            crate::growth::for_project(vault, p)
+                .ok()
+                .flatten()
+                .map(|g| g.brief()),
+            Vec::new(),
+        ),
+        None => (None, crate::growth::bloating_projects(vault)),
+    };
+
     Ok(BriefingSnapshot {
         generated_at,
         project: project.map(str::to_string),
         ghost_total,
         ghost_suggestions,
         healing,
+        tidy_pending: crate::dreaming::pending_count(vault, project),
         daily,
         activity,
         active_decisions: active_decisions(vault, project, BRIEFING_DECISIONS),
         vector_warning: None,
+        memory,
+        bloating_projects,
         hint: "질문은 danbi_context, 문서 전체는 danbi_read, 기록은 danbi_log. active_decisions 는 지금 유효한 결정 — 뒤집을 땐 새 결정에 `대체:: [[옛 결정]]` 을 적으세요",
     })
 }

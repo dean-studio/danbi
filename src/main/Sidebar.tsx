@@ -60,6 +60,8 @@ export function Sidebar({
   onOpenSettings,
   onOpenPalette,
   onOpenGraph,
+  graphOpen = false,
+  onCloseGraph,
   reviewCount,
   onOpenConnect,
   onNewNote,
@@ -92,6 +94,10 @@ export function Sidebar({
    *  2개(+ 메뉴, 알림)로 줄였다. */
   onOpenPalette: () => void;
   onOpenGraph: () => void;
+  /** 그래프가 열려 있으면 내비의 "그래프" 를 선택 상태로. */
+  graphOpen?: boolean;
+  /** 같은 화면을 다시 눌러도(검토함에서 검토함) 그래프는 닫혀야 해서. */
+  onCloseGraph?: () => void;
   /** 검토함 내비 행의 배지 수 (저신뢰 리뷰 pending). */
   reviewCount: number;
   /** 연결 시트 열기 (프로젝트 우클릭 "연결 관리…", 푸터 MCP 점). */
@@ -768,33 +774,45 @@ export function Sidebar({
         <NavRow
           icon={<Sun size={14} />}
           label="오늘"
-          active={view === "home" && !selection.project}
-          onClick={clearSelection}
+          active={!graphOpen && view === "home" && !selection.project}
+          onClick={() => {
+            onCloseGraph?.();
+            clearSelection();
+          }}
         />
         <NavRow
           icon={<ListChecks size={14} />}
           label="할 일"
-          active={view === "todos"}
-          onClick={() => setView("todos")}
+          active={!graphOpen && view === "todos"}
+          onClick={() => {
+            onCloseGraph?.();
+            setView("todos");
+          }}
         />
         <NavRow
           icon={<Inbox size={14} />}
           label="검토함"
           badge={reviewCount}
-          active={view === "review"}
-          onClick={() => setView("review")}
+          active={!graphOpen && view === "review"}
+          onClick={() => {
+            onCloseGraph?.();
+            setView("review");
+          }}
         />
         <NavRow
           icon={<Network size={14} />}
           label="그래프"
-          active={false}
-          onClick={onOpenGraph}
+          active={graphOpen}
+          onClick={graphOpen ? onCloseGraph ?? onOpenGraph : onOpenGraph}
         />
         <NavRow
           icon={<BarChart3 size={14} />}
           label="사용량"
-          active={view === "usage"}
-          onClick={() => setView("usage")}
+          active={!graphOpen && view === "usage"}
+          onClick={() => {
+            onCloseGraph?.();
+            setView("usage");
+          }}
         />
       </nav>
 
@@ -2375,7 +2393,8 @@ function NavRow({
       </span>
       <span className="flex-1 truncate">{label}</span>
       {badge !== undefined && badge > 0 && (
-        <span className="rounded-full bg-surface-card px-1.5 font-mono text-[10px] leading-[16px] text-on-dark-mute">
+        // 처리할 게 남았다는 신호라 눈에 띄게 — 흰 칩(라이트 모드에선 반전).
+        <span className="min-w-[18px] rounded-full bg-primary px-1.5 text-center font-mono text-[10px] font-semibold leading-[16px] text-on-primary">
           {badge > 99 ? "99+" : badge}
         </span>
       )}

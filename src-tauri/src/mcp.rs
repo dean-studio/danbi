@@ -726,31 +726,29 @@ fn catalog_for_project(scope: ToolScope, scoped_project: Option<&str>) -> Vec<Va
 
 /// `initialize.instructions` — Claude Code and Codex put this string into
 /// the system context, so the agent knows how to use the vault even when
-/// no SKILL.md is installed. Kept to a handful of lines.
+/// no SKILL.md is installed. Purpose + tool names only — usage details live
+/// in each tool's description, since long injected rules lower instruction
+/// following.
 fn server_instructions(scope: ToolScope, scoped_project: Option<&str>) -> String {
     let mut lines = vec![
-        "단비 vault 는 프로젝트의 외부 장기 기억 — 결정·버그 원인·TODO 가 세션을 넘어 누적됩니다. 일반론 대신 vault 의 맥락으로 답하세요.".to_string(),
+        "단비 vault 는 프로젝트의 장기 기억 — 다음 세션이 일을 이어받는 데 필요한 것(결정의 이유·버그 원인·진행 상황·다음 할 일)을 남기고 찾는 곳입니다. 언제 무엇을 읽고 쓸지는 판단에 맡깁니다.".to_string(),
     ];
     let read = scope != ToolScope::WriteOnly;
     let write = scope != ToolScope::ReadOnly;
     if read {
         lines.push(match scoped_project {
-            Some(p) => format!("새 세션: danbi_briefing 먼저 (project 생략 시 {p}). 질문 전: danbi_context(query) 로 관련 섹션부터, 문서 전체는 danbi_read (heading·max_chars 로 부분 읽기)."),
-            None => "새 세션: danbi_briefing(project) 먼저. 질문 전: danbi_context(query) 로 관련 섹션부터, 문서 전체는 danbi_read (heading·max_chars 로 부분 읽기).".to_string(),
+            Some(p) => format!("읽기: danbi_briefing 먼저 (project 생략 시 {p}) 로 직전 맥락, 답하기 전 danbi_context(query) 로 이미 정한 것을 확인. 나머지 읽기 도구는 도구 설명 참고."),
+            None => "읽기: danbi_briefing(project) 먼저로 직전 맥락, 답하기 전 danbi_context(query) 로 이미 정한 것을 확인. 나머지 읽기 도구는 도구 설명 참고.".to_string(),
         });
-        if let Some(last) = lines.last_mut() {
-            last.push_str(" '지금 유효한 결정'·'같은 원인의 버그'·'이 결정에 영향받는 곳' 은 danbi_query(type/status/relation/target).");
-        }
     } else {
         lines.push("읽기 도구(briefing·context·read·search)는 읽기 연결 /mcp/read 에 있습니다.".to_string());
     }
     if write {
-        lines.push(match scoped_project {
-            Some(p) => format!("기록: 결정·버그 원인·TODO 는 즉시 danbi_log(content) — 자동으로 {p} 의 오늘 daily 에 `_시각 · 호출자_` 줄과 함께 들어갑니다. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결."),
-            None => "기록: 결정·버그 원인·TODO 는 즉시 danbi_log(project, content) — 오늘 daily 에 `_시각 · 호출자_` 줄과 함께. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결.".to_string(),
-        });
-        lines.push("특정 문서 갱신은 danbi_append(누적) · danbi_replace_section(섹션 교체) · danbi_upsert_item(리스트 항목). 같은 내용을 두 번 보내지 말 것 — 응답에 deduped:true 또는 warning 이 오면 이미 저장된 것이니 재시도 금지.".to_string());
-        lines.push("관계는 링크 줄에 이름을 붙여 적으세요: `원인:: [[notes/x.md]]` · `영향:: [[release.md]]` · `대체:: [[decisions/old.md]]`. 단어 목록은 danbi_schema, 문서 종류·상태는 danbi_set_meta, 지난 문서의 관계 정리는 danbi_propose_link(사용자 승인 후 기록).".to_string());
+        let log = match scoped_project {
+            Some(p) => format!("danbi_log(content) 는 {p} 의 오늘 daily 에"),
+            None => "danbi_log(project, content) 는 오늘 daily 에".to_string(),
+        };
+        lines.push(format!("쓰기: {log}, 주제 문서는 danbi_append·danbi_replace_section·danbi_upsert_item. 많이보다 정확하게 — 틀린 기록은 고치거나 새 기록에 `대체:: [[옛 문서.md]]` 로 뒤집으세요. 관련 문서는 [[파일.md]] 로 잇고 관계 이름(원인::·영향:: 등)은 danbi_schema. 마칠 땐 danbi_log 의 next_step 에 다음 할 일 한 줄, 그리고 danbi_tidy 로 정리 거리를 보고 확실한 것만 danbi_tidy_apply."));
     } else {
         lines.push("기록(danbi_log 등)은 프로젝트별 쓰기 연결 /mcp/<project-id>/write 에서 하세요.".to_string());
     }
@@ -1233,6 +1231,36 @@ fn tool_catalog() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "danbi_tidy",
+            "description": "이 프로젝트 기억의 정리 거리(깨진 [[링크]] · daily 에 묻힌 결정 · 기한 지난 문서)를 봅니다. 단비가 쉬는 시간에 찾아 검토함에 올려 둔 것으로, 항목마다 id·내용·고를 수 있는 선택지가 붙어 있어요. 작업을 마칠 때 한 번 보고, 확실한 것만 danbi_tidy_apply 로 처리하세요. 애매한 건 그대로 두면 사람이 검토함에서 고릅니다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "scan": { "type": "boolean", "default": false, "description": "true 면 이 프로젝트를 지금 다시 훑어 새 정리 거리를 올린 뒤 보여줌" }
+                },
+                "required": ["project"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "danbi_tidy_apply",
+            "description": "danbi_tidy 의 항목 하나를 처리합니다. 파일을 고치고 git 커밋(되돌릴 수 있음)을 남기며, 에이전트가 정리했다고 기록돼요. choice: relink(target) · remove · apply_all · promote(title?, target?) · verify(evidence) · supersede(evidence). verify·supersede 는 코드나 문서로 실제 확인한 근거를 evidence 에 적어야 하고, 확인할 수 없으면 부르지 말고 사람에게 남기세요. '그대로 두기' 는 에이전트가 고르지 않습니다.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string" },
+                    "id": { "type": "string", "description": "danbi_tidy 가 준 항목 id" },
+                    "choice": { "type": "string", "enum": ["relink", "remove", "apply_all", "promote", "verify", "supersede"] },
+                    "target": { "type": "string", "description": "relink: 새 링크 대상 (예: notes/x.md) · promote: 만들 문서 경로(선택)" },
+                    "title": { "type": "string", "description": "promote: 주제 문서 제목(선택)" },
+                    "evidence": { "type": "string", "description": "왜 이렇게 골랐는지 한 줄 — verify·supersede 는 필수. 커밋 메시지에 남음" }
+                },
+                "required": ["project", "id", "choice"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "danbi_recent",
             "description": "최근 수정된 문서 목록 (기본 10개, 하위 폴더 포함). daily 노트는 기본 제외.",
             "inputSchema": {
@@ -1631,7 +1659,8 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
     let vault_path = vault_path.to_path_buf();
     // One writer at a time across MCP, REST and the popover: the read →
     // edit → write → commit sequence below must not interleave.
-    let _write_guard = is_write_tool(name).then(vcs::write_guard);
+    // danbi_tidy_apply 는 dreaming::execute 가 같은 잠금을 직접 잡는다 (재진입 불가).
+    let _write_guard = (is_write_tool(name) && name != "danbi_tidy_apply").then(vcs::write_guard);
     let client = client_of(&args);
 
     match name {
@@ -1819,6 +1848,59 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 commit,
                 warning,
             ))
+        }
+        "danbi_tidy" => {
+            let project = string_arg(&args, "project")?;
+            require_project(&vault_path, &project)?;
+            let scan = bool_arg(&args, "scan", false);
+            let out = crate::dreaming::agent_tidy_list(&vault_path, &project, scan)?;
+            Ok(serde_json::to_string_pretty(&out)?)
+        }
+        "danbi_tidy_apply" => {
+            let project = string_arg(&args, "project")?;
+            require_project(&vault_path, &project)?;
+            let id = string_arg(&args, "id")?;
+            // 쓰기 연결은 자기 프로젝트 항목만 — 다른 프로젝트 id 를 넘겨도 막는다.
+            let store = crate::reviews::load(&vault_path)?;
+            match crate::reviews::find(&store, &id) {
+                Some(it) if it.project.as_deref() == Some(project.as_str()) => {}
+                Some(_) => return Err(DanbiError::Config(format!("이 항목은 {project} 의 정리 거리가 아니에요."))),
+                None => return Err(DanbiError::Config(format!("정리 항목을 찾을 수 없어요: {id} — danbi_tidy 로 다시 보세요."))),
+            }
+            let choice_name = string_arg(&args, "choice")?;
+            let target = opt_string_arg(&args, "target");
+            let title = opt_string_arg(&args, "title");
+            let choice = match choice_name.as_str() {
+                "relink" => crate::dreaming::Choice::Relink {
+                    target: target.ok_or_else(|| DanbiError::Config("relink 에는 target 이 필요해요.".into()))?,
+                },
+                "remove" => crate::dreaming::Choice::Remove,
+                "apply_all" => crate::dreaming::Choice::ApplyAll,
+                "promote" => crate::dreaming::Choice::Promote { title, target },
+                "verify" => crate::dreaming::Choice::Verify,
+                "supersede" => crate::dreaming::Choice::Supersede,
+                "keep" => crate::dreaming::Choice::Keep,
+                other => return Err(DanbiError::Config(format!("모르는 choice: {other}"))),
+            };
+            let actor = crate::dreaming::Actor::Agent {
+                client: client.clone(),
+                note: opt_string_arg(&args, "evidence"),
+            };
+            let res = crate::dreaming::apply_as(&vault_path, &id, choice, &actor)?;
+            if !res.changed.is_empty() {
+                let _ = crate::journal::append_log(
+                    &vault_path,
+                    &format!("**dreaming · {client}** {} · {}", res.message, res.changed.join(", ")),
+                );
+            }
+            Ok(serde_json::to_string_pretty(&json!({
+                "project": project,
+                "id": id,
+                "message": res.message,
+                "changed": res.changed,
+                "commit": res.commit,
+                "left": crate::dreaming::pending_count(&vault_path, Some(&project)),
+            }))?)
         }
         "danbi_propose_link" => {
             let project = string_arg(&args, "project")?;
@@ -2219,7 +2301,7 @@ pub(crate) fn is_write_tool(name: &str) -> bool {
     WRITE_TOOLS.contains(&name)
 }
 
-pub(crate) const WRITE_TOOLS: [&str; 8] = [
+pub(crate) const WRITE_TOOLS: [&str; 10] = [
     "danbi_log",
     "danbi_append",
     "danbi_create_folder",
@@ -2228,6 +2310,8 @@ pub(crate) const WRITE_TOOLS: [&str; 8] = [
     "danbi_upsert_item",
     "danbi_set_meta",
     "danbi_propose_link",
+    "danbi_tidy",
+    "danbi_tidy_apply",
 ];
 
 /// Snapshot of a write-tool invocation that we'll need *after* dispatch
@@ -2560,6 +2644,19 @@ fn read_doc_tool(
 ) -> Result<String, DanbiError> {
     require_project(vault_path, project)?;
     let domain_norm = normalize_md(domain);
+    // Same loose matching as `[[links]]`: `x.md` reads `notes/x.md` when
+    // that is the only x.md in the project.
+    let domain_norm = match crate::links::resolve_doc(vault_path, project, None, &domain_norm) {
+        Ok(crate::links::Resolution::Found(d)) => d,
+        Ok(crate::links::Resolution::Ambiguous(c)) => {
+            return Err(DanbiError::Config(format!(
+                "{project}/{domain_norm}: 같은 이름의 문서가 {}개예요 — 경로까지 적어주세요: {}",
+                c.len(),
+                c.join(" / ")
+            )))
+        }
+        _ => domain_norm,
+    };
     let Some((md, meta)) = vault::read_doc_opt(vault_path, project, &domain_norm)? else {
         return Err(doc_not_found_error(vault_path, project, &domain_norm));
     };
@@ -3496,6 +3593,19 @@ mod read_tests {
     }
 
     #[test]
+    fn read_resolves_loose_domain_and_refuses_ambiguous() {
+        let v = temp_vault("read-resolve");
+        write(&v, "보니", "notes/auth.md", "# 인증\n본문");
+        let out = dispatch_in(&v, "danbi_read", json!({ "project": "보니", "domain": "auth" })).unwrap();
+        assert!(out.contains("본문"), "{out}");
+        write(&v, "보니", "decisions/auth.md", "# 결정");
+        let err = dispatch_in(&v, "danbi_read", json!({ "project": "보니", "domain": "auth.md" })).unwrap_err();
+        assert!(err.to_string().contains("같은 이름의 문서가 2개"), "{err}");
+        assert!(dispatch_in(&v, "danbi_read", json!({ "project": "보니", "domain": "nope.md" })).is_err());
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
     fn set_meta_writes_frontmatter_and_rejects_unknown_values() {
         let v = ontology_vault();
         let out: Value = serde_json::from_str(
@@ -3544,6 +3654,46 @@ mod read_tests {
             args.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
             assert!(dispatch_in(&v, "danbi_set_meta", args).is_err());
         }
+        std::fs::remove_dir_all(v).ok();
+    }
+
+    #[test]
+    fn tidy_lists_and_applies_only_this_projects_items_as_the_agent() {
+        let v = temp_vault("tidy");
+        write(&v, "P", "notes/demo-script.md", "# 데모\n");
+        write(&v, "P", "a.md", "[[notes/demo-scrpt.md]]\n");
+        write(&v, "Q", "b.md", "[[nowhere.md]]\n");
+        crate::vcs::ensure_repo(&v).unwrap();
+        let _ = crate::vcs::snapshot(&v, "init");
+        let out: Value = serde_json::from_str(&dispatch_in(&v, "danbi_tidy", json!({ "project": "P", "scan": true })).unwrap()).unwrap();
+        assert_eq!(out["pending"], 1, "{out}");
+        let item = &out["items"][0];
+        assert_eq!(item["item"]["candidates"][0]["target"], "notes/demo-script.md");
+        let id = item["id"].as_str().unwrap().to_string();
+
+        // Q 의 항목을 P 연결로 처리할 수 없다.
+        let q: Value = serde_json::from_str(&dispatch_in(&v, "danbi_tidy", json!({ "project": "Q", "scan": true })).unwrap()).unwrap();
+        let qid = q["items"][0]["id"].as_str().unwrap().to_string();
+        let e = dispatch_in(&v, "danbi_tidy_apply", json!({ "project": "P", "id": qid, "choice": "remove" })).unwrap_err().to_string();
+        assert!(e.contains("P 의 정리 거리가 아니에요"), "{e}");
+        // 에이전트는 그대로 두기를 못 고른다.
+        let e = dispatch_in(&v, "danbi_tidy_apply", json!({ "project": "P", "id": id, "choice": "keep" })).unwrap_err().to_string();
+        assert!(e.contains("그대로 두기"), "{e}");
+        // relink — 잠금 재진입 없이 끝나고, 에이전트 이름으로 커밋.
+        let r: Value = serde_json::from_str(&dispatch_in(&v, "danbi_tidy_apply", json!({
+            "project": "P", "id": id, "choice": "relink", "target": "notes/demo-script.md",
+            "evidence": "오타", "_client": "claude_code"
+        })).unwrap()).unwrap();
+        assert_eq!(r["changed"][0], "a.md", "{r}");
+        assert_eq!(r["left"], 0);
+        assert_eq!(std::fs::read_to_string(v.join("Projects/P/a.md")).unwrap(), "[[notes/demo-script.md]]\n");
+        let c = &crate::vcs::recent_commits(&v, 5).unwrap()[0];
+        assert!(c.summary.contains("dreaming fix-link") && c.summary.contains("[claude-code]"), "{}", c.summary);
+        assert!(std::fs::read_to_string(v.join("log.md")).unwrap_or_default().contains("dreaming · claude-code"));
+        // 쓰기 연결의 도구 목록에 들어 있고, 읽기 연결엔 없다.
+        let names = |scope| catalog_for_project(scope, Some("P")).iter().map(|t| t["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert!(names(ToolScope::WriteOnly).contains(&"danbi_tidy_apply".to_string()));
+        assert!(!names(ToolScope::ReadOnly).contains(&"danbi_tidy".to_string()));
         std::fs::remove_dir_all(v).ok();
     }
 

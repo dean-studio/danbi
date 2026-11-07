@@ -7,6 +7,7 @@ import {
 } from "@/lib/ipc";
 import { ActivityFeed, clientLabel, type ActivityStats } from "@/main/ActivityFeed";
 import { useMcpSummary } from "@/main/ConnectSheet";
+import { GrowingProjectsCard } from "@/main/MemoryHealthCard";
 import { ReviewMini } from "@/main/ReviewMini";
 import { TimeSplitCard } from "@/main/TimeSplitCard";
 import { Keycap } from "@/main/ShortcutsHelp";
@@ -25,6 +26,7 @@ export const FOCUS_MEMO_EVENT = "danbi:focus-memo";
 export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
   const tree = useApp((s) => s.tree);
   const selectDomain = useApp((s) => s.selectDomain);
+  const selectProject = useApp((s) => s.selectProject);
   const setView = useApp((s) => s.setView);
   const openConnectSheet = useApp((s) => s.openConnectSheet);
 
@@ -132,6 +134,7 @@ export function Home({ onOpenShortcuts }: { onOpenShortcuts?: () => void }) {
                     onCount={setReviewCount}
                   />
                   <TimeSplitCard />
+                  <GrowingProjectsCard onOpen={selectProject} />
                   <PastTodayCard onOpen={selectDomain} />
                   <AgentsCard
                     stats={stats}

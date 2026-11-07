@@ -203,6 +203,7 @@ fn build_debouncer(
     path: &Path,
     app: AppHandle,
     scheduler: BackupScheduler,
+    dream_scheduler: BackupScheduler,
 ) -> DanbiResult<Debouncer<notify::RecommendedWatcher, RecommendedCache>> {
     let watch_path = path.to_path_buf();
     let sched_for_events = scheduler.clone();
@@ -268,6 +269,14 @@ fn build_debouncer(
                             sched_for_events
                                 .schedule(Duration::from_millis(cfg.backup.debounce_ms));
                         }
+                        // 쉬는 시간 정리: 마크다운이 바뀔 때마다 "조용해진
+                        // 뒤 N분" 마감을 뒤로 민다. 워커가 마감이 지나면
+                        // 한 바퀴 돈다 (spawn_backup_worker).
+                        if cfg.dreaming.enabled && !md_paths.is_empty() {
+                            dream_scheduler.schedule(Duration::from_secs(
+                                cfg.dreaming.idle_minutes.max(1) * 60,
+                            ));
+                        }
                     }
                 }
             }
@@ -288,6 +297,8 @@ fn build_debouncer(
 fn spawn_backup_worker(
     vault_path: PathBuf,
     scheduler: BackupScheduler,
+    dream_scheduler: BackupScheduler,
+    app: AppHandle,
     stop: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
@@ -297,6 +308,9 @@ fn spawn_backup_worker(
             // prevents thread accumulation across stop/restart cycles.
             if stop.load(Ordering::Relaxed) {
                 return;
+            }
+            if dream_scheduler.take_due() {
+                run_dreaming_pass(&vault_path, &app);
             }
             if !scheduler.take_due() {
                 continue;
@@ -332,6 +346,30 @@ fn spawn_backup_worker(
     });
 }
 
+/// 유휴 정리 한 바퀴 — 이 워커 스레드에서 돈다 (메인 스레드 아님). 설정을
+/// 매번 다시 읽어 Settings 에서 끈 게 바로 반영된다. 올라간 게 있으면
+/// 검토함 배지가 듣는 이벤트를 쏜다.
+fn run_dreaming_pass(vault_path: &Path, app: &AppHandle) {
+    let Ok(Some(cfg)) = config::load_config(vault_path) else {
+        return;
+    };
+    if !cfg.dreaming.enabled {
+        return;
+    }
+    match crate::commands::run_dreaming(vault_path, &cfg, false) {
+        Ok(report) => {
+            if report.enqueued > 0 {
+                let _ = app.emit(crate::reviews::REVIEWS_CHANGED_EVENT, ());
+            }
+        }
+        Err(e) => eprintln!("[dreaming] pass failed: {e}"),
+    }
+}
+
+/// 앱 시작 뒤 첫 정리까지 기다리는 시간. 바로 돌면 시작 직후의 색인·
+/// 워밍업과 겹친다.
+const DREAM_INITIAL_DELAY_SECS: u64 = 180;
+
 /// Start (or restart) watching the given vault directory. Only one watcher runs at a time.
 pub fn start(app: &AppHandle, path: &Path) -> DanbiResult<()> {
     let state = app.state::<WatcherState>();
@@ -346,9 +384,17 @@ pub fn start(app: &AppHandle, path: &Path) -> DanbiResult<()> {
     slot.take();
 
     let scheduler = BackupScheduler::new();
-    let debouncer = build_debouncer(path, app.clone(), scheduler.clone())?;
+    let dream_scheduler = BackupScheduler::new();
+    let debouncer = build_debouncer(path, app.clone(), scheduler.clone(), dream_scheduler.clone())?;
     let stop = Arc::new(AtomicBool::new(false));
-    spawn_backup_worker(path.to_path_buf(), scheduler, stop.clone());
+    // 시작 뒤 한 번 — 지난 세션에서 바뀐 채 정리되지 않은 프로젝트를 본다.
+    // 바뀐 게 없으면 지문만 비교하고 끝나 가볍다.
+    if let Ok(Some(cfg)) = config::load_config(path) {
+        if cfg.dreaming.enabled {
+            dream_scheduler.schedule(Duration::from_secs(DREAM_INITIAL_DELAY_SECS));
+        }
+    }
+    spawn_backup_worker(path.to_path_buf(), scheduler, dream_scheduler, app.clone(), stop.clone());
     *slot = Some(WatcherHandle {
         path: path.to_path_buf(),
         _debouncer: debouncer,

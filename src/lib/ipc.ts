@@ -108,8 +108,72 @@ export type ReviewItem = {
   status: ReviewStatus;
   created_at: number;
   resolved_at: number | null;
+  /** `dream_*` 항목의 실행 정보 (+ `key`). 다른 종류는 없음. */
+  payload?: (DreamAction & { key: string }) | null;
 };
 export type ReviewStore = { items: ReviewItem[] };
+
+// ---- 쉬는 시간 정리 (dreaming) ----
+export type DreamLinkOption = { target: string; confidence: number; why: string };
+export type DreamBatchFix = { key: string; broken: string; target: string; sources: string[]; why: string };
+export type DreamAction =
+  | { kind: "fix_link"; broken: string; sources: string[]; options: DreamLinkOption[]; ambiguous?: boolean }
+  | { kind: "fix_link_batch"; items: DreamBatchFix[] }
+  | { kind: "stale"; domain: string; stale_after: string }
+  | { kind: "cites_superseded"; source: string; target: string; replacement?: string | null }
+  | { kind: "promote"; daily: string; heading: string; title: string; target: string; doc_type: string };
+/** 검토함에서 고른 선택지 — 백엔드 `dreaming::Choice` 와 1:1. */
+export type DreamChoice =
+  | { choice: "relink"; target: string }
+  | { choice: "remove" }
+  | { choice: "apply_all" }
+  | { choice: "keep" }
+  | { choice: "verify" }
+  | { choice: "supersede" }
+  | { choice: "promote"; title?: string | null; target?: string | null };
+export type DreamStatus = {
+  last_run_at: number | null;
+  last_message: string | null;
+  pending: number;
+};
+export type DreamReport = {
+  scanned_projects: number;
+  skipped_projects: number;
+  found: number;
+  enqueued: number;
+  pending_total: number;
+  message: string;
+  ran_at: number;
+  /** `auto_fix_links` 로 바로 고친 확실한 링크. */
+  auto_fixed?: { project: string; message: string; changed: string[]; commit?: string | null }[];
+};
+export type DreamBulkResult = {
+  ok: number;
+  failed: { id: string; error: string }[];
+  changed: string[];
+  commit?: string | null;
+  message: string;
+};
+export type DreamApplyResult = {
+  changed: string[];
+  commit?: string | null;
+  message: string;
+};
+export type DreamingConfig = {
+  enabled: boolean;
+  use_llm: boolean;
+  idle_minutes: number;
+  max_per_run: number;
+  /** 확실한 링크 수리는 검토함 없이 바로 (단비 이름으로 커밋). 기본 켬. */
+  auto_fix_links?: boolean;
+};
+export const DEFAULT_DREAMING: DreamingConfig = {
+  enabled: true,
+  use_llm: false,
+  idle_minutes: 20,
+  max_per_run: 8,
+  auto_fix_links: true,
+};
 
 // ---- Project context (Karpathy-style purpose.md + schema.md) ----
 export type ProjectContextStatus = {
@@ -253,6 +317,8 @@ export type DanbiConfig = {
   capture: CaptureState;
   mcp: McpConfig;
   backup: BackupConfig;
+  /** 쉬는 시간 정리. 옛 config 엔 없을 수 있어 optional. */
+  dreaming?: DreamingConfig;
   usage?: {
     mcp_tracking: boolean;
     mcp_retention_days: number;
@@ -1540,6 +1606,11 @@ export const ipc = {
 
   projectActivityOverview: (days = 30) =>
     invoke<ActivityOverview>("project_activity_overview", { days }),
+  /** 프로젝트 기록 건강(크기·고아·7/30일 증가·신호). 없는 프로젝트면 null. */
+  projectGrowth: (project: string) =>
+    invoke<ProjectGrowth | null>("project_growth", { project }),
+  /** 전체 프로젝트, 불어나는 것부터. */
+  growthOverview: () => invoke<ProjectGrowth[]>("growth_overview"),
   openProjectInMain: (project: string) =>
     invoke<void>("open_project_in_main", { project }),
   quitApp: () => invoke<void>("quit_app"),
@@ -1610,6 +1681,13 @@ export const ipc = {
   reviewsList: () => invoke<ReviewStore>("reviews_list"),
   reviewsResolve: (id: string, status: ReviewStatus) =>
     invoke<ReviewStore>("reviews_resolve", { id, status }),
+  dreamStatus: () => invoke<DreamStatus>("dream_status"),
+  dreamRunNow: () => invoke<DreamReport>("dream_run_now"),
+  dreamApply: (id: string, choice: DreamChoice) =>
+    invoke<DreamApplyResult>("dream_apply", { id, choice }),
+  /** 여러 정리 항목을 커밋 하나로 (검토함 "추천대로 적용"). */
+  dreamApplyMany: (picks: { id: string; choice: DreamChoice }[]) =>
+    invoke<DreamBulkResult>("dream_apply_many", { picks }),
   vectorStats: () => invoke<VectorIndexStats>("vector_stats"),
   vectorReindex: (modelId?: string, batchSize?: number) =>
     invoke<VectorReindexReport>("vector_reindex", {
@@ -1756,6 +1834,60 @@ export type ActivityOverview = {
   total_mcp_calls: number;
   total_mcp_tokens: number;
   by_project: ProjectActivity[];
+};
+
+// ---- 기록 비대화 감시 (growth.rs) ----
+
+export type GrowthActorSplit = { human: number; agent: number; danbi: number };
+
+export type GrowthWindow = {
+  days: number;
+  docs_added: number;
+  docs_removed: number;
+  /** 순증 바이트 (정리하면 음수) */
+  bytes_added: number;
+  /** bytes_added × 이 프로젝트의 글자/바이트 비율 */
+  chars_added: number;
+  /** 이 기간의 기록(커밋) 수 — 사람 / 에이전트 / 단비 */
+  writes: GrowthActorSplit;
+  /** git = 트리 diff + 커밋 토큰, mtime = 파일 생성 시각만(기록자 모름) */
+  source: "git" | "mtime";
+};
+
+export type GrowthSignal = {
+  code:
+    | "fast_growth"
+    | "huge"
+    | "agent_heavy"
+    | "orphans"
+    | "daily_heavy"
+    | "oversized"
+    | "duplicates";
+  level: "bloating" | "watch";
+  message: string;
+  action: string;
+};
+
+export type ProjectGrowth = {
+  project: string;
+  docs: number;
+  daily_docs: number;
+  bytes: number;
+  chars: number;
+  daily_bytes: number;
+  /** 0..1 */
+  daily_share: number;
+  orphan_candidates: number;
+  orphans: number;
+  /** 0..1 (후보가 없으면 0) */
+  orphan_ratio: number;
+  week: GrowthWindow;
+  month: GrowthWindow;
+  largest: { domain: string; bytes: number; chars: number }[];
+  duplicates: { preview: string; count: number; docs: string[] }[];
+  level: "ok" | "watch" | "bloating";
+  signals: GrowthSignal[];
+  computed_at: number;
 };
 
 export type QuickCaptureResult =

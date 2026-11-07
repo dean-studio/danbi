@@ -25,7 +25,7 @@ import { GraphView } from "@/main/GraphView";
 import { OntologyView } from "@/main/OntologyView";
 import { FOCUS_MEMO_EVENT, Home } from "@/main/Home";
 import { ProjectHome } from "@/main/ProjectHome";
-import { ReviewView } from "@/main/ReviewView";
+import { ReviewView, useReviewRows } from "@/main/ReviewView";
 import { Settings } from "@/main/Settings";
 import { ShortcutsHelp } from "@/main/ShortcutsHelp";
 import { TodoView } from "@/main/TodoView";
@@ -34,7 +34,6 @@ import { UsageView } from "@/main/UsageView";
 import { Sidebar, markVaultAllRead } from "@/main/Sidebar";
 import {
   ipc,
-  onReviewsChanged,
   onVaultChanged,
   type VaultChangedPayload,
   type VaultTemplate,
@@ -86,6 +85,14 @@ export function Workspace() {
   const [paletteMode, setPaletteMode] = useState<PaletteMode>("mixed");
   const [graphOpen, setGraphOpen] = useState(false);
   const [graphProject, setGraphProject] = useState<string | null>(null);
+  // 사이드바·팔레트로 다른 화면이나 문서를 고르면 그래프는 닫힌다.
+  useEffect(
+    () =>
+      useApp.subscribe((s, prev) => {
+        if (s.view !== prev.view || s.selection !== prev.selection) setGraphOpen(false);
+      }),
+    [],
+  );
   // 온톨로지 표 오버레이 — 프로젝트 이름이 있으면 열림.
   const [ontologyProject, setOntologyProject] = useState<string | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
@@ -132,34 +139,11 @@ export function Workspace() {
     }
   }, []);
 
-  // 리뷰 배지 — 백엔드가 항목을 넣을 때 `reviews:changed` 를 쏜다
-  // (`.danbi/` 는 워처 대상이 아니라 vault:changed 로는 못 받음). 15초
-  // 폴링 대신 시작 시 한 번 + 이벤트.
-  useEffect(() => {
-    let active = true;
-    let unlisten: UnlistenFn | null = null;
-    async function pull() {
-      try {
-        const s = await ipc.reviewsList();
-        if (active) {
-          setReviewCount(
-            s.items.filter((it) => it.status === "pending").length,
-          );
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-    pull();
-    onReviewsChanged(pull).then((fn) => {
-      if (active) unlisten = fn;
-      else fn();
-    });
-    return () => {
-      active = false;
-      if (unlisten) unlisten();
-    };
-  }, []);
+  // 리뷰 배지 — 검토함 화면과 같은 큐(useReviewRows)에서 "손이 필요한 것" 만
+  // 센다. 백엔드 `reviews:changed`·vault 변경·같은 창의 처리
+  // (notifyReviewsChanged) 마다 다시 세서 승인·무시하면 바로 줄어든다.
+  const { actionable: reviewBadge } = useReviewRows(null);
+  useEffect(() => setReviewCount(reviewBadge), [reviewBadge]);
 
   // Native "About Danbi" menu fires this event (see src-tauri/src/lib.rs).
   // We surface our own dialog so dev builds and bundled builds look alike,
@@ -845,6 +829,8 @@ export function Workspace() {
             setGraphProject(null);
             setGraphOpen(true);
           }}
+          graphOpen={graphOpen}
+          onCloseGraph={() => setGraphOpen(false)}
           reviewCount={reviewCount}
           onOpenConnect={openConnectSheet}
           onNewNote={newNote}
@@ -905,7 +891,14 @@ export function Workspace() {
         />
         </div>
         <div className="flex flex-1 min-w-0 flex-col">
-          <div className="flex-1 min-h-0 flex flex-col">
+          <div className="relative flex-1 min-h-0 flex flex-col">
+            {/* 그래프는 메인 영역 위에 겹친다 — 사이드바는 그대로라 다른 화면처럼
+                사이드바에서 나가고, 아래 화면 상태도 유지된다. */}
+            <GraphView
+              open={graphOpen}
+              initialProject={graphProject}
+              onClose={() => setGraphOpen(false)}
+            />
             {view === "review" ? (
               <ReviewView
                 project={selection.project}
@@ -1290,11 +1283,6 @@ export function Workspace() {
         }}
       />
 
-      <GraphView
-        open={graphOpen}
-        initialProject={graphProject}
-        onClose={() => setGraphOpen(false)}
-      />
 
       <OntologyView
         project={ontologyProject}

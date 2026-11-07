@@ -24,6 +24,7 @@ import {
 } from "@/lib/ipc";
 import { ActivityFeed } from "@/main/ActivityFeed";
 import { ConnectStatusBand } from "@/main/ConnectSheet";
+import { MemoryHealthCard } from "@/main/MemoryHealthCard";
 import { ReviewMini } from "@/main/ReviewMini";
 import { ResumeCard } from "@/main/ResumeCard";
 import { projectIconOf } from "@/components/ProjectIconPicker";
@@ -120,6 +121,10 @@ export function ProjectHome({
                 max={3}
                 onOpenDoc={selectDomain}
                 onOpenAll={() => setView("review")}
+              />
+              <MemoryHealthCard
+                project={project}
+                onOpenDoc={(d) => selectDomain(project, d)}
               />
             </div>
           </div>

@@ -50,3 +50,4 @@ git2 = { version = "0.20", default-features = false, features = ["vendored-libgi
 chrono = { version = "0.4", features = ["serde"] }
 filetime = "0.2"
 tiktoken-rs = "0.6"
+unicode-normalization = "0.1"

@@ -9,6 +9,7 @@ mod config;
 mod crash_queue;
 mod daily;
 mod dashboard;
+mod dreaming;
 mod briefing;
 mod cache;
 mod edit_ops;
@@ -17,6 +18,7 @@ mod ghost_links;
 mod goals;
 mod graph;
 mod grounding;
+mod growth;
 mod healing;
 mod ingest;
 mod journal;
@@ -493,6 +495,10 @@ pub fn run() {
             commands::cache_clear,
             commands::reviews_list,
             commands::reviews_resolve,
+            commands::dream_status,
+            commands::dream_run_now,
+            commands::dream_apply,
+            commands::dream_apply_many,
             commands::vector_stats,
             commands::vector_reindex,
             commands::vector_reindex_project,
@@ -610,6 +616,8 @@ pub fn run() {
             commands::danbi_log_quick,
             commands::summarize_weekly,
             commands::project_activity_overview,
+            commands::project_growth,
+            commands::growth_overview,
             commands::open_project_in_main,
             commands::quit_app,
         ])
