@@ -58,16 +58,11 @@ pub fn scan(vault: &Path) -> DanbiResult<Vec<Suggestion>> {
     let mut out: Vec<Suggestion> = Vec::new();
     let tree = list_tree(vault)?;
     let index = build_index(vault)?;
-    let existing: std::collections::HashSet<String> = tree
-        .projects
-        .iter()
-        .flat_map(|p| {
-            p.domains
-                .iter()
-                .chain(p.subfolders.iter().flat_map(|s| s.domains.iter()))
-                .map(move |d| format!("{}/{}", p.name, d.name))
-        })
-        .collect();
+    // 트리는 하위 폴더를 두 단계까지만 담고, 예전엔 그중 한 단계만 모아
+    // `phase/00_INDEX.md` 같은 깊은 문서를 "없는 문서" 로 잘못 올렸다.
+    // 정리(dreaming)처럼 디스크에서 직접 확인한다.
+    let projects_root = vault.join(PROJECTS_DIRNAME);
+    let exists = |target: &str| projects_root.join(target).is_file();
 
     for p in &tree.projects {
         // A project is "empty" only when it has neither top-level files nor
@@ -112,7 +107,7 @@ pub fn scan(vault: &Path) -> DanbiResult<Vec<Suggestion>> {
                     bytes: d.bytes,
                 });
             }
-            ontology_suggestions(&index, &existing, &p.name, &d.name, &key, &mut out);
+            ontology_suggestions(&index, &exists, &p.name, &d.name, &key, &mut out);
         }
     }
     // Filter out suggestions that sit in hidden/dotfiles or the _assets dir.
@@ -124,7 +119,7 @@ pub fn scan(vault: &Path) -> DanbiResult<Vec<Suggestion>> {
 /// rejected or rewritten.
 fn ontology_suggestions(
     index: &crate::links::LinkIndex,
-    existing: &std::collections::HashSet<String>,
+    exists: &dyn Fn(&str) -> bool,
     project: &str,
     domain: &str,
     key: &str,
@@ -157,7 +152,7 @@ fn ontology_suggestions(
     for l in index.outgoing.get(key).into_iter().flatten() {
         let Some(rel) = &l.relation else { continue };
         let target = format!("{}/{}", l.project, l.domain);
-        if !existing.contains(&target) && seen.insert(target.clone()) {
+        if !exists(&target) && seen.insert(target.clone()) {
             out.push(Suggestion::DanglingTypedLink {
                 project: project.into(),
                 domain: domain.into(),
@@ -229,3 +224,4 @@ mod tests {
         assert!(!is_index_like("notes/auth.md"));
     }
 }
+

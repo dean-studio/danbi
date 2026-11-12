@@ -651,6 +651,18 @@ mod tests {
         assert!(!orphans.contains(&"A/notes/cron-pipeline.md".to_string()), "{orphans:?}");
         assert!(!orphans.contains(&"B/docs/spec.md".to_string()));
         assert!(orphans.contains(&"A/notes/auth.md".to_string()));
+        // 관계 링크가 두 단계 아래 폴더의 문서를 가리켜도 "없는 문서" 가 아니다.
+        write(&v, "A/plan/phase/p01.md", "p");
+        write(&v, "A/plan/top.md", "relates_to:: [[plan/phase/p01.md]]\nrelates_to:: [[plan/phase/gone.md]]");
+        let dangling: Vec<String> = crate::healing::scan(&v)
+            .unwrap()
+            .into_iter()
+            .filter_map(|s| match s {
+                crate::healing::Suggestion::DanglingTypedLink { target, .. } => Some(target),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dangling, vec!["A/plan/phase/gone.md".to_string()]);
         // 단건 해석 API.
         assert_eq!(resolve_doc(&v, "A", None, "[[cron-pipeline|별칭]]").unwrap(), Resolution::Found("notes/cron-pipeline.md".into()));
         assert!(matches!(resolve_doc(&v, "A", None, "auth").unwrap(), Resolution::Ambiguous(_)));

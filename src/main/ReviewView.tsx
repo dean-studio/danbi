@@ -113,7 +113,8 @@ export function useReviewRows(project?: string | null): {
   err: string | null;
   counts: Record<Exclude<Filter, "all">, number>;
   pendingTotal: number;
-  /** 손이 필요한 것만(정리·관계 제안·저신뢰·온톨로지) — 사이드바 숫자. 고아·빈/큰 파일 같은 참고용은 뺀다. */
+  /** 손이 필요한 것만(정리·관계 제안·저신뢰) — 사이드바 숫자. 고아·빈/큰 파일·온톨로지처럼
+   *  검토함에서 처리할 버튼이 없는 참고용은 뺀다 (무시해도 다시 켜면 돌아와 숫자가 줄지 않았다). */
   actionable: number;
   actions: {
     open: (row: ReviewRow) => { project: string; domain: string } | null;
@@ -219,6 +220,10 @@ export function useReviewRows(project?: string | null): {
       }
       for (const h of snap.healing) {
         if (project && h.project !== project) continue;
+        // 관계 링크(`relates_to:: [[…]]`)가 없는 문서를 가리키는 것은 정리(dreaming)의
+        // 깨진 링크 항목이 고칠 선택지와 함께 올린다 — 여기서 또 올리면 같은 링크가
+        // 두 번, 그것도 버튼 없이 쌓인다.
+        if (h.kind === "DanglingTypedLink") continue;
         const row = healingRow(h, mtimeOf);
         if (!row) continue;
         if (row.filter === "orphan" && excluded.has(`${row.project}/${row.domain}`))
@@ -359,7 +364,7 @@ export function useReviewRows(project?: string | null): {
     err,
     counts,
     pendingTotal: rows.length,
-    actionable: rows.filter((r) => r.filter === "dream" || r.filter === "ghost" || r.filter === "review" || r.filter === "ontology").length,
+    actionable: rows.filter((r) => r.filter === "dream" || r.filter === "ghost" || r.filter === "review").length,
     actions: { open, approve, dismiss, choose, reload: load, persistExcluded },
   };
 }
@@ -384,13 +389,12 @@ export function ReviewView({
     () => rows.map((r) => ({ r, rec: recommendationOf(r) })).filter((x): x is { r: Row; rec: Recommendation } => x.rec !== null),
     [rows],
   );
-  const [bulk, setBulk] = useState<
-    | { phase: "idle" }
-    | { phase: "confirm" }
-    | { phase: "running"; done: number; total: number }
-    | { phase: "done"; ok: number; failed: number }
-    | { phase: "finding" }
-  >({ phase: "idle" });
+  // 추천이 없는 정리 항목(비슷한 문서가 없는 깨진 링크 등) — "나머지 그대로 두기" 대상.
+  const leftoverDreams = useMemo(
+    () => rows.filter((r) => r.dream && r.review && recommendationOf(r) === null),
+    [rows],
+  );
+  const [bulk, setBulk] = useState<BulkState>({ phase: "idle" });
   const applyRecommended = useCallback(async () => {
     const recs = recommended.map((x) => x.rec);
     const dreams = recs.flatMap((r) => (r.dream ? [r.dream] : []));
@@ -423,6 +427,24 @@ export function ReviewView({
     setBulk({ phase: "done", ok, failed });
     notifyReviewsChanged();
   }, [recommended]);
+  // "나머지 그대로 두기" — 파일은 안 바꾸고 다시 묻지 않게만 기억한다 (항목마다 "그대로 두기" 와 같음).
+  const keepLeftovers = useCallback(async () => {
+    const list = leftoverDreams.flatMap((r) => (r.review ? [r.review.id] : []));
+    let ok = 0;
+    let failed = 0;
+    setBulk({ phase: "running", done: 0, total: list.length });
+    for (const [i, id] of list.entries()) {
+      try {
+        await ipc.dreamApply(id, { choice: "keep" });
+        ok += 1;
+      } catch {
+        failed += 1;
+      }
+      setBulk({ phase: "running", done: i + 1, total: list.length });
+    }
+    setBulk({ phase: "done", ok, failed, kept: true });
+    notifyReviewsChanged();
+  }, [leftoverDreams]);
   // 검토함은 20건까지만 올라온다 — 다 처리하면 다음 정리 거리를 바로 찾는다.
   const findMore = useCallback(async () => {
     setBulk({ phase: "finding" });
@@ -550,14 +572,17 @@ export function ReviewView({
 
       <div className="flex-1 min-h-0 overflow-auto">
         <div className="mx-auto max-w-[1040px] px-6 py-6">
-          {(recommended.length > 0 || bulk.phase !== "idle") && (
+          {(recommended.length > 0 || leftoverDreams.length > 0 || bulk.phase !== "idle") && (
             <RecommendBanner
               items={recommended.map((x) => x.rec)}
               leftover={rows.length - recommended.length}
+              leftoverDreams={leftoverDreams.length}
               state={bulk}
               onAsk={() => setBulk({ phase: "confirm" })}
+              onAskKeep={() => setBulk({ phase: "confirm-keep" })}
               onCancel={() => setBulk({ phase: "idle" })}
               onApply={applyRecommended}
+              onKeep={keepLeftovers}
               onFindMore={findMore}
               onDismissResult={() => setBulk({ phase: "idle" })}
             />
@@ -1070,27 +1095,37 @@ function dreamRowOf(it: ReviewItem): Row | null {
   return { ...base, approveLabel, choices };
 }
 
+type BulkState =
+  | { phase: "idle" }
+  | { phase: "confirm" }
+  | { phase: "confirm-keep" }
+  | { phase: "running"; done: number; total: number }
+  | { phase: "done"; ok: number; failed: number; kept?: boolean }
+  | { phase: "finding" };
+
 function RecommendBanner({
   items,
   leftover,
+  leftoverDreams,
   state,
   onAsk,
+  onAskKeep,
   onCancel,
   onApply,
+  onKeep,
   onFindMore,
   onDismissResult,
 }: {
   items: Recommendation[];
   leftover: number;
-  state:
-    | { phase: "idle" }
-    | { phase: "confirm" }
-    | { phase: "running"; done: number; total: number }
-    | { phase: "done"; ok: number; failed: number }
-    | { phase: "finding" };
+  /** 추천이 없는 정리 항목 수 — "나머지 그대로 두기" 대상. */
+  leftoverDreams: number;
+  state: BulkState;
   onAsk: () => void;
+  onAskKeep: () => void;
   onCancel: () => void;
   onApply: () => void;
+  onKeep: () => void;
   onFindMore: () => void;
   onDismissResult: () => void;
 }) {
@@ -1107,10 +1142,13 @@ function RecommendBanner({
       ) : state.phase === "done" ? (
         <div className="flex items-center justify-between gap-4">
           <div className="text-[14px] text-ink">
-            추천대로 {state.ok}건을 적용했어요.
+            {state.kept ? `${state.ok}건을 그대로 두었어요. 다시 묻지 않아요.` : `추천대로 ${state.ok}건을 적용했어요.`}
             {state.failed > 0 && <span className="ml-1 text-mute">{state.failed}건은 이미 바뀌어 건너뛰었어요.</span>}
             <div className="mt-0.5 text-caption-md text-mute">
-              정리 항목은 커밋 하나로 묶여 한 번에 되돌릴 수 있어요. 검토함에는 20건씩 올라오니, 더 정리하려면 다음 정리 거리를 찾으세요.
+              {state.kept
+                ? "파일은 바꾸지 않았어요. "
+                : "정리 항목은 커밋 하나로 묶여 한 번에 되돌릴 수 있어요. "}
+              검토함에는 20건씩 올라오니, 더 정리하려면 다음 정리 거리를 찾으세요.
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-3">
@@ -1130,37 +1168,58 @@ function RecommendBanner({
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-[15px] font-medium text-ink">
               <Sparkles size={15} className="text-mute" />
-              추천대로 {items.length}건을 한 번에 정리할 수 있어요
+              {state.phase === "confirm-keep"
+                ? `추천이 없는 정리 ${leftoverDreams}건을 그대로 둘까요?`
+                : items.length > 0
+                  ? `추천대로 ${items.length}건을 한 번에 정리할 수 있어요`
+                  : `추천할 수 있는 정리가 없어요`}
             </div>
             <div className="mt-1 text-caption-md text-mute">
-              {parts.join(" · ")}
-              {leftover > 0 && ` — 판단이 필요한 ${leftover}건(오래된 문서·애매한 링크 등)은 그대로 남겨요.`}
+              {state.phase === "confirm-keep"
+                ? "파일은 하나도 바꾸지 않고, 이 항목들은 다시 묻지 않아요. 비슷한 문서를 못 찾은 깨진 링크처럼 단비가 고칠 곳을 고를 수 없는 것들이에요."
+                : (
+                  <>
+                    {parts.join(" · ")}
+                    {leftover > 0 && `${parts.length > 0 ? " — " : ""}판단이 필요한 ${leftover}건(비슷한 문서가 없는 링크·애매한 링크 등)은 남겨요.`}
+                  </>
+                )}
             </div>
           </div>
           {state.phase === "running" ? (
             <div className="shrink-0 text-[13px] tabular-nums text-body">
               적용 중 {state.done}/{state.total}
             </div>
-          ) : state.phase === "confirm" ? (
+          ) : state.phase === "confirm" || state.phase === "confirm-keep" ? (
             <div className="flex shrink-0 items-center gap-2">
               <button onClick={onCancel} className="h-10 px-3 text-[13px] text-mute hover:text-on-dark">
                 취소
               </button>
               <button
-                onClick={onApply}
+                onClick={state.phase === "confirm" ? onApply : onKeep}
                 className="h-10 rounded-md bg-primary px-5 text-[14px] font-medium text-on-primary transition-colors hover:bg-primary-pressed"
               >
-                {items.length}건 적용하기
+                {state.phase === "confirm" ? `${items.length}건 적용하기` : `${leftoverDreams}건 그대로 두기`}
               </button>
             </div>
           ) : (
-            <button
-              onClick={onAsk}
-              disabled={items.length === 0}
-              className="h-10 shrink-0 rounded-md bg-primary px-5 text-[14px] font-medium text-on-primary transition-colors hover:bg-primary-pressed disabled:opacity-40"
-            >
-              추천대로 적용
-            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              {leftoverDreams > 0 && (
+                <button
+                  onClick={onAskKeep}
+                  className="h-10 rounded-md border border-hairline bg-surface-card px-4 text-[13px] text-ink transition-colors hover:bg-surface"
+                >
+                  나머지 {leftoverDreams}건 그대로 두기
+                </button>
+              )}
+              {items.length > 0 && (
+                <button
+                  onClick={onAsk}
+                  className="h-10 rounded-md bg-primary px-5 text-[14px] font-medium text-on-primary transition-colors hover:bg-primary-pressed"
+                >
+                  추천대로 적용
+                </button>
+              )}
+            </div>
           )}
         </div>
       )}

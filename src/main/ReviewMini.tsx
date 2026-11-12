@@ -21,11 +21,12 @@ export function ReviewMini({
   /** 호스트의 요약 한 줄("검토 대기 N")용 — 같은 큐를 두 번 받지 않게. */
   onCount?: (n: number) => void;
 }) {
-  const { rows, loading, initial, pendingTotal, actions } = useReviewRows(project);
+  const { rows, loading, initial, pendingTotal, actionable, actions } = useReviewRows(project);
+  // "검토 대기 N" 은 사이드바 숫자와 같은 기준(손이 필요한 것만).
   useEffect(() => {
-    onCount?.(pendingTotal);
+    onCount?.(actionable);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingTotal]);
+  }, [actionable]);
   const top = rows.slice(0, max);
   const more = pendingTotal - top.length;
 
