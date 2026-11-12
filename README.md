@@ -13,7 +13,7 @@
 
 <p align="center">
   <a href="https://github.com/dean-studio/danbi/releases/latest">
-    <img src="https://img.shields.io/badge/%E2%AC%87%20%EB%8B%A8%EB%B9%84%20macOS%20%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-0.12.1-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="단비 macOS 다운로드 0.12.1" />
+    <img src="https://img.shields.io/badge/%E2%AC%87%20%EB%8B%A8%EB%B9%84%20macOS%20%EB%8B%A4%EC%9A%B4%EB%A1%9C%EB%93%9C-0.12.2-2563eb?style=for-the-badge&logo=apple&logoColor=white" alt="단비 macOS 다운로드 0.12.2" />
   </a>
 </p>
 
@@ -432,6 +432,7 @@ AI 호출은 모두 사용자가 직접 눌렀을 때만 일어납니다. 백그
 
 ## 최근 업데이트
 
+- **v0.12.2** — 검토함 숫자가 줄지 않던 문제를 고쳤습니다. 깊은 폴더의 문서를 없는 문서로 잘못 올리던 것과 같은 깨진 링크가 두 번 쌓이던 것을 없앴고, "나머지 그대로 두기" 로 판단이 필요한 정리 항목을 한 번에 닫을 수 있습니다.
 - **v0.12.1** — 기록 재촉이 한 턴 늦게(9번째 질문에) 나오던 문제를 고쳤습니다. 이제 8번째 질문에 나옵니다.
 - **v0.12.0** — 약속 · 출처 · 기록 재촉. 프로젝트마다 `약속.md` 한 장(사용자 · 지적받은 것 · 약속)을 세션 시작 브리핑 맨 앞에 넣고, 기록에 사람 말인지 AI 판단인지 출처를 남기며, 기록 없이 길어진 세션엔 한 줄로 기록을 권합니다.
 - **v0.11.0** — 쉬는 시간 정리(dreaming). 깨진 링크·daily 에 묻힌 결정·기한 지난 문서를 단비가 찾아 두고, 확실한 링크는 바로 고칩니다. 에이전트는 `danbi_tidy` 로 정리를 돕고, 사람은 검토함의 "추천대로 적용" 한 번으로 끝냅니다. 기록이 불어나는 프로젝트도 알려 줍니다.
