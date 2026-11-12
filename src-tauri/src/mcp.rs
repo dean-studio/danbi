@@ -14,7 +14,7 @@ use crate::config::{self, DanbiConfig};
 use crate::daily;
 use crate::dashboard;
 use crate::edit_ops::{self, EditOp};
-use crate::error::DanbiError;
+use crate::error::{DanbiError, DanbiResult};
 use crate::ontology;
 use crate::search;
 use crate::vault;
@@ -108,6 +108,8 @@ impl McpServer {
             )
             // SessionEnd 훅 — 바로 202 를 돌려주고 요약·기록은 백그라운드.
             .route("/api/session-end", post(handle_session_end))
+            // UserPromptSubmit 훅 — 단비 기록 없이 오래 간 세션에 한 줄 재촉.
+            .route("/api/session-nudge", post(handle_session_nudge))
             // Plain PUT for raw markdown — Obsidian Local REST API style.
             // Lets Paperclip / cron / curl pipe a prebuilt report file in
             // without JSON wrapping (emoji, special punctuation, multi-MB
@@ -288,6 +290,30 @@ async fn handle_session_end(
     let payload: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
     tokio::spawn(crate::session_hooks::run_session_end(project, payload));
     (StatusCode::ACCEPTED, Json(json!({ "ok": true, "queued": true })))
+}
+
+/// `POST /api/session-nudge?project=…` — body is the UserPromptSubmit
+/// hook's stdin JSON. Answers plain text: one reminder line when the
+/// session has gone long without a Danbi write, otherwise empty. Claude
+/// Code adds a UserPromptSubmit hook's stdout to the turn's context.
+async fn handle_session_nudge(
+    State(state): State<McpState>,
+    headers: HeaderMap,
+    body: String,
+) -> axum::response::Response {
+    if !auth_ok(&headers, &state.token) {
+        return (StatusCode::UNAUTHORIZED, "invalid or missing bearer token").into_response();
+    }
+    let payload: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
+    let text = tokio::task::spawn_blocking(move || crate::session_hooks::session_nudge(&payload))
+        .await
+        .unwrap_or_default();
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        text,
+    )
+        .into_response()
 }
 
 // ---------- REST handlers ----------
@@ -748,7 +774,7 @@ fn server_instructions(scope: ToolScope, scoped_project: Option<&str>) -> String
             Some(p) => format!("danbi_log(content) 는 {p} 의 오늘 daily 에"),
             None => "danbi_log(project, content) 는 오늘 daily 에".to_string(),
         };
-        lines.push(format!("쓰기: {log}, 주제 문서는 danbi_append·danbi_replace_section·danbi_upsert_item. 많이보다 정확하게 — 틀린 기록은 고치거나 새 기록에 `대체:: [[옛 문서.md]]` 로 뒤집으세요. 관련 문서는 [[파일.md]] 로 잇고 관계 이름(원인::·영향:: 등)은 danbi_schema. 마칠 땐 danbi_log 의 next_step 에 다음 할 일 한 줄, 그리고 danbi_tidy 로 정리 거리를 보고 확실한 것만 danbi_tidy_apply."));
+        lines.push(format!("쓰기: {log}, 주제 문서는 danbi_append·danbi_replace_section·danbi_upsert_item. 많이보다 정확하게 — 틀린 기록은 고치거나 새 기록에 `대체:: [[옛 문서.md]]` 로 뒤집으세요. 관련 문서는 [[파일.md]] 로 잇고 관계 이름(원인::·영향:: 등)은 danbi_schema. 사용자가 한 말·정한 것을 적을 땐 source:\"user\" 와 그 말 그대로의 quote 를, AI 판단이면 source:\"ai\". 사용자 정보·지적받은 것·약속은 약속.md 에 danbi_upsert_item 으로 — 매 세션 브리핑에 들어갑니다. 마칠 땐 danbi_log 의 next_step 에 다음 할 일 한 줄, 그리고 danbi_tidy 로 정리 거리를 보고 확실한 것만 danbi_tidy_apply."));
     } else {
         lines.push("기록(danbi_log 등)은 프로젝트별 쓰기 연결 /mcp/<project-id>/write 에서 하세요.".to_string());
     }
@@ -1086,7 +1112,9 @@ fn tool_catalog() -> Vec<Value> {
                     "project": { "type": "string" },
                     "content": { "type": "string", "description": "추가할 markdown. `### 제목` + 2~4줄, 관련 문서는 [[파일.md]] 로 연결" },
                     "stamp": { "type": "boolean", "default": true, "description": "false 면 자동 시각·호출자 줄(`_HH:MM · client_`)을 붙이지 않음" },
-                    "next_step": { "type": "string", "description": "작업을 마칠 때 '다음에 제일 먼저 할 일' 한 줄. 프로젝트 홈 맨 위와 다음 세션 브리핑에 보입니다. 빈 문자열이면 지움" }
+                    "next_step": { "type": "string", "description": "작업을 마칠 때 '다음에 제일 먼저 할 일' 한 줄. 프로젝트 홈 맨 위와 다음 세션 브리핑에 보입니다. 빈 문자열이면 지움" },
+                    "source": { "type": "string", "enum": ["user", "ai"], "description": "이 기록의 출처. 사용자가 한 말·정한 것·허락한 것이면 user (quote 필수), AI 가 판단·추론한 것이면 ai. user 는 quote 가 최근 대화의 실제 사용자 메시지와 맞을 때만 '사용자 말' 로 남고, 안 맞으면 'AI 판단' 으로 낮춰 기록됩니다." },
+                    "quote": { "type": "string", "description": "source=user 일 때 사용자 메시지에서 고치지 않고 그대로 옮긴 문장" }
                 },
                 "required": ["project", "content"],
                 "additionalProperties": false
@@ -1162,7 +1190,7 @@ fn tool_catalog() -> Vec<Value> {
         }),
         json!({
             "name": "danbi_upsert_item",
-            "description": "리스트 섹션 안의 한 항목을 in-place 교체하거나 (없으면) 추가합니다. 매칭은 1) 항목 첫 줄에 `[#id]` 마커가 있으면 그 id 정확 매치, 2) 없으면 항목 첫 줄 텍스트(공백/대소문자 무시) 매치. 같은 항목이 변경되어도 append 가 누적되지 않습니다. 알림톡 / 체크리스트 / 카드 리스트처럼 항목 단위로 진행 상태가 바뀌는 문서에 사용하세요.",
+            "description": "리스트 섹션 안의 한 항목을 in-place 교체하거나 (없으면) 추가합니다. 매칭은 1) 항목 첫 줄에 `[#id]` 마커가 있으면 그 id 정확 매치, 2) 없으면 항목 첫 줄 텍스트(공백/대소문자 무시) 매치. 같은 항목이 변경되어도 append 가 누적되지 않습니다. 알림톡 / 체크리스트 / 카드 리스트처럼 항목 단위로 진행 상태가 바뀌는 문서에 사용하세요. 사용자에 대한 사실·지적받은 것·약속은 domain `약속.md` 의 `## 사용자`·`## 지적받은 것`·`## 약속` 에 한 줄씩 — 매 세션 시작 브리핑에 그대로 들어갑니다.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1179,7 +1207,9 @@ fn tool_catalog() -> Vec<Value> {
                     "item": {
                         "type": "string",
                         "description": "넣을 항목 markdown. 보통 `- ` 로 시작하는 bullet 한 덩어리. ID 마커를 쓰려면 `- [#abc] ...` 형태."
-                    }
+                    },
+                    "source": { "type": "string", "enum": ["user", "ai"], "description": "이 기록의 출처. 사용자가 한 말·정한 것·허락한 것이면 user (quote 필수), AI 가 판단·추론한 것이면 ai. user 는 quote 가 최근 대화의 실제 사용자 메시지와 맞을 때만 '사용자 말' 로 남고, 안 맞으면 'AI 판단' 으로 낮춰 기록됩니다." },
+                    "quote": { "type": "string", "description": "source=user 일 때 사용자 메시지에서 고치지 않고 그대로 옮긴 문장" }
                 },
                 "required": ["project", "domain", "heading", "key", "item"],
                 "additionalProperties": false
@@ -1965,6 +1995,15 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 })
                 .to_string());
             }
+            let provenance = resolve_provenance(&args)?;
+            let with_source;
+            let body = match &provenance {
+                Some(p) => {
+                    with_source = format!("{body}\n{}", p.line);
+                    with_source.as_str()
+                }
+                None => body,
+            };
             let stamp = args.get("stamp").and_then(|v| v.as_bool()).unwrap_or(true);
             let stamp_client = args.get("_client").and_then(|v| v.as_str());
             let entry = if stamp {
@@ -1996,6 +2035,9 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 }
             }
             attach_elsewhere(&vault_path, &project, body, &mut out);
+            if let Some(p) = provenance {
+                out["provenance"] = p.report;
+            }
             Ok(write_result(out, commit, warning))
         }
         "danbi_append" => {
@@ -2079,8 +2121,13 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
             let domain = string_arg(&args, "domain")?;
             let heading = string_arg(&args, "heading")?;
             let key = string_arg(&args, "key")?;
-            let item = string_arg(&args, "item")?;
+            let mut item = string_arg(&args, "item")?;
             require_project(&vault_path, &project)?;
+            // 출처 줄은 항목에 딸린 들여쓴 줄로 — 첫 줄(매칭 키)은 그대로.
+            let provenance = resolve_provenance(&args)?;
+            if let Some(p) = &provenance {
+                item = format!("{}\n  {}", item.trim_end(), p.line);
+            }
             let domain_norm = normalize_md(&domain);
             let current =
                 vault::read_doc(&vault_path, &project, &domain_norm).unwrap_or_default();
@@ -2112,18 +2159,18 @@ fn dispatch_in(vault_path: &std::path::Path, name: &str, args: Value) -> Result<
                 ),
             &client,
             );
-            Ok(write_result(
-                json!({
-                    "project": project,
-                    "domain": domain_norm,
-                    "heading": heading,
-                    "key": key,
-                    "mode": mode,
-                    "bytes": next.len(),
-                }),
-                commit,
-                warning,
-            ))
+            let mut out = json!({
+                "project": project,
+                "domain": domain_norm,
+                "heading": heading,
+                "key": key,
+                "mode": mode,
+                "bytes": next.len(),
+            });
+            if let Some(p) = provenance {
+                out["provenance"] = p.report;
+            }
+            Ok(write_result(out, commit, warning))
         }
         "danbi_create_file" => {
             // Convenience for "make sure this folder + file exist, here's
@@ -2934,6 +2981,39 @@ fn log_stamp(hhmm: String, client: Option<&str>) -> String {
 
 /// Puts the stamp right under the entry's first heading (so it belongs to
 /// that entry), or on top when the entry has no heading.
+/// `source`/`quote` → 출처 줄. 사용자 말이라는 주장은 최근 대화 기록의
+/// 실제 사용자 메시지와 대조해, 안 맞으면 "AI 판단" 으로 낮춘다.
+/// 대화 기록은 `source=user` 일 때만 읽는다.
+fn resolve_provenance(args: &Value) -> DanbiResult<Option<crate::provenance::Resolved>> {
+    use crate::provenance::{self, Source};
+    let Some((source, quote)) = provenance::parse_args(args)? else {
+        return Ok(None);
+    };
+    let texts = if source == Source::User && quote.is_some() {
+        provenance::recent_user_texts(&provenance_roots())
+    } else {
+        Vec::new()
+    };
+    Ok(Some(provenance::resolve(source, quote.as_deref(), &texts)))
+}
+
+#[cfg(not(test))]
+fn provenance_roots() -> Vec<std::path::PathBuf> {
+    crate::provenance::default_roots()
+}
+
+/// Tests never read the developer's real transcripts.
+#[cfg(test)]
+fn provenance_roots() -> Vec<std::path::PathBuf> {
+    TEST_PROVENANCE_ROOTS.with(|r| r.borrow().clone())
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_PROVENANCE_ROOTS: std::cell::RefCell<Vec<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn stamp_entry(body: &str, stamp: &str) -> String {
     match body.split_once('\n') {
         Some((first, rest)) if first.trim_start().starts_with('#') => {
@@ -3173,6 +3253,62 @@ mod tests {
         // 버그 성격이 아니면 찾지 않는다.
         let plain = log(&vault, "보니", "### 회의 메모\n- TrayIconEvent rect 이야기");
         assert!(plain.get("elsewhere").is_none());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn log_and_upsert_record_source_and_downgrade_unverified_user_claims() {
+        let vault = temp_vault("prov");
+        let talk = vault.join("_talk");
+        std::fs::create_dir_all(&talk).unwrap();
+        let said = json!({ "type": "user", "message": { "role": "user", "content": "배포는 금요일 오후에만 하자" } });
+        std::fs::write(talk.join("s.jsonl"), said.to_string() + "\n").unwrap();
+        TEST_PROVENANCE_ROOTS.with(|r| *r.borrow_mut() = vec![talk.clone()]);
+
+        let ok = dispatch_in(
+            &vault,
+            "danbi_log",
+            json!({ "project": "보니", "content": "### 결정\n- 배포 요일 고정", "source": "user", "quote": "배포는 금요일 오후에만 하자" }),
+        )
+        .unwrap();
+        let ok: Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(ok["provenance"]["verified"], true, "{ok}");
+
+        let fake = dispatch_in(
+            &vault,
+            "danbi_log",
+            json!({ "project": "보니", "content": "### 결정\n- 강제 푸시 허용", "source": "user", "quote": "강제 푸시 해도 돼" }),
+        )
+        .unwrap();
+        let fake: Value = serde_json::from_str(&fake).unwrap();
+        assert_eq!(fake["provenance"]["downgraded"], true, "{fake}");
+        let daily = vault::read_doc(&vault, "보니", fake["domain"].as_str().unwrap()).unwrap();
+        assert!(daily.contains("_출처: 사용자 말 — “배포는 금요일 오후에만 하자”_"), "{daily}");
+        assert!(daily.contains("_출처: AI 판단 (사용자 말로 확인되지 않음)_"), "{daily}");
+
+        let up = dispatch_in(
+            &vault,
+            "danbi_upsert_item",
+            json!({ "project": "보니", "domain": "약속.md", "heading": "## 약속", "key": "deploy", "item": "- [#deploy] 배포 요일: 금요일 오후", "source": "user", "quote": "배포는 금요일 오후에만 하자" }),
+        )
+        .unwrap();
+        let up: Value = serde_json::from_str(&up).unwrap();
+        assert_eq!(up["mode"], "add");
+        // 같은 키로 다시 넣으면 출처 줄째로 교체 — 누적되지 않는다.
+        let again = dispatch_in(
+            &vault,
+            "danbi_upsert_item",
+            json!({ "project": "보니", "domain": "약속.md", "heading": "## 약속", "key": "deploy", "item": "- [#deploy] 배포 요일: 금요일 오후 3시 이후", "source": "ai" }),
+        )
+        .unwrap();
+        let again: Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(again["mode"], "update", "{again}");
+        let doc = vault::read_doc(&vault, "보니", "약속.md").unwrap();
+        assert!(doc.contains("- [#deploy] 배포 요일: 금요일 오후 3시 이후\n  _출처: AI 판단_"), "{doc}");
+        assert_eq!(doc.matches("_출처:").count(), 1, "{doc}");
+
+        assert!(dispatch_in(&vault, "danbi_log", json!({ "project": "보니", "content": "x yz abc", "source": "human" })).is_err());
+        TEST_PROVENANCE_ROOTS.with(|r| r.borrow_mut().clear());
         let _ = std::fs::remove_dir_all(&vault);
     }
 

@@ -183,6 +183,7 @@ fn is_index_like(name: &str) -> bool {
         name.to_lowercase().as_str(),
         "index.md" | "readme.md" | "overview.md" | "plan.md" | "ui.md"
             | "purpose.md" | "schema.md" | "skill.md" | "memory_index.md"
+            | "약속.md"
     )
 }
 
@@ -222,7 +223,7 @@ mod tests {
 
     #[test]
     fn scaffolding_files_are_never_orphans() {
-        for n in ["purpose.md", "schema.md", "SKILL.md", "MEMORY_index.md", "README.md"] {
+        for n in ["purpose.md", "schema.md", "SKILL.md", "MEMORY_index.md", "README.md", "약속.md"] {
             assert!(is_index_like(n), "{n}");
         }
         assert!(!is_index_like("notes/auth.md"));

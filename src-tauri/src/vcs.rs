@@ -49,6 +49,17 @@ pub fn is_pre_snapshot(summary: &str) -> bool {
     head.ends_with(" pre") || head.starts_with("pre-")
 }
 
+/// App-seeded scaffolding (`danbi: scaffold · …`) — empty templates laid
+/// into every project at once. Not anyone's activity.
+pub fn is_scaffold_commit(summary: &str) -> bool {
+    summary_head(summary) == "scaffold"
+}
+
+/// Commits that activity counts, update badges and feeds should skip.
+pub fn is_quiet(summary: &str) -> bool {
+    is_pre_snapshot(summary) || is_scaffold_commit(summary)
+}
+
 /// First `·`-separated segment after the `danbi:` prefix — the verb.
 fn summary_head(summary: &str) -> &str {
     let body = summary
@@ -398,7 +409,7 @@ pub fn commits_since(vault: &Path, since: i64) -> DanbiResult<Vec<CommitSummary>
             break;
         }
         let summary = c.summary().unwrap_or("").to_string();
-        if is_pre_snapshot(&summary) {
+        if is_quiet(&summary) {
             continue;
         }
         out.push(CommitSummary {
@@ -448,7 +459,7 @@ pub fn commits_per_project_since(
             break;
         }
         // Pre-edit snapshots would double every write.
-        if is_pre_snapshot(commit.summary().unwrap_or("")) {
+        if is_quiet(commit.summary().unwrap_or("")) {
             continue;
         }
         // Diff against the first parent. Initial commit → diff against
@@ -967,7 +978,7 @@ pub fn activity_feed(
             continue;
         }
         let summary = commit.summary().unwrap_or("").to_string();
-        if is_pre_snapshot(&summary) {
+        if is_quiet(&summary) {
             continue;
         }
         // Scoped walk: the summary names the document for every writer
@@ -1413,6 +1424,9 @@ mod tests {
         }
         assert!(!is_pre_snapshot("danbi: compound · p/a.md · x"));
         assert!(!is_pre_snapshot("danbi: mcp append · p/prepare.md"));
+        assert!(is_quiet("danbi: scaffold · 약속.md 골격 40개 [danbi]"));
+        assert!(is_quiet("danbi: mcp log · p/a.md (pre) [codex]"));
+        assert!(!is_quiet("danbi: mcp upsert_item · p/약속.md · add · x [claude-code]"));
     }
 
     #[test]

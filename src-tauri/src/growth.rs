@@ -442,7 +442,7 @@ fn git_facts(vault: &Path, now: i64) -> Option<GitFacts> {
             break;
         }
         let summary = c.summary().unwrap_or("");
-        if crate::vcs::is_pre_snapshot(summary) {
+        if crate::vcs::is_quiet(summary) {
             continue;
         }
         let Some((project, _)) = crate::vcs::doc_of_summary(summary) else { continue };

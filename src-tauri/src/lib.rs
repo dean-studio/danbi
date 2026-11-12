@@ -32,6 +32,7 @@ mod popover;
 mod preview;
 mod tray_badge;
 mod project_context;
+mod provenance;
 mod project_qa;
 mod reviews;
 mod providers;
@@ -83,6 +84,15 @@ pub fn run() {
                 if let Ok(Some(cfg)) = config::load_config(&default_vault) {
                     if let Some(vp) = cfg.vault_path.as_ref() {
                         let _ = trash::expire_old(std::path::Path::new(vp));
+                        // 기존 프로젝트에 약속.md 골격 — 한 번만, 백그라운드로.
+                        let vp = std::path::PathBuf::from(vp);
+                        std::thread::spawn(move || {
+                            match project_context::backfill_promises(&vp) {
+                                Ok(n) if n > 0 => eprintln!("[promises] 약속.md 골격 {n}개"),
+                                Ok(_) => {}
+                                Err(e) => eprintln!("[promises] {e}"),
+                            }
+                        });
                     }
                     // Usage retention sweep — trim the live usage log to
                     // the configured retention window. Older lines are

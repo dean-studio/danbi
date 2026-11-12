@@ -768,8 +768,9 @@ function HookPanel({ project }: { project: string }) {
     <div className="mt-2 rounded-md border border-hairline bg-surface-elevated p-3">
       <div className="text-[13px] font-medium text-on-dark">Claude Code 세션 훅</div>
       <p className="mt-1 text-[12px] leading-[1.6] text-body">
-        Claude Code 세션을 열 때마다 <span className="text-on-dark">{project}</span> 의 최근
-        문서·daily 노트·할 일을 짧게 넣어줘요. 고른 폴더의{" "}
+        Claude Code 세션을 열 때마다 <span className="text-on-dark">{project}</span> 의{" "}
+        <code>약속.md</code>·최근 문서·daily 노트·할 일을 짧게 넣어줘요. 단비에 기록 없이
+        오래 이어진 세션엔 한 줄로 기록을 권해요. 고른 폴더의{" "}
         <code>.claude/settings.local.json</code> 에만 기록하고 Git 에서는 빼둡니다. 토큰은
         파일에 남기지 않아요.
       </p>

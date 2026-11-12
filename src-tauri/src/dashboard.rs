@@ -299,7 +299,7 @@ fn compute_project_activity_overview(
             if c.ts < from_s {
                 break;
             }
-            if vcs::is_pre_snapshot(&c.summary) {
+            if vcs::is_quiet(&c.summary) {
                 continue;
             }
             // commit summary format: "danbi: <verb> · <project>/<domain>"

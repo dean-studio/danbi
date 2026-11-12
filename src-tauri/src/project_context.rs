@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 
 pub const PURPOSE_FILENAME: &str = "purpose.md";
 pub const SCHEMA_FILENAME: &str = "schema.md";
+/// 사용자 정보·지적받은 것·약속 — 세션 시작 브리핑에 매번 그대로 들어간다.
+pub const PROMISES_FILENAME: &str = "약속.md";
 const MAX_BYTES_PER_FILE: usize = 2048;
 
 /// Snapshot of whatever purpose/schema the project has right now. Empty
@@ -54,6 +56,69 @@ pub fn purpose_path(vault: &Path, project: &str) -> PathBuf {
 
 pub fn schema_path(vault: &Path, project: &str) -> PathBuf {
     project_root(vault, project).join(SCHEMA_FILENAME)
+}
+
+/// `약속.md` 본문을 브리핑용으로: frontmatter·H1·HTML 주석·빈 줄을 빼고
+/// `max_chars` 안에서 줄 단위로 자른다. 파일이 없거나 비면 None.
+pub fn promises_for_brief(vault: &Path, project: &str, max_chars: usize) -> Option<String> {
+    let raw = std::fs::read_to_string(project_root(vault, project).join(PROMISES_FILENAME)).ok()?;
+    let mut lines: Vec<&str> = Vec::new();
+    let mut in_fm = false;
+    let mut in_comment = false;
+    for (i, line) in raw.lines().enumerate() {
+        let t = line.trim();
+        if i == 0 && t == "---" {
+            in_fm = true;
+            continue;
+        }
+        if in_fm {
+            if t == "---" {
+                in_fm = false;
+            }
+            continue;
+        }
+        if in_comment {
+            if t.contains("-->") {
+                in_comment = false;
+            }
+            continue;
+        }
+        if t.starts_with("<!--") {
+            in_comment = !t.contains("-->");
+            continue;
+        }
+        if t.is_empty() || (t.starts_with("# ") && !t.starts_with("## ")) {
+            continue;
+        }
+        lines.push(line.trim_end());
+    }
+    // 항목이 없는 섹션 제목은 뺀다 — 골격만 있는 동안 브리핑은 조용하다.
+    let is_heading = |l: &str| l.trim_start().starts_with('#');
+    let lines: Vec<&str> = lines
+        .iter()
+        .enumerate()
+        .filter(|(i, l)| {
+            !is_heading(l) || lines.get(i + 1).is_some_and(|next| !is_heading(next))
+        })
+        .map(|(_, l)| *l)
+        .collect();
+    if lines.iter().all(|l| is_heading(l)) {
+        return None;
+    }
+    let mut out = String::new();
+    let mut used = 0usize;
+    for line in lines {
+        let n = line.chars().count() + 1;
+        if used + n > max_chars {
+            out.push_str("… (나머지는 약속.md)");
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+        used += n;
+    }
+    let out = out.trim_end().to_string();
+    (!out.is_empty()).then_some(out)
 }
 
 fn read_clipped(path: &Path) -> Option<(String, bool)> {
@@ -193,7 +258,81 @@ pub fn default_schema_template(project: &str) -> String {
 
 /// Writes the default templates if the files don't already exist.
 /// Idempotent — safe to call on every project creation / reopen.
+/// 새 프로젝트에 깔리는 `약속.md` 골격. 안내는 HTML 주석이라 브리핑에
+/// 들어가지 않고, 빈 섹션도 브리핑에서 빠진다.
+pub fn default_promises_template() -> String {
+    "# 약속\n\n\
+<!-- 매 세션 시작 브리핑에 그대로 들어가는 문서예요. 항목이 있는 섹션만 들어가요.\n\
+- 사용자: 대표님에 대한 사실·이 프로젝트에서의 역할\n\
+- 지적받은 것: 에이전트가 틀려서 고쳐 준 것\n\
+- 약속: 하기로/안 하기로 정한 작업 규칙\n\
+한 줄에 하나, 짧게. 줄 앞에 [#id] 를 붙이면 같은 항목을 고칠 때 교체돼요.\n\
+결정은 decisions/, 할 일은 할 일함에. 전체 900자 안쪽. -->\n\n\
+## 사용자\n\n## 지적받은 것\n\n## 약속\n"
+        .to_string()
+}
+
+pub fn promises_path(vault: &Path, project: &str) -> PathBuf {
+    project_root(vault, project).join(PROMISES_FILENAME)
+}
+
+const PROMISES_SEEDED_MARKER: &str = ".danbi/promises-seeded";
+
+/// 기존 프로젝트에 `약속.md` 골격을 한 번 깐다 (없는 곳만). 끝나면 표식을
+/// 남겨 다시 돌지 않으니, 사용자가 지운 파일을 되살리지 않는다. 파일
+/// 수정 시각은 그 프로젝트의 purpose.md 에 맞춰 "최근 바뀐 문서" 를
+/// 어지럽히지 않고, 커밋은 `scaffold` 라 활동·새 변경으로 세지 않는다.
+pub fn backfill_promises(vault: &Path) -> DanbiResult<usize> {
+    let marker = vault.join(PROMISES_SEEDED_MARKER);
+    if marker.exists() {
+        return Ok(0);
+    }
+    let _guard = crate::vcs::write_guard();
+    let mut created = 0usize;
+    if let Ok(entries) = std::fs::read_dir(vault.join(PROJECTS_DIRNAME)) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || !e.path().is_dir() {
+                continue;
+            }
+            let path = promises_path(vault, &name);
+            if path.exists() {
+                continue;
+            }
+            std::fs::write(&path, default_promises_template())?;
+            let anchor = std::fs::metadata(purpose_path(vault, &name))
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            if let Ok(f) = std::fs::File::options().write(true).open(&path) {
+                let _ = f.set_modified(anchor);
+            }
+            created += 1;
+        }
+    }
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&marker, chrono::Local::now().to_rfc3339())?;
+    drop(_guard);
+    if created > 0 {
+        crate::vcs::ensure_repo(vault)?;
+        let _ = crate::vcs::snapshot_as(
+            vault,
+            &format!("danbi: scaffold · 약속.md 골격 {created}개"),
+            crate::vcs::CLIENT_DANBI,
+        );
+    }
+    Ok(created)
+}
+
 pub fn ensure_templates(vault: &Path, project: &str) -> DanbiResult<()> {
+    let k = promises_path(vault, project);
+    if !k.exists() {
+        if let Some(parent) = k.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&k, default_promises_template())?;
+    }
     let p = purpose_path(vault, project);
     if !p.exists() {
         if let Some(parent) = p.parent() {
@@ -209,4 +348,64 @@ pub fn ensure_templates(vault: &Path, project: &str) -> DanbiResult<()> {
         std::fs::write(&s, default_schema_template(project))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_vault(tag: &str) -> PathBuf {
+        let v = std::env::temp_dir().join(format!(
+            "danbi-pc-{tag}-{}-{}",
+            std::process::id(),
+            chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(v.join(PROJECTS_DIRNAME)).unwrap();
+        v
+    }
+
+    #[test]
+    fn skeleton_stays_out_of_the_brief_until_it_has_items() {
+        let vault = temp_vault("skel");
+        std::fs::create_dir_all(vault.join(PROJECTS_DIRNAME).join("알파")).unwrap();
+        ensure_templates(&vault, "알파").unwrap();
+        assert!(promises_path(&vault, "알파").exists());
+        assert_eq!(promises_for_brief(&vault, "알파", 900), None, "empty skeleton is silent");
+
+        let filled = default_promises_template().replace("## 약속\n", "## 약속\n- [#dmg] DMG 는 요청할 때만\n");
+        std::fs::write(promises_path(&vault, "알파"), filled).unwrap();
+        let brief = promises_for_brief(&vault, "알파", 900).unwrap();
+        assert_eq!(brief, "## 약속\n- [#dmg] DMG 는 요청할 때만", "only sections with items, no guide comment");
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn backfill_seeds_missing_files_once_and_keeps_mtime_old() {
+        let vault = temp_vault("backfill");
+        let root = vault.join(PROJECTS_DIRNAME);
+        for p in ["알파", "베타"] {
+            std::fs::create_dir_all(root.join(p)).unwrap();
+        }
+        std::fs::write(root.join("베타").join(PROMISES_FILENAME), "## 약속\n- 있던 것\n").unwrap();
+        std::fs::write(root.join("알파").join(PURPOSE_FILENAME), "# 목적\n").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("알파").join(PURPOSE_FILENAME))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        assert_eq!(backfill_promises(&vault).unwrap(), 1);
+        let seeded = promises_path(&vault, "알파");
+        assert_eq!(std::fs::read_to_string(&seeded).unwrap(), default_promises_template());
+        assert_eq!(std::fs::metadata(&seeded).unwrap().modified().unwrap(), old);
+        assert_eq!(std::fs::read_to_string(promises_path(&vault, "베타")).unwrap(), "## 약속\n- 있던 것\n");
+
+        // 한 번만 — 사용자가 지운 파일을 되살리지 않는다.
+        std::fs::remove_file(&seeded).unwrap();
+        assert_eq!(backfill_promises(&vault).unwrap(), 0);
+        assert!(!seeded.exists());
+        let _ = std::fs::remove_dir_all(&vault);
+    }
 }

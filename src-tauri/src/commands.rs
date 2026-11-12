@@ -4845,8 +4845,8 @@ pub struct ClaudeHooksResult {
 }
 
 /// Install (or refresh) Danbi's Claude Code hooks for one code folder:
-/// SessionStart (brief) always, SessionEnd (auto log) when `session_end`
-/// is on — turning it off on a re-install removes it. The hooks live in `<folder>/.claude/settings.local.json` (local,
+/// SessionStart (brief) and UserPromptSubmit (write nudge) always,
+/// SessionEnd (auto log) when `session_end` is on — turning it off on a re-install removes it. The hooks live in `<folder>/.claude/settings.local.json` (local,
 /// never committed) and runs `~/.danbi/bin/danbi-hook`, which reads the
 /// port and token from Danbi's config at run time — no token is written
 /// into the folder.
@@ -4892,10 +4892,16 @@ pub fn claude_hooks_install(
     let start_cmd = crate::session_hooks::hook_command(&helper, "session-start", &project_id);
     let end_cmd = session_end
         .then(|| crate::session_hooks::hook_command(&helper, "session-end", &project_id));
-    let (merged, replaced) = crate::session_hooks::merge_hook_settings(
+    // 기록 재촉(UserPromptSubmit)은 파일만 읽어 LLM 이 없어도 동작하므로
+    // 브리핑과 함께 늘 설치한다.
+    let nudge_cmd = crate::session_hooks::hook_command(&helper, "prompt-nudge", &project_id);
+    let (merged, replaced) = crate::session_hooks::merge_hook_events(
         &existing,
-        Some(&start_cmd),
-        end_cmd.as_deref(),
+        &[
+            ("SessionStart", Some(start_cmd.as_str())),
+            ("SessionEnd", end_cmd.as_deref()),
+            ("UserPromptSubmit", Some(nudge_cmd.as_str())),
+        ],
     )?;
     std::fs::create_dir_all(&claude_dir)
         .map_err(|e| DanbiError::Other(format!("create .claude: {e}")))?;

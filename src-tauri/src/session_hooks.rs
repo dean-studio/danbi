@@ -17,6 +17,8 @@ const BRIEF_RECENT_DOCS: usize = 8;
 const BRIEF_TODO_SCAN_DOCS: usize = 15;
 const BRIEF_MAX_TODOS: usize = 5;
 const BRIEF_LINE_CHARS: usize = 180;
+/// 약속.md 본문에 쓰는 몫 — 브리핑 앞쪽에 놓여 잘리지 않는다.
+const BRIEF_PROMISE_CHARS: usize = 900;
 
 /// Every Danbi-managed hook command runs this helper, so its file name
 /// doubles as the marker that lets re-install find and replace our own
@@ -60,12 +62,20 @@ pub fn session_brief(vault: &Path, project: Option<&str>, max_chars: usize) -> D
                 };
                 lines.push(format!("다음 한 걸음: {}{from}", next.text));
             }
+            // 약속.md — 사용자 정보·지적받은 것·약속. 매 세션 그대로 들어간다.
+            if let Some(body) =
+                crate::project_context::promises_for_brief(vault, name, BRIEF_PROMISE_CHARS)
+            {
+                lines.push(String::new());
+                lines.push(format!("## 약속 · 매 세션 지킬 것 ({})", crate::project_context::PROMISES_FILENAME));
+                lines.extend(body.lines().map(str::to_string));
+            }
 
             let mut docs = flatten_domains(node);
             docs.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));
             let recent: Vec<&&DomainNode> = docs
                 .iter()
-                .filter(|d| !is_daily(&d.name))
+                .filter(|d| !is_daily(&d.name) && d.name != crate::project_context::PROMISES_FILENAME)
                 .take(BRIEF_RECENT_DOCS)
                 .collect();
             if !recent.is_empty() {
@@ -381,6 +391,32 @@ fn is_danbi_write_call(name: &str, input: &Value) -> bool {
     false
 }
 
+/// What the user actually typed in one Claude Code transcript line of
+/// type `user` — None for sidechain/meta lines and tool results.
+pub(crate) fn typed_user_text(v: &Value) -> Option<String> {
+    let flag = |k: &str| v.get(k).and_then(|b| b.as_bool()).unwrap_or(false);
+    if flag("isSidechain") || flag("isMeta") {
+        return None;
+    }
+    let texts: Vec<&str> = match v.get("message").and_then(|m| m.get("content")) {
+        Some(Value::String(s)) => vec![s.as_str()],
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+            .collect(),
+        _ => Vec::new(),
+    };
+    // Slash-command echoes, local command output and injected reminders
+    // all start with a tag — not typed prompts.
+    let typed: Vec<&str> = texts
+        .into_iter()
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && !t.starts_with('<'))
+        .collect();
+    (!typed.is_empty()).then(|| typed.join("\n"))
+}
+
 /// Reads a Claude Code transcript (JSONL). Unknown or malformed lines
 /// are skipped.
 pub fn digest_transcript(jsonl: &str) -> TranscriptDigest {
@@ -394,27 +430,7 @@ pub fn digest_transcript(jsonl: &str) -> TranscriptDigest {
         let content = v.get("message").and_then(|m| m.get("content"));
         match v.get("type").and_then(|t| t.as_str()) {
             Some("user") => {
-                if sidechain || v.get("isMeta").and_then(|b| b.as_bool()).unwrap_or(false) {
-                    continue;
-                }
-                let texts: Vec<&str> = match content {
-                    Some(Value::String(s)) => vec![s.as_str()],
-                    Some(Value::Array(items)) => items
-                        .iter()
-                        .filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("text"))
-                        .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                // Slash-command echoes, local command output and injected
-                // reminders all start with a tag — not typed prompts.
-                let typed: Vec<&str> = texts
-                    .into_iter()
-                    .map(str::trim)
-                    .filter(|t| !t.is_empty() && !t.starts_with('<'))
-                    .collect();
-                if !typed.is_empty() {
-                    let text = typed.join("\n");
+                if let Some(text) = typed_user_text(&v) {
                     d.user_turns += 1;
                     d.text_chars += text.chars().count();
                     turns.push(("사용자", text));
@@ -623,6 +639,44 @@ async fn session_end_inner(project_hint: &str, payload: &Value) -> DanbiResult<(
     result
 }
 
+// ---------- Mid-session nudge ----------
+
+/// Every this many typed prompts without a Danbi write, the
+/// UserPromptSubmit hook adds one reminder line.
+const NUDGE_EVERY: usize = 8;
+const NUDGE_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+pub const NUDGE_TEXT: &str = "단비: 이 세션에서 아직 단비에 남긴 기록이 없어요. 다음 세션이 알아야 할 결정·원인·진행이 생겼으면 danbi_log 로 남기세요 (없으면 무시).";
+
+/// Whether this prompt should carry the reminder. Only substantial
+/// sessions (some tool use) and only once per `NUDGE_EVERY` prompts.
+pub fn should_nudge(d: &TranscriptDigest) -> bool {
+    !d.wrote_danbi
+        && d.tool_uses >= 3
+        && d.user_turns >= NUDGE_EVERY
+        && d.user_turns % NUDGE_EVERY == 0
+}
+
+/// `POST /api/session-nudge` body = the UserPromptSubmit hook's stdin.
+/// Returns the reminder line, or empty when there is nothing to say.
+/// Reads files only — no LLM, no network.
+pub fn session_nudge(payload: &Value) -> String {
+    let Some(path) = payload
+        .get("transcript_path")
+        .and_then(|p| p.as_str())
+        .and_then(allowed_transcript_path)
+    else {
+        return String::new();
+    };
+    let Ok(body) = read_tail(&path, NUDGE_TAIL_BYTES) else {
+        return String::new();
+    };
+    if should_nudge(&digest_transcript(&body)) {
+        NUDGE_TEXT.to_string()
+    } else {
+        String::new()
+    }
+}
+
 // ---------- Hook installer ----------
 
 /// The helper script. It holds no secret: every run reads the port and
@@ -653,6 +707,9 @@ case "$kind" in
     ;;
   session-end)
     /usr/bin/curl -sf --max-time 2 -o /dev/null -H @<(auth) -H 'Content-Type: application/json' --data-binary @- "$base/api/session-end?project=$project" 2>/dev/null
+    ;;
+  prompt-nudge)
+    /usr/bin/curl -sf --max-time 1 -H @<(auth) -H 'Content-Type: application/json' --data-binary @- "$base/api/session-nudge?project=$project" 2>/dev/null
     ;;
 esac
 exit 0
@@ -687,6 +744,18 @@ pub fn merge_hook_settings(
     session_start: Option<&str>,
     session_end: Option<&str>,
 ) -> DanbiResult<(String, bool)> {
+    merge_hook_events(
+        existing,
+        &[("SessionStart", session_start), ("SessionEnd", session_end)],
+    )
+}
+
+/// Same as `merge_hook_settings` for any set of events: each `(event,
+/// Some(cmd))` gets Danbi's hook, `(event, None)` loses it.
+pub fn merge_hook_events(
+    existing: &str,
+    events: &[(&str, Option<&str>)],
+) -> DanbiResult<(String, bool)> {
     let mut root: Value = if existing.trim().is_empty() {
         json!({})
     } else {
@@ -709,7 +778,7 @@ pub fn merge_hook_settings(
     };
 
     let mut replaced = false;
-    for (event, command) in [("SessionStart", session_start), ("SessionEnd", session_end)] {
+    for &(event, command) in events {
         let mut groups: Vec<Value> = hooks
             .get(event)
             .and_then(|v| v.as_array())
@@ -872,6 +941,75 @@ mod tests {
 
         assert!(session_brief(&vault, Some("없는프로젝트"), 2500).is_err());
         let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn session_brief_puts_promises_up_front() {
+        let vault = temp_vault("promise");
+        let proj = vault.join(vault::PROJECTS_DIRNAME).join("알파");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("plan.md"), "# 계획\n").unwrap();
+        std::fs::write(
+            proj.join("약속.md"),
+            "---\ntype: meta\n---\n# 약속\n<!-- 안내\n여러 줄 -->\n\n## 지적받은 것\n- 커밋에 Claude 서명 넣지 말 것\n\n## 약속\n- DMG 는 요청할 때만\n",
+        )
+        .unwrap();
+        let brief = session_brief(&vault, Some("알파"), DEFAULT_BRIEF_CHARS).unwrap();
+        let promise = brief.find("## 약속 · 매 세션 지킬 것").expect("promise block");
+        let recent = brief.find("## 최근 바뀐 문서").unwrap();
+        assert!(promise < recent, "promises come before the long lists");
+        assert!(brief.contains("- 커밋에 Claude 서명 넣지 말 것"));
+        assert!(brief.contains("## 지적받은 것"));
+        assert!(!brief.contains("type: meta") && !brief.contains("안내"), "frontmatter/comments dropped");
+
+        let long = format!("## 약속\n{}", "- 아주 긴 약속 한 줄입니다\n".repeat(200));
+        std::fs::write(proj.join("약속.md"), long).unwrap();
+        let brief = session_brief(&vault, Some("알파"), DEFAULT_BRIEF_CHARS).unwrap();
+        assert!(brief.contains("나머지는 약속.md"));
+        assert!(brief.chars().count() <= DEFAULT_BRIEF_CHARS);
+        let _ = std::fs::remove_dir_all(&vault);
+    }
+
+    #[test]
+    fn nudge_only_long_sessions_without_danbi_writes() {
+        let tool = |name: &str| assistant(json!([{ "type": "tool_use", "name": name, "input": {} }]));
+        let mut lines = vec![tool("Read"), tool("Edit"), tool("Bash")];
+        for i in 0..7 {
+            lines.push(user(&format!("질문 {i}")));
+        }
+        let at7 = digest_transcript(&lines.join("\n"));
+        assert!(!should_nudge(&at7), "not yet");
+        lines.push(user("질문 8"));
+        let at8 = digest_transcript(&lines.join("\n"));
+        assert!(should_nudge(&at8));
+        lines.push(user("질문 9"));
+        assert!(!should_nudge(&digest_transcript(&lines.join("\n"))), "once per 8 prompts");
+
+        let mut wrote = lines[..lines.len() - 1].to_vec();
+        wrote.push(tool("mcp__danbi__danbi_log"));
+        assert!(!should_nudge(&digest_transcript(&wrote.join("\n"))));
+        assert_eq!(session_nudge(&json!({ "transcript_path": "/etc/passwd" })), "");
+    }
+
+    #[test]
+    fn merge_events_installs_and_removes_prompt_nudge() {
+        let nudge = "\"/Users/x/.danbi/bin/danbi-hook\" prompt-nudge abc";
+        let (on, _) = merge_hook_events(
+            "",
+            &[("SessionStart", Some(START)), ("SessionEnd", None), ("UserPromptSubmit", Some(nudge))],
+        )
+        .unwrap();
+        let v: Value = serde_json::from_str(&on).unwrap();
+        assert_eq!(v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"], nudge);
+        let (again, replaced) = merge_hook_events(
+            &on,
+            &[("SessionStart", Some(START)), ("SessionEnd", None), ("UserPromptSubmit", Some(nudge))],
+        )
+        .unwrap();
+        assert!(replaced);
+        let v: Value = serde_json::from_str(&again).unwrap();
+        assert_eq!(v["hooks"]["UserPromptSubmit"].as_array().unwrap().len(), 1, "no stacking");
+        assert!(helper_script(Path::new("/tmp/c.json")).contains("prompt-nudge)"));
     }
 
     fn user(text: &str) -> String {

@@ -12,7 +12,7 @@ export function buildClaudeMdBlock(project: string): string {
   2. 마커가 없으면 파일 맨 끝에 이 블록 전체를 append 한다.
   3. 사용자 고유 섹션 (프로젝트 특화 빌드 명령, 팀 컨벤션 등) 은 마커 밖에 두면 유지된다.
 -->
-<!-- danbi:start v=4 project=${project} -->
+<!-- danbi:start v=5 project=${project} -->
 # ${project} — 단비 vault
 
 단비 vault 는 이 프로젝트의 장기 기억이다. 다음 세션의 나(또는 다른 에이전트)가
@@ -22,6 +22,8 @@ export function buildClaudeMdBlock(project: string): string {
 
 - 시작할 때 \`danbi_briefing\` 으로 직전 맥락을, 답하기 전에 \`danbi_context\` 로 이 프로젝트가 이미 정한 것을 본다.
 - 남길 것은 \`danbi_log\`(오늘 daily) 나 \`danbi_append\`·\`danbi_replace_section\`·\`danbi_upsert_item\`(주제 문서)으로. 많이보다 정확하게 — 틀린 기록은 덧쌓지 말고 고치거나 새 기록에 \`대체:: [[옛 문서.md]]\` 로 뒤집는다.
+- 사용자가 한 말·정한 것을 적을 땐 \`source: "user"\` 와 그 말 그대로의 \`quote\` 를, AI 가 판단한 것이면 \`source: "ai"\` 를 준다. 인용이 실제 대화와 안 맞으면 단비가 "AI 판단" 으로 낮춰 기록한다.
+- 사용자에 대한 사실·지적받은 것·약속은 \`약속.md\` 의 \`## 사용자\`·\`## 지적받은 것\`·\`## 약속\` 에 \`danbi_upsert_item\` 으로 한 줄씩. 매 세션 시작 브리핑에 그대로 들어가니 짧고 정확하게.
 - 관련 문서는 \`[[파일.md]]\`(다른 프로젝트는 \`[[프로젝트/파일.md]]\`)로 잇고, 원인·영향처럼 뜻이 있는 연결은 \`원인:: [[x.md]]\` 처럼 관계 이름을 붙인다. 쓸 수 있는 이름은 \`danbi_schema\`.
 - 일을 마칠 때 \`danbi_tidy\` 로 이 프로젝트의 정리 거리(깨진 링크·daily 에 묻힌 결정·기한 지난 문서)를 보고, 확실한 것만 \`danbi_tidy_apply\` 로 처리한다. 애매하면 두면 사람이 고른다.
 - 마칠 때 \`danbi_log\` 의 \`next_step\` 에 다음에 제일 먼저 할 일 한 줄.
