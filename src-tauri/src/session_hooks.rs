@@ -670,11 +670,35 @@ pub fn session_nudge(payload: &Value) -> String {
     let Ok(body) = read_tail(&path, NUDGE_TAIL_BYTES) else {
         return String::new();
     };
-    if should_nudge(&digest_transcript(&body)) {
+    if nudge_due(&body, payload) {
         NUDGE_TEXT.to_string()
     } else {
         String::new()
     }
+}
+
+/// `should_nudge` for the prompt being submitted. Claude Code writes that
+/// prompt to the transcript only after UserPromptSubmit hooks run, so the
+/// file is one prompt short — count it, unless a user line already carries
+/// the payload's `prompt_id` (in case a future version writes it first).
+/// Matching by id, not text: "ㄱㄱ" twice in a row is two prompts.
+fn nudge_due(transcript: &str, payload: &Value) -> bool {
+    let mut digest = digest_transcript(transcript);
+    let str_of = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(str::trim);
+    let typed = str_of("prompt").is_some_and(|p| !p.is_empty() && !p.starts_with('<'));
+    if typed {
+        let already = str_of("prompt_id").filter(|id| !id.is_empty()).is_some_and(|id| {
+            transcript
+                .lines()
+                .rev()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .any(|v| v.get("promptId").and_then(|p| p.as_str()) == Some(id))
+        });
+        if !already {
+            digest.user_turns += 1;
+        }
+    }
+    should_nudge(&digest)
 }
 
 // ---------- Hook installer ----------
@@ -989,6 +1013,30 @@ mod tests {
         wrote.push(tool("mcp__danbi__danbi_log"));
         assert!(!should_nudge(&digest_transcript(&wrote.join("\n"))));
         assert_eq!(session_nudge(&json!({ "transcript_path": "/etc/passwd" })), "");
+    }
+
+    #[test]
+    fn nudge_counts_the_prompt_being_submitted() {
+        // At UserPromptSubmit time the transcript holds only the earlier
+        // prompts; the 8th prompt arrives in the payload.
+        let tool = |name: &str| assistant(json!([{ "type": "tool_use", "name": name, "input": {} }]));
+        let with_id = |text: &str, id: &str| {
+            json!({ "type": "user", "promptId": id, "message": { "role": "user", "content": text } }).to_string()
+        };
+        let mut lines = vec![tool("Read"), tool("Edit"), tool("Bash")];
+        for i in 1..=7 {
+            lines.push(with_id("ㄱㄱ", &format!("p{i}")));
+        }
+        let body = lines.join("\n");
+        let p8 = json!({ "prompt": "ㄱㄱ", "prompt_id": "p8" });
+        assert!(nudge_due(&body, &p8), "same text as the last prompt is still a new prompt");
+        assert!(!nudge_due(&body, &json!({})), "without the payload prompt it is the 7th");
+        assert!(!nudge_due(&body, &json!({ "prompt": "<command-name>/clear</command-name>" })), "tag-only prompts are not counted");
+        // A transcript that already holds the submitted prompt is not double counted.
+        lines.push(with_id("ㄱㄱ", "p8"));
+        let body = lines.join("\n");
+        assert!(nudge_due(&body, &p8));
+        assert!(!nudge_due(&body, &json!({ "prompt": "ㄱㄱ", "prompt_id": "p9" })), "9th prompt is not a multiple of 8");
     }
 
     #[test]
